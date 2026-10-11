@@ -8,6 +8,7 @@
 class AActor;
 class UMaterialInterface;
 class UStaticMeshComponent;
+class UStaticMesh;
 class UTexture2D;
 
 GRUNGIFY_API DECLARE_LOG_CATEGORY_EXTERN(LogGrungify, Log, All);
@@ -253,6 +254,10 @@ struct GRUNGIFY_API FGrungifyComponentRecord
 	UPROPERTY()
 	TSoftObjectPtr<UStaticMeshComponent> Component;
 
+	/** Refuse destructive restoration after the component's mesh has been replaced. */
+	UPROPERTY()
+	TSoftObjectPtr<UStaticMesh> StaticMesh;
+
 	/** LODData.Num() before the zone touched it. */
 	UPROPERTY()
 	int32 LODDataCount = 0;
@@ -266,6 +271,18 @@ struct GRUNGIFY_API FGrungifyComponentRecord
 	/** The complete default custom primitive data array. */
 	UPROPERTY()
 	TArray<float> CustomData;
+
+	/** The complete live array; it can differ from the saved defaults. */
+	UPROPERTY()
+	TArray<float> LiveCustomData;
+
+	/** Distinguishes new exact backups from records saved by older plugin versions. */
+	UPROPERTY()
+	bool bHasLiveCustomData = false;
+
+	/** Custom data base when this record was captured; restoration never consults current settings. */
+	UPROPERTY()
+	int32 CustomDataBase = INDEX_NONE;
 
 	/** The complete override material array, including its length. */
 	UPROPERTY()
@@ -376,7 +393,7 @@ namespace Grungify
 	/** Custom primitive data slots, relative to UGrungifySettings::CustomPrimitiveDataIndex. */
 	enum ECustomDataOffset : int32
 	{
-		/** 0 = inactive (material untouched), 1 = vertex colour masks, 2 = mask texture. */
+		/** Only signed Grungify modes activate an explicitly owned material instance. */
 		CPD_MaskMode = 0,
 		CPD_SurfaceType = 1,
 		CPD_FeatureScale = 2,
@@ -386,7 +403,11 @@ namespace Grungify
 	};
 
 	/** Bumped whenever the generated content changes; older assets are rebuilt in place. */
-	constexpr int32 ContentVersion = 3;
+	constexpr int32 ContentVersion = 4;
+	constexpr float MaskModeVertex = 501.f;
+	constexpr float MaskModeTexture = 502.f;
 
 	inline FName MaskTextureParameterName() { return FName(TEXT("Grungify Mask Texture")); }
+	inline FName ActiveParameterName() { return FName(TEXT("Grungify Active")); }
+	inline FName SurfaceOverrideParameterName() { return FName(TEXT("Grungify Surface Override")); }
 }

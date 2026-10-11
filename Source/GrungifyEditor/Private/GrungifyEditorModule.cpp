@@ -1,6 +1,7 @@
 #include "Editor.h"
 #include "Editor/UnrealEdEngine.h"
 #include "Engine/Level.h"
+#include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "GrungifyContentBuilder.h"
@@ -14,6 +15,7 @@
 #include "ToolMenus.h"
 #include "UObject/ObjectSaveContext.h"
 #include "UObject/Package.h"
+#include "UObject/UObjectIterator.h"
 #include "UnrealEdGlobals.h"
 #include "Widgets/Notifications/SNotificationList.h"
 
@@ -109,8 +111,9 @@ public:
 		UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FGrungifyEditorModule::RegisterMenus));
 
 		// Create missing assets and migrate outdated ones once the editor is fully up.
-		EngineInitHandle = FCoreDelegates::OnFEngineLoopInitComplete.AddLambda([]()
+		EngineInitHandle = FCoreDelegates::OnFEngineLoopInitComplete.AddLambda([this]()
 		{
+			BindExistingEditorLevels();
 			if (UGrungifySettings::Get()->bAutoBuildContent && FGrungifyContentBuilder::NeedsWork())
 			{
 				RunContentBuild(/*bForce*/ false);
@@ -121,7 +124,11 @@ public:
 		PreSaveHandle = UPackage::PreSavePackageWithContextEvent.AddRaw(this, &FGrungifyEditorModule::OnPreSavePackage);
 
 		// World Partition unloads actors without destroying them; drop a zone's preview when it goes.
-		ActorRemovedHandle = ULevel::OnLoadedActorRemovedFromLevelEvent.AddRaw(this, &FGrungifyEditorModule::OnLoadedActorRemoved);
+		WorldInitializedHandle = FWorldDelegates::OnPostWorldInitialization.AddRaw(this, &FGrungifyEditorModule::OnWorldInitialized);
+		LevelAddedHandle = FWorldDelegates::LevelAddedToWorld.AddRaw(this, &FGrungifyEditorModule::OnLevelAdded);
+		LevelRemovedHandle = FWorldDelegates::PreLevelRemovedFromWorld.AddRaw(this, &FGrungifyEditorModule::OnLevelRemoving);
+		WorldCleanupHandle = FWorldDelegates::OnWorldCleanup.AddRaw(this, &FGrungifyEditorModule::OnWorldCleanup);
+		BindExistingEditorLevels();
 
 		SettingsHandle = GetMutableDefault<UGrungifySettings>()->OnSettingChanged().AddRaw(this, &FGrungifyEditorModule::OnSettingChanged);
 	}
@@ -130,7 +137,18 @@ public:
 	{
 		FCoreDelegates::OnFEngineLoopInitComplete.Remove(EngineInitHandle);
 		UPackage::PreSavePackageWithContextEvent.Remove(PreSaveHandle);
-		ULevel::OnLoadedActorRemovedFromLevelEvent.Remove(ActorRemovedHandle);
+		FWorldDelegates::OnPostWorldInitialization.Remove(WorldInitializedHandle);
+		FWorldDelegates::LevelAddedToWorld.Remove(LevelAddedHandle);
+		FWorldDelegates::PreLevelRemovedFromWorld.Remove(LevelRemovedHandle);
+		FWorldDelegates::OnWorldCleanup.Remove(WorldCleanupHandle);
+		for (const auto& Binding : ActorRemovedHandles)
+		{
+			if (ULevel* Level = Binding.Key.Get())
+			{
+				Level->OnLoadedActorRemovedFromLevelEvent.Remove(Binding.Value);
+			}
+		}
+		ActorRemovedHandles.Empty();
 
 		if (UObjectInitialized())
 		{
@@ -151,9 +169,105 @@ public:
 private:
 	FDelegateHandle EngineInitHandle;
 	FDelegateHandle PreSaveHandle;
-	FDelegateHandle ActorRemovedHandle;
+	FDelegateHandle WorldInitializedHandle;
+	FDelegateHandle LevelAddedHandle;
+	FDelegateHandle LevelRemovedHandle;
+	FDelegateHandle WorldCleanupHandle;
+	TMap<TWeakObjectPtr<ULevel>, FDelegateHandle> ActorRemovedHandles;
 	FDelegateHandle SettingsHandle;
 	bool bDiscarding = false;
+
+	void BindLevel(ULevel* Level, UWorld* World)
+	{
+		if (!Level || !World || World->WorldType != EWorldType::Editor || ActorRemovedHandles.Contains(Level))
+		{
+			return;
+		}
+		ActorRemovedHandles.Add(Level, Level->OnLoadedActorRemovedFromLevelEvent.AddRaw(this, &FGrungifyEditorModule::OnLoadedActorRemoved));
+	}
+
+	void BindWorldLevels(UWorld* World)
+	{
+		if (World && World->WorldType == EWorldType::Editor)
+		{
+			for (ULevel* Level : World->GetLevels())
+			{
+				BindLevel(Level, World);
+			}
+		}
+	}
+
+	void BindExistingEditorLevels()
+	{
+		for (TObjectIterator<UWorld> It; It; ++It)
+		{
+			BindWorldLevels(*It);
+		}
+	}
+
+	void OnWorldInitialized(UWorld* World, const UWorld::InitializationValues InitializationValues)
+	{
+		BindWorldLevels(World);
+	}
+
+	void OnLevelAdded(ULevel* Level, UWorld* World)
+	{
+		BindLevel(Level, World);
+	}
+
+	void UnbindLevel(ULevel* Level)
+	{
+		if (FDelegateHandle* Handle = ActorRemovedHandles.Find(Level))
+		{
+			Level->OnLoadedActorRemovedFromLevelEvent.Remove(*Handle);
+			ActorRemovedHandles.Remove(Level);
+		}
+	}
+
+	void OnLevelRemoving(ULevel* Level, UWorld* World)
+	{
+		if (!World || World->WorldType != EWorldType::Editor)
+		{
+			return;
+		}
+		if (!Level)
+		{
+			OnWorldCleanup(World, false, false);
+			return;
+		}
+		for (AActor* Actor : Level->Actors)
+		{
+			if (Actor)
+			{
+				OnLoadedActorRemoved(*Actor);
+			}
+		}
+		UnbindLevel(Level);
+	}
+
+	void OnWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources)
+	{
+		if (!World || World->WorldType != EWorldType::Editor)
+		{
+			return;
+		}
+		for (TActorIterator<AGrungifyWeatheringZone> It(World); It; ++It)
+		{
+			OnLoadedActorRemoved(**It);
+		}
+		for (auto It = ActorRemovedHandles.CreateIterator(); It; ++It)
+		{
+			ULevel* Level = It.Key().Get();
+			if (!Level || Level->GetWorld() == World)
+			{
+				if (Level)
+				{
+					Level->OnLoadedActorRemovedFromLevelEvent.Remove(It.Value());
+				}
+				It.RemoveCurrent();
+			}
+		}
+	}
 
 	void OnPreSavePackage(UPackage* Package, FObjectPreSaveContext Context)
 	{
@@ -171,17 +285,29 @@ private:
 
 		TGuardValue<bool> Guard(bDiscarding, true);
 		int32 NumDiscarded = 0;
+		int32 NumRetained = 0;
 		for (TActorIterator<AGrungifyWeatheringZone> It(World); It; ++It)
 		{
 			if (It->bPreviewActive)
 			{
 				It->DiscardPreview(TEXT("level saved"));
-				++NumDiscarded;
+				if (It->bPreviewActive)
+				{
+					++NumRetained;
+				}
+				else
+				{
+					++NumDiscarded;
+				}
 			}
 		}
 		if (NumDiscarded > 0)
 		{
 			Notify(FText::Format(LOCTEXT("PreviewDiscarded", "Grungify: discarded {0} preview(s) before saving. Apply to keep weathering, or Preview again."), NumDiscarded));
+		}
+		if (NumRetained > 0)
+		{
+			Notify(FText::Format(LOCTEXT("PreviewRestoreFailed", "Grungify: could not restore {0} preview(s). Their original backups were retained; see the Output Log and repair the changed meshes before trying again."), NumRetained), true);
 		}
 	}
 

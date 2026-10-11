@@ -131,6 +131,9 @@ struct FGrungifyComponentResult
 
 	/** Index of this component's entry in the zone's run report. */
 	int32 ReportIndex = INDEX_NONE;
+
+	/** Auto marks an excluded slot; admitted slots carry their resolved material family. */
+	TArray<EGrungifySurfaceType> MaterialSurfaces;
 };
 
 namespace Grungify
@@ -158,16 +161,18 @@ namespace Grungify
 	/** Snapshot of everything Grungify can change on a component. */
 	void CaptureRecord(UStaticMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
 	/** Puts the component back exactly as captured. Calls Modify() only when bTransactional. */
-	void RestoreRecord(const FGrungifyComponentRecord& Record, bool bTransactional = true);
+	bool RestoreRecord(const FGrungifyComponentRecord& Record, bool bTransactional = true);
 
-	void WriteVertexColors(UStaticMeshComponent* Component, const TArray<TArray<FColor>>& LODColors);
-	/** Writes the Grungify custom data values. Returns false (and writes nothing) if the indices hold someone else's data. */
-	bool CustomDataSlotsFree(const TArray<float>& OriginalData);
-	void WriteCustomData(UStaticMeshComponent* Component, const float (&Values)[CPD_Count]);
+	bool WriteVertexColors(UStaticMeshComponent* Component, const TArray<TArray<FColor>>& LODColors,
+		const TArray<EGrungifySurfaceType>* MaterialSurfaces = nullptr);
+	/** Both saved and live values must leave the complete requested range free. */
+	bool CustomDataSlotsFree(const TArray<float>& OriginalData, const TArray<float>& OriginalLiveData, int32 Base);
+	/** Updates only our fields in each array, preserving unrelated live-only values. */
+	bool WriteCustomData(UStaticMeshComponent* Component, const float (&Values)[CPD_Count]);
 	UTexture2D* CreateMaskTexture(UStaticMeshComponent* Component, int32 Size, const TArray<FColor>& Pixels);
-	/** Puts a material instance carrying the mask texture on every slot, parented to the slot's current material (or to ParentOverride). */
-	void BindMaskTexture(UStaticMeshComponent* Component, UTexture2D* Texture, UMaterialInterface* ParentOverride);
-	void SwapMaterials(UStaticMeshComponent* Component, UMaterialInterface* Material);
+	/** Owns only admitted slots; Texture is null for vertex masks. Excluded material identities are retained. */
+	bool BindOwnedMaterials(UStaticMeshComponent* Component, UTexture2D* Texture,
+		const TArray<EGrungifySurfaceType>& MaterialSurfaces, UMaterialInterface* ParentOverride);
 }
 
 #endif // WITH_EDITOR

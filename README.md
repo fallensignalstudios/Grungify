@@ -13,7 +13,7 @@ Each material slot is classified as **stone**, **metal** or **trim**, so the wea
 
 Everything is driven by a **Seed**, so the same seed and settings always produce the same result.
 
-> **Status:** v0.2 for UE 5.8. v0.1 built in the editor after a one-line include fix (now applied). The v0.2 changes (texture masks, targeting, exact restore, reports, content migration) have not been compiled or run yet, and visual quality and Nanite rendering are still unverified. See *Verification checklist* below.
+> **Status:** v0.2.1 targets UE 5.8. This revision fixes build compatibility, state restoration, overlap ownership and material activation. Native verification results are recorded below; visual quality still needs review on the intended meshes and lighting.
 
 ---
 
@@ -33,12 +33,12 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 
 ### Content versioning
 
-The generated material assets carry a marker of the form `[GrungifyContent v3 cpd=0 uv=1]` (content version, custom data index, mask UV channel). On editor start, and whenever the CPD index or mask UV channel changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Assets from v0.1, including the roughness/metallic mask bug, are rebuilt automatically.
+The generated material assets carry a marker of the form `[GrungifyContent v4 cpd=0 uv=1]` (content version, custom data index, mask UV channel). On editor start, and whenever the CPD index or mask UV channel changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
 
 - **Tools → Grungify → Update Plugin Content** creates missing assets and rebuilds outdated ones.
 - **Rebuild Plugin Content** forces a rebuild of all the generated material assets.
 
-Every build checks each graph connection, compiles the debug and example materials and reports their compile errors, and checks that the packages saved. Results go to the Output Log and `Saved/Grungify/ContentReport.txt`, with a notification if anything failed.
+Every build checks graph connections, channel outputs and ownership gates, compiles the debug and example materials, and checks package saves. Failed validation prevents saving generated packages. Readiness requires a successful build and a `Saved/Grungify/ContentReady.txt` token matching the shader and all five saved packages. An interrupted or partial save remains eligible for repair. Results go to the Output Log and `Saved/Grungify/ContentReport.txt`, with a notification if anything failed.
 
 ## Hook up your materials (once per master material)
 
@@ -52,8 +52,8 @@ The zone writes masks; the material function renders them. In each master materi
                       SurfaceOverride (optional, default -1)
 ```
 
-- **Meshes no zone has touched (or that were cleared) pass through unchanged.** The function only applies wear when the zone has set the mask mode in custom primitive data. Unpainted vertex colours (white) are ignored.
-- **SurfaceOverride**: leave unconnected to use the type the zone detected for the mesh. On a mesh that mixes stone and metal slots, set it per material: `0` stone, `1` metal, `2` trim.
+- **Meshes no zone has touched (or that were cleared) pass through unchanged.** Weathering requires both the zone's signed mask mode and `Grungify Active = 1` on a component-owned material instance. The master material's activation defaults to 0, so unrelated custom primitive data and unpainted white vertex colours cannot activate it.
+- **SurfaceOverride**: leave unconnected to use the zone's per-slot `Grungify Surface Override` parameter. You can connect an explicit material value instead: `0` stone, `1` metal, `2` trim; `-1` uses the component's detected surface.
 - **Normal** is passed through unchanged unless `Grungify Relief Strength` is above 0. When it is, chips read as recessed and dust as slightly raised, layered on top of your normal rather than replacing it. Relief uses finite differences rather than ddx/ddy, so it also works with Nanite.
 - Parameters (group *Grungify*):
   - colours: `Grungify Dust Color`, `Grungify Runoff Color`, `Grungify Trim Chip Color`
@@ -85,7 +85,7 @@ A preview is never saved. Saving the level, deleting the zone, or unloading it (
 
 The mask UV channel must be non-overlapping, which lightmap UVs usually are. Meshes without that channel fall back to vertex colours, and the report says so. For Nanite meshes the texture is baked from the fallback mesh, which shares the UV layout.
 
-The mask texture and material instances live inside the component, so they're saved with the actor and removed by Clear.
+The mask texture and material instances live inside the component, so they're saved with the actor and removed by Clear. Both output modes create owned material instances only on admitted slots; excluded slots retain their materials and inactive shading.
 
 ### Targeting
 
@@ -94,7 +94,7 @@ The mask texture and material instances live inside the component, so they're sa
 | **Include Only Actors** / **Excluded Actors** | Actor-level filters. |
 | **Required Component Tags** | Only components carrying one of these tags. |
 | **Slot Rules** | Per material slot, first match wins. Match by actor, wildcard name (slot, material and its parents, mesh, component, actor label), or exact material. A rule can **exclude** the slot, set its **surface**, give it its own **profile** (e.g. separate ceramic, steel and bronze multipliers), force **rail on or off**, and **gate** it by facing, by height above the floor, or by a painted **gate texture** in any UV channel. |
-| **Overlap Policy** | *Skip Owned* (default) leaves meshes another zone applied to alone and reports them. *Take Over* moves ownership, including the original backup, to this zone on Apply. Meshes another zone is currently previewing are always skipped. |
+| **Overlap Policy** | *Skip Owned* (default) leaves meshes another zone applied to alone and reports them. *Take Over* moves ownership, including the original backup, to this zone on Apply. Preview always skips another applied owner, even with Take Over selected. Meshes another zone is currently previewing are always skipped. |
 
 Example: rail wear without touching a joined bridge deck. Add a rule matching `*Deck*` (or the deck material) with *Exclude* on. Or give it a profile with Handling 0 and a facing gate, if the deck should still collect dust.
 
@@ -150,14 +150,17 @@ Traced floors only count if the mesh is at least *Min Floor Size* (150 cm) acros
 
 - Masks are computed per vertex. Edge convexity comes from the welded mesh topology: how sharply faces bend at a vertex, and whether the neighbouring vertices fall away (convex) or rise up (concave). Floors come from a grid of downward multi-hit traces. Runoff is projected down from each source's footprint.
 - Results go into per-instance **override vertex colours** on each `StaticMeshComponent` (every LOD), the same storage Mesh Paint uses. They're saved with the level and the meshes' own assets aren't modified.
-- **Custom primitive data** holds 5 floats starting at the configured index (default 0): mask mode, surface type, feature scale, seed offset and debug channel. If a mesh already has non-zero values at those indices, the zone leaves that mesh completely untouched and reports a conflict instead of overwriting another system's data.
+- **Custom primitive data** holds 5 floats starting at the configured index (default 0): mask mode (`501` vertex or `502` texture), surface type, feature scale, seed offset and debug channel. If either the saved defaults or live data already has non-zero values at those indices, the zone leaves that mesh untouched and reports a conflict. Writes preserve unrelated live values outside the five owned indices.
 - Before touching a mesh, the zone records everything it might change, and Clear and Cancel Preview put back exactly that:
   - override vertex colours per LOD
   - the mesh-paint cache (painted vertices)
   - the LOD data count
   - the static mesh derived-data key
-  - the complete default custom primitive data array, including its length (an originally empty array comes back empty)
+  - complete default and live custom primitive data arrays, including their distinct lengths (originally empty arrays come back empty)
+  - the capture-time custom data index, so changing settings does not lose the original snapshot
   - the complete override material array, including its length
+
+Backups made before v0.2.1 have no separate live-data snapshot. Restoring one uses its saved defaults for live data and logs this limitation; values absent from that old backup cannot be recovered.
 
 ## Limitations
 
@@ -168,11 +171,21 @@ Traced floors only count if the mesh is at least *Min Floor Size* (150 cm) acros
 - **Movable** meshes are skipped unless *Include Movable* is on.
 - Weathered meshes must stay put: moving a mesh after Apply doesn't move its wear. Re-apply the zone.
 
+## Native verification (UE 5.8.3, 2026-10-11)
+
+- A clean Win64 `BuildPlugin` passed for UnrealEditor Development, UnrealGame Development and UnrealGame Shipping.
+- All six native automation tests passed: five `Grungify.State` cases covering CPD, paint/material restoration, ownership and level removal, plus `Grungify.Content.InPlaceRegeneration`. The regeneration test rebuilds at CPD indices 0 → 12 → 0 and checks exact node counts, connections, parameter indices, compilation, saves and readiness.
+- A disposable native level produced eight reviewed 1280 × 720 captures with fixed exposure. A Nanite-enabled coffer used UV1 texture masks: Preview and Apply visibly weathered its edges/panels, while legacy modes 1/2, Cancel and Clear visually returned the baseline. Raw readable material/CPD state restored exactly; the images are not claimed to be pixel-identical. Ownership transfer, occupied saved/live CPD and five real settings-regeneration checks also passed. The editor exited normally with code 0, and all 3,545 protected production files remained unchanged.
+
+Run the tests in the isolated `HostProject` retained by `BuildPlugin -NoDeleteHostProject`, using `UnrealEditor-Cmd.exe <Package>/HostProject/HostProject.uproject -unattended -RenderOffscreen -ExecCmds="Automation RunTests Grungify" -TestExit="Automation Test Queue Empty"`. The content test refuses to rebuild assets in a production project.
+
+These checks do not establish final environment art quality. Full undo/redo, save/reload, World Partition cell streaming and cooked game execution still need separate verification.
+
 ## Verification checklist
 
 These cases should be checked in-editor on a test level, never on production rooms:
 
-1. **Build:** the plugin compiles. On first start the Output Log shows the content rebuilt to v3 with no errors, and `Saved/Grungify/ContentReport.txt` has no `ERROR` lines.
+1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v4 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
 2. **Channel masks:** in MF_GrungifyWeathering, the Roughness mask is R only and the Metallic mask is G only.
 3. **Exact restore:** on a mesh whose default custom primitive data is `[]`, run Preview → Cancel Preview, and separately Apply → Clear. The data is `[]` again. Repeat on a mesh with painted vertex colours, a mesh with only some material slots overridden, and a mesh whose CPD indices 0–4 are already in use (it should be reported as a conflict and left untouched).
 4. **Undo:** run Apply → Ctrl+Z and Clear → Ctrl+Z. Delete a zone while previewing, then Ctrl+Z.

@@ -30,7 +30,7 @@ class GRUNGIFY_API AGrungifyWeatheringZone : public AActor
 public:
 	AGrungifyWeatheringZone();
 
-	/** Generate and show the result without committing it. Re-run as often as you like. */
+	/** Generate without committing. Other zones' applied meshes are skipped; Take Over happens only on Apply. */
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Grungify")
 	void Preview();
 
@@ -278,7 +278,7 @@ public:
 	/** Puts previewed meshes back without an undo entry. Used before saves and when the zone is unloaded or destroyed. */
 	void DiscardPreview(const TCHAR* Reason);
 
-	/** Hands over the original-state record for a component (overlap take-over). */
+	/** Restores then hands over the original record; failed restoration retains ownership. */
 	bool ReleaseAppliedRecord(const UStaticMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
 #endif
 
@@ -308,14 +308,15 @@ private:
 	bool CanRunInEditorWorld() const;
 	void ForgetRecords();
 	void RefreshPreviewIfLive();
-	void RestorePreview();
+	bool RestorePreview();
+	bool CancelDependentPreviews();
 	void BuildParams(FGrungifyGenerationParams& OutParams) const;
 	void BuildContext(UStaticMeshComponent* Component, TMap<UTexture2D*, TUniquePtr<FGrungifyGateSampler>>& Samplers, FGrungifyComponentContext& OutContext, FGrungifyComponentReport& Report);
 	void GenerateResults(const TCHAR* Operation, TArray<FGrungifyComponentResult>& OutResults, TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers);
 	bool ShouldConsiderActor(const AActor* Actor, const FBox& ZoneBox) const;
-	/** Writes masks, custom data and materials. Returns false if the custom data slots were taken. */
-	bool WriteResult(const FGrungifyComponentResult& Result, EGrungifyPreviewDisplay Display, const TArray<float>& OriginalCustomData) const;
-	const TArray<float>& OriginalCustomDataFor(const UStaticMeshComponent* Component, const TArray<float>& Current) const;
+	/** Writes masks, custom data and materials only when both original CPD arrays leave our slots free. */
+	bool WriteResult(const FGrungifyComponentResult& Result, EGrungifyPreviewDisplay Display, const FGrungifyComponentRecord& OriginalState);
+	const FGrungifyComponentRecord* FindOriginalRecord(const UStaticMeshComponent* Component) const;
 	void FinishReport(double StartSeconds);
 #endif
 };

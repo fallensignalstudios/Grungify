@@ -9,9 +9,11 @@ struct FGrungifyContentReport
 	TArray<FString> Rebuilt;
 	TArray<FString> Errors;
 	TArray<FString> Notes;
+	bool bSaveAttempted = false;
 	bool bSaved = true;
+	bool bReady = false;
 
-	bool HasErrors() const { return Errors.Num() > 0 || !bSaved; }
+	bool HasErrors() const { return Errors.Num() > 0 || !bSaved || !bReady; }
 	FString ToString() const;
 };
 
@@ -19,7 +21,9 @@ struct FGrungifyContentReport
  * Creates and maintains the plugin's assets in /Grungify:
  *   BP_WeatheringZone, MF_GrungifyWeathering, M_GrungifyMaskDebug, M_GrungifyExample, T_GrungifyNoMask.
  * The generated material assets carry a version marker (content version, custom data index, mask UV channel).
- * When it doesn't match, they are rebuilt in place, so every material that already uses MF_GrungifyWeathering
+ * Readiness is published only after graph validation, compilation and saving all generated packages.
+ * A Saved readiness token binds the marker, shader include and saved package bytes. When it doesn't match,
+ * they are rebuilt in place, so every material that already uses MF_GrungifyWeathering
  * picks up fixes and settings changes without relinking.
  */
 struct FGrungifyContentBuilder

@@ -5,7 +5,9 @@
 // them up at the zone's physical feature scale so chips, dust and streaks stay crisp.
 //
 //   Masks.r = edge chips   Masks.g = dust   Masks.b = runoff   Masks.a = handling
-//   MaskMode: 0 = inactive (inputs pass through unchanged), 1 = vertex colour, 2 = mask texture
+//   MaskMode: 501 = vertex colour, 502 = mask texture; every other value is inactive.
+//   Generated graphs multiply this signed CPD value by Grungify Active, a non-CPD scalar
+//   that defaults to 0. Only material instances owned by a zone set it to 1.
 //   Surface:  0 = stone, 1 = metal, 2 = trim
 
 #pragma once
@@ -79,15 +81,20 @@ struct FGrungifyLayers
 	float Handling;
 };
 
-// Unpainted vertex colours read as white, so the mode (from custom primitive data the zone writes)
-// decides whether there are masks at all. Untouched and cleared meshes have mode 0.
+// Keep these exact integers in sync with GrungifyTypes.h. Ordinary user CPD values (including
+// the old 1/2 modes) must never activate wrapped materials, even when vertex colours are white.
+bool GrungifyHasValidMaskMode(float MaskMode)
+{
+	return MaskMode == 501.0 || MaskMode == 502.0;
+}
+
 float4 GrungifySelectMasks(float MaskMode, float4 VertexMasks, float4 TextureMasks)
 {
-	if (MaskMode > 1.5)
+	if (MaskMode == 502.0)
 	{
 		return TextureMasks;
 	}
-	if (MaskMode > 0.5)
+	if (MaskMode == 501.0)
 	{
 		return VertexMasks;
 	}
@@ -136,7 +143,7 @@ FGrungifyResult GrungifyEvaluate(
 	R.Metallic = Metallic;
 
 	// Inactive: the material responds exactly as it would without Grungify.
-	if (MaskMode < 0.5)
+	if (!GrungifyHasValidMaskMode(MaskMode))
 	{
 		return R;
 	}
@@ -218,7 +225,7 @@ float3 GrungifyReliefNormal(
 	float3 WorldPos, float3 WorldNormal, float3 TangentWS, float3 BitangentWS,
 	float FeatureScaleCm, float SeedOffset, float Strength, float4 ChannelStrength)
 {
-	if (MaskMode < 0.5 || Relief <= 0.0)
+	if (!GrungifyHasValidMaskMode(MaskMode) || Relief <= 0.0)
 	{
 		return NormalTS;
 	}

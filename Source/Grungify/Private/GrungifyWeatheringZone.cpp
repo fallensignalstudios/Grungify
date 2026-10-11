@@ -1,17 +1,18 @@
 #include "GrungifyWeatheringZone.h"
 
 #include "Components/ArrowComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "GrungifyZoneComponent.h"
 
 #if WITH_EDITOR
 #include "Components/InstancedStaticMeshComponent.h"
-#include "Components/StaticMeshComponent.h"
 #include "Engine/Level.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "EngineUtils.h"
 #include "GrungifyGenerator.h"
 #include "GrungifySettings.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformTime.h"
 #include "JsonObjectConverter.h"
 #include "Materials/MaterialInterface.h"
@@ -80,7 +81,10 @@ void AGrungifyWeatheringZone::Preview()
 
 	const double Start = FPlatformTime::Seconds();
 	Modify();
-	RestorePreview();
+	if (!RestorePreview())
+	{
+		return;
+	}
 
 	TArray<FGrungifyComponentResult> Results;
 	TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*> TakeOvers;
@@ -90,15 +94,15 @@ void AGrungifyWeatheringZone::Preview()
 	{
 		FGrungifyComponentRecord Record;
 		Grungify::CaptureRecord(Result.Component, Record);
-		const TArray<float>& Original = OriginalCustomDataFor(Result.Component, Record.CustomData);
-		if (WriteResult(Result, PreviewDisplay, Original))
+		const FGrungifyComponentRecord* Original = FindOriginalRecord(Result.Component);
+		if (WriteResult(Result, PreviewDisplay, Original ? *Original : Record))
 		{
 			PreviewRecords.Add(MoveTemp(Record));
 		}
-		else if (LastReport.Components.IsValidIndex(Result.ReportIndex))
+		else if (!LastReport.Components[Result.ReportIndex].bCustomDataConflict && !Grungify::RestoreRecord(Record))
 		{
-			LastReport.Components[Result.ReportIndex].bCustomDataConflict = true;
-			LastReport.Components[Result.ReportIndex].Result = TEXT("skipped");
+			// Keep the rollback snapshot if the failure could not be restored.
+			PreviewRecords.Add(MoveTemp(Record));
 		}
 	}
 
@@ -118,7 +122,10 @@ void AGrungifyWeatheringZone::Apply()
 	const double Start = FPlatformTime::Seconds();
 	const FScopedTransaction Transaction(LOCTEXT("ApplyWeathering", "Grungify: Apply Weathering"));
 	Modify();
-	RestorePreview();
+	if (!RestorePreview() || !CancelDependentPreviews())
+	{
+		return;
+	}
 
 	TArray<FGrungifyComponentResult> Results;
 	TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*> TakeOvers;
@@ -136,28 +143,54 @@ void AGrungifyWeatheringZone::Apply()
 		const bool bStillCovered = Results.ContainsByPredicate([Previous](const FGrungifyComponentResult& Result) { return Result.Component == Previous; });
 		if (!bStillCovered)
 		{
-			Grungify::RestoreRecord(AppliedRecords[Index]);
-			AppliedRecords.RemoveAt(Index);
+			if (Grungify::RestoreRecord(AppliedRecords[Index]))
+			{
+				AppliedRecords.RemoveAt(Index);
+			}
 		}
 	}
 
 	for (const FGrungifyComponentResult& Result : Results)
 	{
+		// Check before restoring an existing owner or transferring its backup. A conflict must touch nothing.
+		const FGrungifyComponentRecord* Original = FindOriginalRecord(Result.Component);
+		const TArray<float>& Defaults = Original ? Original->CustomData : Result.Component->GetDefaultCustomPrimitiveData().Data;
+		const TArray<float>& Live = Original ? (Original->bHasLiveCustomData ? Original->LiveCustomData : Original->CustomData)
+			: Result.Component->GetCustomPrimitiveData().Data;
+		if (!Grungify::CustomDataSlotsFree(Defaults, Live, UGrungifySettings::Get()->CustomPrimitiveDataIndex))
+		{
+			if (LastReport.Components.IsValidIndex(Result.ReportIndex))
+			{
+				LastReport.Components[Result.ReportIndex].bCustomDataConflict = true;
+				LastReport.Components[Result.ReportIndex].Result = TEXT("skipped");
+			}
+			continue;
+		}
 		int32 RecordIndex = AppliedRecords.IndexOfByPredicate([&Result](const FGrungifyComponentRecord& Record) { return Record.Component.Get() == Result.Component; });
 		bool bNewRecord = false;
 
 		if (RecordIndex != INDEX_NONE)
 		{
 			// Start again from the original so nothing from the previous Apply lingers.
-			Grungify::RestoreRecord(AppliedRecords[RecordIndex]);
+			if (!Grungify::RestoreRecord(AppliedRecords[RecordIndex]))
+			{
+				LastReport.Components[Result.ReportIndex].Result = TEXT("failed");
+				LastReport.Components[Result.ReportIndex].Notes += TEXT(" original state could not be restored; backup retained");
+				continue;
+			}
 		}
 		else
 		{
 			FGrungifyComponentRecord Record;
 			AGrungifyWeatheringZone* const* PreviousOwner = TakeOvers.Find(Result.Component);
-			if (PreviousOwner && *PreviousOwner && (*PreviousOwner)->ReleaseAppliedRecord(Result.Component, Record))
+			if (PreviousOwner && *PreviousOwner)
 			{
-				Grungify::RestoreRecord(Record);
+				if (!(*PreviousOwner)->ReleaseAppliedRecord(Result.Component, Record))
+				{
+					LastReport.Components[Result.ReportIndex].Result = TEXT("failed");
+					LastReport.Components[Result.ReportIndex].Notes += TEXT(" previous owner's backup could not be restored; ownership retained");
+					continue;
+				}
 			}
 			else
 			{
@@ -167,16 +200,13 @@ void AGrungifyWeatheringZone::Apply()
 			bNewRecord = true;
 		}
 
-		if (!WriteResult(Result, EGrungifyPreviewDisplay::FinalMaterial, AppliedRecords[RecordIndex].CustomData))
+		if (!WriteResult(Result, EGrungifyPreviewDisplay::FinalMaterial, AppliedRecords[RecordIndex]))
 		{
-			if (bNewRecord)
+			const bool bRolledBack = LastReport.Components[Result.ReportIndex].bCustomDataConflict
+				|| Grungify::RestoreRecord(AppliedRecords[RecordIndex]);
+			if (bNewRecord && bRolledBack)
 			{
 				AppliedRecords.RemoveAt(RecordIndex);
-			}
-			if (LastReport.Components.IsValidIndex(Result.ReportIndex))
-			{
-				LastReport.Components[Result.ReportIndex].bCustomDataConflict = true;
-				LastReport.Components[Result.ReportIndex].Result = TEXT("skipped");
 			}
 		}
 	}
@@ -195,7 +225,10 @@ void AGrungifyWeatheringZone::Clear()
 
 	const FScopedTransaction Transaction(LOCTEXT("ClearWeathering", "Grungify: Clear Weathering"));
 	Modify();
-	RestorePreview();
+	if (!RestorePreview() || !CancelDependentPreviews())
+	{
+		return;
+	}
 
 	int32 NumCleared = 0;
 	for (int32 Index = AppliedRecords.Num() - 1; Index >= 0; --Index)
@@ -203,14 +236,16 @@ void AGrungifyWeatheringZone::Clear()
 		// Meshes that aren't loaded keep their record so a later Clear can still restore them.
 		if (AppliedRecords[Index].Component.Get())
 		{
-			Grungify::RestoreRecord(AppliedRecords[Index]);
-			AppliedRecords.RemoveAt(Index);
-			++NumCleared;
+			if (Grungify::RestoreRecord(AppliedRecords[Index]))
+			{
+				AppliedRecords.RemoveAt(Index);
+				++NumCleared;
+			}
 		}
 	}
 
 	Status = AppliedRecords.Num() > 0
-		? FString::Printf(TEXT("Cleared %d mesh(es). %d are not loaded; load them and Clear again."), NumCleared, AppliedRecords.Num())
+		? FString::Printf(TEXT("Cleared %d mesh(es). %d backups retained (unloaded or restoration failed); see Output Log."), NumCleared, AppliedRecords.Num())
 		: FString::Printf(TEXT("Cleared %d mesh(es)."), NumCleared);
 	UE_LOG(LogGrungify, Log, TEXT("%s: %s"), *GetActorNameOrLabel(), *Status);
 #endif
@@ -225,7 +260,10 @@ void AGrungifyWeatheringZone::CancelPreview()
 	}
 
 	Modify();
-	RestorePreview();
+	if (!RestorePreview())
+	{
+		return;
+	}
 	Status = AppliedRecords.Num() > 0
 		? FString::Printf(TEXT("Preview cancelled. %d mesh(es) applied."), AppliedRecords.Num())
 		: FString(TEXT("Preview cancelled."));
@@ -257,8 +295,11 @@ void AGrungifyWeatheringZone::DryRun()
 	// Flag the custom data conflicts a real run would hit.
 	for (const FGrungifyComponentResult& Result : Results)
 	{
-		const TArray<float>& Original = OriginalCustomDataFor(Result.Component, Result.Component->GetDefaultCustomPrimitiveData().Data);
-		if (!Grungify::CustomDataSlotsFree(Original) && LastReport.Components.IsValidIndex(Result.ReportIndex))
+		const FGrungifyComponentRecord* Original = FindOriginalRecord(Result.Component);
+		const TArray<float>& Defaults = Original ? Original->CustomData : Result.Component->GetDefaultCustomPrimitiveData().Data;
+		const TArray<float>& Live = Original ? (Original->bHasLiveCustomData ? Original->LiveCustomData : Original->CustomData)
+			: Result.Component->GetCustomPrimitiveData().Data;
+		if (!Grungify::CustomDataSlotsFree(Defaults, Live, UGrungifySettings::Get()->CustomPrimitiveDataIndex) && LastReport.Components.IsValidIndex(Result.ReportIndex))
 		{
 			LastReport.Components[Result.ReportIndex].bCustomDataConflict = true;
 			LastReport.Components[Result.ReportIndex].Result = TEXT("skipped");
@@ -410,12 +451,16 @@ void AGrungifyWeatheringZone::DiscardPreview(const TCHAR* Reason)
 
 	for (int32 Index = PreviewRecords.Num() - 1; Index >= 0; --Index)
 	{
-		Grungify::RestoreRecord(PreviewRecords[Index], /*bTransactional*/ false);
+		if (Grungify::RestoreRecord(PreviewRecords[Index], /*bTransactional*/ false))
+		{
+			PreviewRecords.RemoveAt(Index);
+		}
 	}
-	PreviewRecords.Reset();
-	bPreviewActive = false;
+	bPreviewActive = PreviewRecords.Num() > 0;
 
-	Status = FString::Printf(TEXT("Preview discarded (%s). Press Preview to see it again."), Reason);
+	Status = bPreviewActive
+		? FString(TEXT("Preview restoration failed; backups retained. See Output Log."))
+		: FString::Printf(TEXT("Preview discarded (%s). Press Preview to see it again."), Reason);
 	UE_LOG(LogGrungify, Log, TEXT("%s: %s"), *GetActorNameOrLabel(), *Status);
 }
 
@@ -427,6 +472,10 @@ bool AGrungifyWeatheringZone::ReleaseAppliedRecord(const UStaticMeshComponent* C
 		return false;
 	}
 	Modify();
+	if (!Grungify::RestoreRecord(AppliedRecords[Index]))
+	{
+		return false;
+	}
 	OutRecord = MoveTemp(AppliedRecords[Index]);
 	AppliedRecords.RemoveAt(Index);
 	Status = FString::Printf(TEXT("%s was taken over by another zone."), *Component->GetName());
@@ -435,14 +484,48 @@ bool AGrungifyWeatheringZone::ReleaseAppliedRecord(const UStaticMeshComponent* C
 
 // ---------------------------------------------------------------- Internals
 
-void AGrungifyWeatheringZone::RestorePreview()
+bool AGrungifyWeatheringZone::RestorePreview()
 {
 	for (int32 Index = PreviewRecords.Num() - 1; Index >= 0; --Index)
 	{
-		Grungify::RestoreRecord(PreviewRecords[Index]);
+		if (Grungify::RestoreRecord(PreviewRecords[Index]))
+		{
+			PreviewRecords.RemoveAt(Index);
+		}
 	}
-	PreviewRecords.Reset();
-	bPreviewActive = false;
+	bPreviewActive = PreviewRecords.Num() > 0;
+	if (bPreviewActive)
+	{
+		Status = TEXT("Some preview state could not be restored; backups retained. See Output Log.");
+	}
+	return !bPreviewActive;
+}
+
+bool AGrungifyWeatheringZone::CancelDependentPreviews()
+{
+	// Older saved records can contain previews of this zone's applied layer. Retire those snapshots
+	// before changing the owner, so a later Cancel cannot resurrect an owner that has already cleared.
+	for (TActorIterator<AGrungifyWeatheringZone> It(GetWorld()); It; ++It)
+	{
+		AGrungifyWeatheringZone* Other = *It;
+		if (Other == this)
+		{
+			continue;
+		}
+		const bool bDependsOnUs = AppliedRecords.ContainsByPredicate([Other](const FGrungifyComponentRecord& Record)
+			{ return Record.Component.Get() && Other->IsPreviewing(Record.Component.Get()); });
+		if (bDependsOnUs)
+		{
+			Other->CancelPreview();
+			if (AppliedRecords.ContainsByPredicate([Other](const FGrungifyComponentRecord& Record)
+				{ return Record.Component.Get() && Other->IsPreviewing(Record.Component.Get()); }))
+			{
+				Status = TEXT("Another zone's dependent preview could not be restored; owner state retained.");
+				return false;
+			}
+		}
+	}
+	return true;
 }
 
 void AGrungifyWeatheringZone::RefreshRunoffSources()
@@ -669,12 +752,12 @@ bool AGrungifyWeatheringZone::ShouldConsiderActor(const AActor* Actor, const FBo
 	return ActorBox.IsValid && ActorBox.Intersect(ZoneBox);
 }
 
-const TArray<float>& AGrungifyWeatheringZone::OriginalCustomDataFor(const UStaticMeshComponent* Component, const TArray<float>& Current) const
+const FGrungifyComponentRecord* AGrungifyWeatheringZone::FindOriginalRecord(const UStaticMeshComponent* Component) const
 {
 	// Whether the slots are free is decided by the pre-Grungify values, not by values this or another zone wrote.
 	if (const FGrungifyComponentRecord* Own = FindAppliedRecord(Component))
 	{
-		return Own->CustomData;
+		return Own;
 	}
 	if (const UWorld* World = GetWorld())
 	{
@@ -684,12 +767,12 @@ const TArray<float>& AGrungifyWeatheringZone::OriginalCustomDataFor(const UStati
 			{
 				if (const FGrungifyComponentRecord* Other = It->FindAppliedRecord(Component))
 				{
-					return Other->CustomData;
+					return Other;
 				}
 			}
 		}
 	}
-	return Current;
+	return nullptr;
 }
 
 void AGrungifyWeatheringZone::GenerateResults(const TCHAR* Operation, TArray<FGrungifyComponentResult>& OutResults, TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers)
@@ -801,15 +884,18 @@ void AGrungifyWeatheringZone::GenerateResults(const TCHAR* Operation, TArray<FGr
 				Skip(Report, FString::Printf(TEXT("being previewed by %s"), *(*Previewer)->GetActorNameOrLabel()));
 				continue;
 			}
-			if (AGrungifyWeatheringZone* const* Owner = AppliedBy.Find(Component))
+			if (AGrungifyWeatheringZone* const* AppliedOwner = AppliedBy.Find(Component))
 			{
-				Report.PreviousOwner = (*Owner)->GetActorNameOrLabel();
-				if (OverlapPolicy == EGrungifyOverlapPolicy::SkipOwned)
+				Report.PreviousOwner = (*AppliedOwner)->GetActorNameOrLabel();
+				// TakeOver is an Apply operation, never a temporary snapshot of another owner's layer.
+				if (OverlapPolicy == EGrungifyOverlapPolicy::SkipOwned || FCString::Strcmp(Operation, TEXT("Preview")) == 0)
 				{
-					Skip(Report, FString::Printf(TEXT("owned by %s (set Overlap Policy to Take Over)"), *Report.PreviousOwner));
+					Skip(Report, FCString::Strcmp(Operation, TEXT("Preview")) == 0
+						? FString::Printf(TEXT("owned by %s (Preview never takes over; use Take Over and Apply)"), *Report.PreviousOwner)
+						: FString::Printf(TEXT("owned by %s (set Overlap Policy to Take Over)"), *Report.PreviousOwner));
 					continue;
 				}
-				OutTakeOvers.Add(Component, *Owner);
+				OutTakeOvers.Add(Component, *AppliedOwner);
 			}
 
 			FGrungifyComponentContext Context;
@@ -836,6 +922,10 @@ void AGrungifyWeatheringZone::GenerateResults(const TCHAR* Operation, TArray<FGr
 			Report.MeanMasks = Result.MeanMasks;
 			Report.MaxMasks = Result.MaxMasks;
 			Report.bNanite = Result.bNanite;
+			for (const FGrungifySlotInfo& Slot : Context.Slots)
+			{
+				Result.MaterialSurfaces.Add(Slot.bExcluded ? EGrungifySurfaceType::Auto : Slot.Surface);
+			}
 
 			Result.ReportIndex = LastReport.Components.Add(MoveTemp(Report));
 			OutResults.Add(MoveTemp(Result));
@@ -843,14 +933,25 @@ void AGrungifyWeatheringZone::GenerateResults(const TCHAR* Operation, TArray<FGr
 	}
 }
 
-bool AGrungifyWeatheringZone::WriteResult(const FGrungifyComponentResult& Result, EGrungifyPreviewDisplay Display, const TArray<float>& OriginalCustomData) const
+bool AGrungifyWeatheringZone::WriteResult(const FGrungifyComponentResult& Result, EGrungifyPreviewDisplay Display, const FGrungifyComponentRecord& OriginalState)
 {
 	UStaticMeshComponent* Component = Result.Component;
+	FGrungifyComponentReport& Entry = LastReport.Components[Result.ReportIndex];
+	auto Fail = [&Entry](const TCHAR* Reason)
+	{
+		Entry.Result = TEXT("failed");
+		Entry.Notes += FString(TEXT(" ")) + Reason;
+		return false;
+	};
 
 	// Never overwrite custom data another system put on this mesh. Without our slots the material path stays
 	// inactive, so don't write masks either.
-	if (!Grungify::CustomDataSlotsFree(OriginalCustomData))
+	if (!Grungify::CustomDataSlotsFree(OriginalState.CustomData,
+		OriginalState.bHasLiveCustomData ? OriginalState.LiveCustomData : OriginalState.CustomData,
+		UGrungifySettings::Get()->CustomPrimitiveDataIndex))
 	{
+		Entry.bCustomDataConflict = true;
+		Entry.Result = TEXT("skipped");
 		return false;
 	}
 
@@ -864,23 +965,25 @@ bool AGrungifyWeatheringZone::WriteResult(const FGrungifyComponentResult& Result
 		if (!DebugMaterial)
 		{
 			UE_LOG(LogGrungify, Warning, TEXT("Mask debug material not found. Run Tools > Grungify > Rebuild Plugin Content."));
+			return Fail(TEXT("requested debug material is unavailable"));
 		}
 	}
 
 	const bool bTexture = Result.Output == EGrungifyMaskOutput::Texture;
 	if (bTexture)
 	{
-		if (UTexture2D* Texture = Grungify::CreateMaskTexture(Component, Result.TextureSize, Result.TexturePixels))
+		UTexture2D* Texture = Grungify::CreateMaskTexture(Component, Result.TextureSize, Result.TexturePixels);
+		if (!Texture || !Grungify::BindOwnedMaterials(Component, Texture, Result.MaterialSurfaces, DebugMaterial))
 		{
-			Grungify::BindMaskTexture(Component, Texture, DebugMaterial);
+			return Fail(TEXT("texture or admitted material bindings could not be written"));
 		}
 	}
 	else
 	{
-		Grungify::WriteVertexColors(Component, Result.LODColors);
-		if (DebugMaterial)
+		if (!Grungify::WriteVertexColors(Component, Result.LODColors, &Result.MaterialSurfaces)
+			|| !Grungify::BindOwnedMaterials(Component, nullptr, Result.MaterialSurfaces, DebugMaterial))
 		{
-			Grungify::SwapMaterials(Component, DebugMaterial);
+			return Fail(TEXT("vertex masks or admitted material bindings could not be written"));
 		}
 	}
 
@@ -895,13 +998,16 @@ bool AGrungifyWeatheringZone::WriteResult(const FGrungifyComponentResult& Result
 	}
 
 	float CustomData[Grungify::CPD_Count];
-	CustomData[Grungify::CPD_MaskMode] = bTexture ? 2.f : 1.f;
+	CustomData[Grungify::CPD_MaskMode] = bTexture ? Grungify::MaskModeTexture : Grungify::MaskModeVertex;
 	CustomData[Grungify::CPD_SurfaceType] = float(int32(Result.DominantSurface) - 1);
 	CustomData[Grungify::CPD_FeatureScale] = FeatureScaleCm;
 	// Scramble the seed into a stable 0..1000 offset so the shader detail changes with the seed too.
 	CustomData[Grungify::CPD_SeedOffset] = float((uint32(Seed) * 2654435761u) % 100000u) * 0.01f;
 	CustomData[Grungify::CPD_DebugChannel] = DebugChannel;
-	Grungify::WriteCustomData(Component, CustomData);
+	if (!Grungify::WriteCustomData(Component, CustomData))
+	{
+		return Fail(TEXT("custom primitive data arrays could not be written"));
+	}
 
 	Component->MarkRenderStateDirty();
 	return true;
@@ -940,12 +1046,29 @@ void AGrungifyWeatheringZone::FinishReport(double StartSeconds)
 
 	if (bWriteReportFiles)
 	{
-		FString Json;
-		if (FJsonObjectConverter::UStructToJsonObjectString(LastReport, Json))
+		auto ReportFailure = [this](const FString& Message)
 		{
-			const FString File = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Grungify"), TEXT("Reports"),
-				FPaths::MakeValidFileName(FString::Printf(TEXT("%s_%s.json"), *GetActorNameOrLabel(), *LastReport.Operation)));
-			FFileHelper::SaveStringToFile(Json, *File);
+			LastReport.Warnings.Add(Message);
+			Status += TEXT(" Report file was not written; see Last Report.");
+			UE_LOG(LogGrungify, Warning, TEXT("%s: %s"), *GetActorNameOrLabel(), *Message);
+		};
+		const FString Directory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Grungify"), TEXT("Reports"));
+		if (!IFileManager::Get().MakeDirectory(*Directory, true))
+		{
+			ReportFailure(FString::Printf(TEXT("Report directory could not be created: %s"), *Directory));
+			return;
+		}
+		FString Json;
+		if (!FJsonObjectConverter::UStructToJsonObjectString(LastReport, Json))
+		{
+			ReportFailure(TEXT("Report could not be serialized to JSON."));
+			return;
+		}
+		const FString File = FPaths::Combine(Directory,
+			FPaths::MakeValidFileName(FString::Printf(TEXT("%s_%s.json"), *GetActorNameOrLabel(), *LastReport.Operation)));
+		if (!FFileHelper::SaveStringToFile(Json, *File))
+		{
+			ReportFailure(FString::Printf(TEXT("Report could not be saved to %s"), *File));
 		}
 	}
 }
