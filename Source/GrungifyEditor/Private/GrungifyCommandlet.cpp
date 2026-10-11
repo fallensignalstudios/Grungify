@@ -267,6 +267,7 @@ namespace
 			};
 
 			// Zones may live in unloaded cells, so find them through the actor descriptors rather than the loaded actors.
+			// FWorldPartitionActorDescInstance / ForEachActorDescInstance are the UE 5.4+ API (5.3 used FWorldPartitionActorDesc / ForEachActorDesc).
 			TArray<FTarget> Targets;
 			FWorldPartitionHelpers::ForEachActorDescInstance<AGrungifyWeatheringZone>(WorldPartition, [this, &Targets](const FWorldPartitionActorDescInstance* Desc)
 			{
