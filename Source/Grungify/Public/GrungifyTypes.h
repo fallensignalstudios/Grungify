@@ -863,7 +863,7 @@ namespace Grungify
 	};
 
 	/** Bumped whenever the generated content changes; older assets are rebuilt in place. */
-	constexpr int32 ContentVersion = 5;
+	constexpr int32 ContentVersion = 6;
 	constexpr float MaskModeVertex = 501.f;
 	constexpr float MaskModeTexture = 502.f;
 	/** Instanced meshes: masks come from per-instance custom data. */

@@ -46,7 +46,12 @@ bool FGrungifyContentRegenerationTest::RunTest(const FString& Parameters)
 		if (!TestNotNull(TEXT("Generated function"), Function) || !TestNotNull(TEXT("Generated debug material"), Debug)
 			|| !TestNotNull(TEXT("Generated example material"), Example)) { return false; }
 
-		const TArray<int32> Counts{ Function->GetExpressions().Num(), Debug->GetExpressions().Num(), Example->GetExpressions().Num() };
+		UMaterialFunction* SubstrateFunction = LoadObject<UMaterialFunction>(nullptr,
+			TEXT("/Grungify/Materials/MF_GrungifySubstrate.MF_GrungifySubstrate"));
+		if (!TestNotNull(TEXT("Generated Substrate function"), SubstrateFunction)) { return false; }
+
+		const TArray<int32> Counts{ Function->GetExpressions().Num(), Debug->GetExpressions().Num(), Example->GetExpressions().Num(),
+			SubstrateFunction->GetExpressions().Num() };
 		if (OriginalExpressionCounts.Num() == 0) { OriginalExpressionCounts = Counts; }
 		for (int32 Index = 0; Index < Counts.Num(); ++Index)
 		{
@@ -81,6 +86,18 @@ bool FGrungifyContentRegenerationTest::RunTest(const FString& Parameters)
 		};
 		CheckOwnership(Function->GetExpressions());
 		CheckOwnership(Debug->GetExpressions());
+		CheckOwnership(SubstrateFunction->GetExpressions());
+		int32 SubstrateOutputs = 0;
+		for (UMaterialExpression* Expression : SubstrateFunction->GetExpressions())
+		{
+			if (const UMaterialExpressionFunctionOutput* Output = Cast<UMaterialExpressionFunctionOutput>(Expression))
+			{
+				++SubstrateOutputs;
+				TestEqual(TEXT("Substrate function outputs Material"), Output->OutputName, FName(TEXT("Material")));
+				TestNotNull(TEXT("Substrate output is connected"), Output->A.Expression);
+			}
+		}
+		TestEqual(TEXT("Exactly one Substrate function output"), SubstrateOutputs, 1);
 
 		TSet<FName> OutputNames;
 		int32 OutputCount = 0;

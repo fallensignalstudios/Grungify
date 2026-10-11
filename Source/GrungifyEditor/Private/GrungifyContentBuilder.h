@@ -19,7 +19,7 @@ struct FGrungifyContentReport
 
 /**
  * Creates and maintains the plugin's assets in /Grungify:
- *   BP_WeatheringZone, MF_GrungifyWeathering, M_GrungifyMaskDebug, M_GrungifyExample, T_GrungifyNoMask.
+ *   BP_WeatheringZone, MF_GrungifyWeathering, MF_GrungifySubstrate, M_GrungifyMaskDebug, M_GrungifyExample, T_GrungifyNoMask.
  * The generated material assets carry a version marker (content version, custom data index, mask UV channel).
  * Readiness is published only after graph validation, compilation and saving all generated packages.
  * A Saved readiness token binds the marker, shader include and saved package bytes. When it doesn't match,

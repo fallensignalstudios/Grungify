@@ -22,6 +22,7 @@
 #include "Materials/MaterialExpressionMultiply.h"
 #include "Materials/MaterialExpressionPerInstanceCustomData.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
+#include "Materials/MaterialExpressionSubstrate.h"
 #include "Materials/MaterialExpressionTextureCoordinate.h"
 #include "Materials/MaterialExpressionTextureSampleParameter2D.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
@@ -34,6 +35,7 @@
 #include "Misc/Paths.h"
 #include "Misc/SecureHash.h"
 #include "RHIGlobals.h"
+#include "RenderUtils.h"
 #include "UObject/Package.h"
 
 #define LOCTEXT_NAMESPACE "GrungifyContentBuilder"
@@ -68,6 +70,7 @@ namespace
 {
 	const TCHAR* ZoneBlueprintPath = TEXT("/Grungify/BP_WeatheringZone");
 	const TCHAR* FunctionPath = TEXT("/Grungify/Materials/MF_GrungifyWeathering");
+	const TCHAR* SubstrateFunctionPath = TEXT("/Grungify/Materials/MF_GrungifySubstrate");
 	const TCHAR* DebugMaterialPath = TEXT("/Grungify/Materials/M_GrungifyMaskDebug");
 	const TCHAR* ExampleMaterialPath = TEXT("/Grungify/Materials/M_GrungifyExample");
 	const TCHAR* NoMaskTexturePath = TEXT("/Grungify/Materials/T_GrungifyNoMask");
@@ -106,7 +109,7 @@ namespace
 	{
 		Token = CurrentMarker();
 		TArray<FString> Files{ ShaderPath() };
-		for (const TCHAR* Path : { ZoneBlueprintPath, FunctionPath, DebugMaterialPath, ExampleMaterialPath, NoMaskTexturePath })
+		for (const TCHAR* Path : { ZoneBlueprintPath, FunctionPath, SubstrateFunctionPath, DebugMaterialPath, ExampleMaterialPath, NoMaskTexturePath })
 		{
 			Files.Add(FPackageName::LongPackageNameToFilename(Path, FPackageName::GetAssetPackageExtension()));
 		}
@@ -190,7 +193,7 @@ namespace
 		}
 		if (Function->GetExpressions().Num() != 0)
 		{
-			Report.Errors.Add(TEXT("MF_GrungifyWeathering: expression deletion was incomplete; graph was not repopulated"));
+			Report.Errors.Add(FString::Printf(TEXT("%s: expression deletion was incomplete; graph was not repopulated"), *Function->GetName()));
 			return false;
 		}
 		return true;
@@ -275,16 +278,17 @@ namespace
 		TEXT("MossColor.rgb, SootColor.rgb, SaltColor.rgb, ES, CrackStrength);\n");
 
 	UMaterialExpressionCustom* AddWeatheringCustom(UMaterialFunction* Function, FBuildContext& Ctx, const FWeatheringSources& Sources,
-		const TCHAR* Description, ECustomMaterialOutputType OutputType, const FString& Body, int32 X, int32 Y)
+		const TCHAR* Description, ECustomMaterialOutputType OutputType, const FString& Body, int32 X, int32 Y,
+		const TArray<const TCHAR*>& InputNames = WeatheringInputNames)
 	{
 		UMaterialExpressionCustom* Custom = AddToFunction<UMaterialExpressionCustom>(Function, X, Y);
 		Custom->Description = Description;
 		Custom->OutputType = OutputType;
 		Custom->IncludeFilePaths.Add(IncludePath);
 		Custom->Code = FString(CommonCode) + Body;
-		SetCustomInputs(Custom, WeatheringInputNames);
+		SetCustomInputs(Custom, InputNames);
 
-		for (const TCHAR* Input : WeatheringInputNames)
+		for (const TCHAR* Input : InputNames)
 		{
 			if (const TPair<UMaterialExpression*, FString>* Source = Sources.ByInput.Find(Input))
 			{
@@ -336,21 +340,9 @@ namespace
 		return Param;
 	}
 
-	void PopulateFunction(UMaterialFunction* Function, UTexture2D* NoMask, FGrungifyContentReport& Report)
+	/** Everything the weathering custom nodes read besides the artist's own inputs (both functions share these). */
+	void AddSharedSources(UMaterialFunction* Function, FBuildContext& Ctx, UTexture2D* NoMask, FWeatheringSources& S)
 	{
-		FBuildContext Ctx{ Report, TEXT("MF_GrungifyWeathering") };
-
-		Function->Description = PendingDescription();
-		Function->bExposeToLibrary = true;
-		Function->LibraryCategoriesText.Reset();
-		Function->LibraryCategoriesText.Add(LOCTEXT("LibraryCategory", "Grungify"));
-
-		FWeatheringSources S;
-		S.Add(TEXT("BaseColor"), AddFunctionInput(Function, TEXT("BaseColor"), FunctionInput_Vector3, 0, FVector4f(0.5f, 0.5f, 0.5f, 0.f), TEXT("Unweathered base colour."), 0));
-		S.Add(TEXT("Roughness"), AddFunctionInput(Function, TEXT("Roughness"), FunctionInput_Scalar, 1, FVector4f(0.6f, 0.f, 0.f, 0.f), TEXT("Unweathered roughness."), 120));
-		S.Add(TEXT("Metallic"), AddFunctionInput(Function, TEXT("Metallic"), FunctionInput_Scalar, 2, FVector4f(0.f, 0.f, 0.f, 0.f), TEXT("Unweathered metallic."), 240));
-		S.Add(TEXT("NormalTS"), AddFunctionInput(Function, TEXT("Normal"), FunctionInput_Vector3, 3, FVector4f(0.f, 0.f, 1.f, 0.f),
-			TEXT("Your tangent-space normal. Passed through unchanged unless Grungify Relief Strength is above 0."), 360));
 		UMaterialExpressionFunctionInput* SurfaceInput = AddFunctionInput(Function, TEXT("SurfaceOverride"), FunctionInput_Scalar, 4, FVector4f(-1.f, 0.f, 0.f, 0.f),
 			TEXT("-1 = use the type the zone detected for this mesh. 0 = stone, 1 = metal, 2 = trim. Unconnected: use the owned material instance's Grungify Surface Override."), 480);
 		UMaterialExpressionScalarParameter* SurfaceFallback = AddScalar(Function, TEXT("Grungify Surface Override"), -1.f, 520);
@@ -431,6 +423,24 @@ namespace
 		S.Add(TEXT("CrackStrength"), AddScalar(Function, TEXT("Grungify Crack Strength"), 0.f, 4600));
 		// Not read by the shader; runtime wear uses it to size brushes in texels.
 		AddScalar(Function, TEXT("Grungify Mask Texel Size"), 4.f, 4700);
+	}
+
+	void PopulateFunction(UMaterialFunction* Function, UTexture2D* NoMask, FGrungifyContentReport& Report)
+	{
+		FBuildContext Ctx{ Report, TEXT("MF_GrungifyWeathering") };
+
+		Function->Description = PendingDescription();
+		Function->bExposeToLibrary = true;
+		Function->LibraryCategoriesText.Reset();
+		Function->LibraryCategoriesText.Add(LOCTEXT("LibraryCategory", "Grungify"));
+
+		FWeatheringSources S;
+		S.Add(TEXT("BaseColor"), AddFunctionInput(Function, TEXT("BaseColor"), FunctionInput_Vector3, 0, FVector4f(0.5f, 0.5f, 0.5f, 0.f), TEXT("Unweathered base colour."), 0));
+		S.Add(TEXT("Roughness"), AddFunctionInput(Function, TEXT("Roughness"), FunctionInput_Scalar, 1, FVector4f(0.6f, 0.f, 0.f, 0.f), TEXT("Unweathered roughness."), 120));
+		S.Add(TEXT("Metallic"), AddFunctionInput(Function, TEXT("Metallic"), FunctionInput_Scalar, 2, FVector4f(0.f, 0.f, 0.f, 0.f), TEXT("Unweathered metallic."), 240));
+		S.Add(TEXT("NormalTS"), AddFunctionInput(Function, TEXT("Normal"), FunctionInput_Vector3, 3, FVector4f(0.f, 0.f, 1.f, 0.f),
+			TEXT("Your tangent-space normal. Passed through unchanged unless Grungify Relief Strength is above 0."), 360));
+		AddSharedSources(Function, Ctx, NoMask, S);
 
 		UMaterialExpressionCustom* ColorNode = AddWeatheringCustom(Function, Ctx, S, TEXT("Grungify Base Color"), CMOT_Float3,
 			FString(EvaluateCode) + TEXT("return R.BaseColor;"), -600, 0);
@@ -723,6 +733,141 @@ namespace
 		}
 	}
 
+	/** The weathering custom inputs minus the artist's legacy inputs, plus the stone chip colour Substrate needs. */
+	TArray<const TCHAR*> SubstrateInputNames()
+	{
+		TArray<const TCHAR*> Names;
+		for (const TCHAR* Name : WeatheringInputNames)
+		{
+			if (FCString::Strcmp(Name, TEXT("BaseColor")) != 0 && FCString::Strcmp(Name, TEXT("Roughness")) != 0 && FCString::Strcmp(Name, TEXT("Metallic")) != 0)
+			{
+				Names.Add(Name);
+			}
+		}
+		Names.Add(TEXT("StoneChipColor"));
+		return Names;
+	}
+
+	/**
+	 * MF_GrungifySubstrate: Material (Substrate) in, Material out. One grime slab, whose albedo, F0, roughness and coverage
+	 * come from GrungifyEvaluateGrime, is mixed over the input. Inactive meshes get zero coverage.
+	 */
+	void PopulateSubstrateFunction(UMaterialFunction* Function, UTexture2D* NoMask, FGrungifyContentReport& Report)
+	{
+		FBuildContext Ctx{ Report, TEXT("MF_GrungifySubstrate") };
+
+		Function->Description = PendingDescription();
+		Function->bExposeToLibrary = true;
+		Function->LibraryCategoriesText.Reset();
+		Function->LibraryCategoriesText.Add(LOCTEXT("LibraryCategory", "Grungify"));
+
+		UMaterialExpressionFunctionInput* MaterialInput = AddFunctionInput(Function, TEXT("Material"), FunctionInput_Substrate, 0, FVector4f(0.f, 0.f, 0.f, 0.f),
+			TEXT("Your Substrate material (what normally goes into Front Material)."), 0);
+		FWeatheringSources S;
+		S.Add(TEXT("NormalTS"), AddFunctionInput(Function, TEXT("Normal"), FunctionInput_Vector3, 1, FVector4f(0.f, 0.f, 1.f, 0.f),
+			TEXT("Tangent-space normal for the grime layer, usually your slab's normal. Relief is added on top when Grungify Relief Strength is above 0."), 360));
+		AddSharedSources(Function, Ctx, NoMask, S);
+		S.Add(TEXT("StoneChipColor"), AddColor(Function, TEXT("Grungify Stone Chip Color"), FLinearColor(0.62f, 0.60f, 0.56f), 4800));
+
+		UMaterialExpressionCustom* Grime = AddWeatheringCustom(Function, Ctx, S, TEXT("Grungify Substrate Grime"), CMOT_Float1,
+			TEXT("FGrungifyGrime G = GrungifyEvaluateGrime(MaskMode, VM, TM, IM, EM, WorldPos, WorldNormal, SurfaceType, SurfaceOverride, ")
+			TEXT("FeatureScale, SeedOffset, DustColor.rgb, RunoffColor.rgb, ChipColor.rgb, StoneChipColor.rgb, Strength, CS, ")
+			TEXT("MossColor.rgb, SootColor.rgb, SaltColor.rgb, ES, CrackStrength);\n")
+			TEXT("Albedo = G.Albedo;\nF0 = G.F0;\nGrimeRoughness = G.Roughness;\nreturn G.Coverage;"),
+			-600, 0, SubstrateInputNames());
+		// Output 0 is the coverage; 1..3 are the slab parameters.
+		Grime->AdditionalOutputs.Reset();
+		Grime->AdditionalOutputs.Add({ TEXT("Albedo"), CMOT_Float3 });
+		Grime->AdditionalOutputs.Add({ TEXT("F0"), CMOT_Float3 });
+		Grime->AdditionalOutputs.Add({ TEXT("GrimeRoughness"), CMOT_Float1 });
+		if (FProperty* Property = FindFProperty<FProperty>(UMaterialExpressionCustom::StaticClass(), GET_MEMBER_NAME_CHECKED(UMaterialExpressionCustom, AdditionalOutputs)))
+		{
+			FPropertyChangedEvent Event(Property);
+			Grime->PostEditChangeProperty(Event);
+		}
+		if (Grime->GetOutputs().Num() != 4)
+		{
+			Report.Errors.Add(TEXT("MF_GrungifySubstrate: the grime node did not expose its four outputs"));
+		}
+
+		UMaterialExpressionCustom* NormalNode = AddWeatheringCustom(Function, Ctx, S, TEXT("Grungify Relief Normal"), CMOT_Float3,
+			TEXT("return GrungifyReliefNormalFull(NormalTS, Relief, MaskMode, VM, TM, IM, WorldPos, WorldNormal, ")
+			TEXT("Parameters.TangentToWorld[0], Parameters.TangentToWorld[1], FeatureScale, SeedOffset, Strength, CS);"), -600, 1000,
+			SubstrateInputNames());
+
+		UMaterialExpressionSubstrateSlabBSDF* Slab = AddToFunction<UMaterialExpressionSubstrateSlabBSDF>(Function, -200, 200);
+		Slab->DiffuseAlbedo.Connect(1, Grime);
+		Slab->F0.Connect(2, Grime);
+		Slab->Roughness.Connect(3, Grime);
+		Slab->Normal.Connect(0, NormalNode);
+
+		UMaterialExpressionSubstrateHorizontalMixing* Mix = AddToFunction<UMaterialExpressionSubstrateHorizontalMixing>(Function, 0, 0);
+		Mix->Background.Connect(0, MaterialInput);
+		Mix->Foreground.Connect(0, Slab);
+		Mix->Mix.Connect(0, Grime);
+
+		UMaterialExpressionFunctionOutput* Output = AddToFunction<UMaterialExpressionFunctionOutput>(Function, 250, 0);
+		Output->OutputName = TEXT("Material");
+		Output->SortPriority = 0;
+		Output->A.Connect(0, Mix);
+
+		UMaterialEditingLibrary::UpdateMaterialFunction(Function, nullptr);
+	}
+
+	void ValidateSubstrateGraph(UMaterialFunction* Function, FGrungifyContentReport& Report)
+	{
+		if (!Function)
+		{
+			Report.Errors.Add(TEXT("MF_GrungifySubstrate could not be loaded"));
+			return;
+		}
+		ValidateOwnedMode(Function->GetExpressions(), TEXT("MF_GrungifySubstrate"), Report);
+		int32 Outputs = 0;
+		const UMaterialExpressionSubstrateHorizontalMixing* Mix = nullptr;
+		for (UMaterialExpression* Expression : Function->GetExpressions())
+		{
+			if (const UMaterialExpressionFunctionOutput* Output = Cast<UMaterialExpressionFunctionOutput>(Expression))
+			{
+				++Outputs;
+				if (Output->OutputName == TEXT("Material"))
+				{
+					Mix = Cast<UMaterialExpressionSubstrateHorizontalMixing>(Output->A.Expression);
+				}
+			}
+		}
+		const UMaterialExpressionFunctionInput* Background = Mix ? Cast<UMaterialExpressionFunctionInput>(Mix->Background.Expression) : nullptr;
+		const UMaterialExpressionCustom* Coverage = Mix ? Cast<UMaterialExpressionCustom>(Mix->Mix.Expression) : nullptr;
+		const UMaterialExpressionSubstrateSlabBSDF* Slab = Mix ? Cast<UMaterialExpressionSubstrateSlabBSDF>(Mix->Foreground.Expression) : nullptr;
+		if (Outputs != 1 || !Background || Background->InputType != FunctionInput_Substrate || !Coverage
+			|| Coverage->Description != TEXT("Grungify Substrate Grime") || Mix->Mix.OutputIndex != 0 || !Slab
+			|| Slab->DiffuseAlbedo.Expression != Coverage || Slab->F0.Expression != Coverage || Slab->Roughness.Expression != Coverage)
+		{
+			Report.Errors.Add(TEXT("MF_GrungifySubstrate: the input material must be mixed with the grime slab by the grime coverage"));
+		}
+	}
+
+	/** Substrate graphs only compile in Substrate projects; there, compile a throwaway material that uses the function. */
+	void CompileCheckSubstrate(UMaterialFunction* Function, FGrungifyContentReport& Report)
+	{
+		if (!Substrate::IsSubstrateEnabled())
+		{
+			Report.Notes.Add(TEXT("Substrate is off in this project: MF_GrungifySubstrate was built and validated but not compiled"));
+			return;
+		}
+		UMaterial* Probe = NewObject<UMaterial>(GetTransientPackage(), NAME_None, RF_Transient);
+		FBuildContext Ctx{ Report, TEXT("MF_GrungifySubstrate (compile check)") };
+		UMaterialExpressionSubstrateSlabBSDF* Slab = AddToMaterial<UMaterialExpressionSubstrateSlabBSDF>(Probe, -600, 0);
+		UMaterialExpressionMaterialFunctionCall* Call = AddToMaterial<UMaterialExpressionMaterialFunctionCall>(Probe, -300, 0);
+		if (!Call || !Call->SetMaterialFunction(Function))
+		{
+			Report.Errors.Add(TEXT("MF_GrungifySubstrate: could not call the function from a test material"));
+			return;
+		}
+		Ctx.Connect(Slab, TEXT(""), Call, TEXT("Material"));
+		Ctx.ConnectProperty(Call, TEXT("Material"), MP_FrontMaterial, TEXT("Front Material"));
+		CompileAndCheck(Probe, Report);
+	}
+
 	UTexture2D* BuildNoMaskTexture(UPackage* Package)
 	{
 		UTexture2D* Texture = NewObject<UTexture2D>(Package, *AssetName(NoMaskTexturePath), AssetFlags);
@@ -753,22 +898,24 @@ namespace
 bool FGrungifyContentBuilder::NeedsWork()
 {
 	UMaterialFunction* Function = FindExisting<UMaterialFunction>(FunctionPath);
+	UMaterialFunction* SubstrateFunction = FindExisting<UMaterialFunction>(SubstrateFunctionPath);
 	UMaterial* Debug = FindExisting<UMaterial>(DebugMaterialPath);
 	UMaterial* Example = FindExisting<UMaterial>(ExampleMaterialPath);
 	UTexture2D* NoMask = FindExisting<UTexture2D>(NoMaskTexturePath);
 	UBlueprint* Blueprint = FindExisting<UBlueprint>(ZoneBlueprintPath);
-	if (!Function || !Function->Description.Contains(CurrentMarker()) || !Debug || !Example || !NoMask || !Blueprint
+	if (!Function || !Function->Description.Contains(CurrentMarker()) || !SubstrateFunction || !SubstrateFunction->Description.Contains(CurrentMarker()) || !Debug || !Example || !NoMask || !Blueprint
 		|| !Blueprint->ParentClass || !Blueprint->ParentClass->IsChildOf(AGrungifyWeatheringZone::StaticClass())
 		|| !Blueprint->GeneratedClass || Blueprint->Status == BS_Error)
 	{
 		return true;
 	}
-	for (UObject* Asset : TArray<UObject*>{ Function, Debug, Example, NoMask, Blueprint })
+	for (UObject* Asset : TArray<UObject*>{ Function, SubstrateFunction, Debug, Example, NoMask, Blueprint })
 	{
 		if (Asset->GetPackage()->IsDirty()) { return true; }
 	}
 	FGrungifyContentReport Validation;
 	ValidateGeneratedGraphs(Function, Debug, Example, NoMask, Validation);
+	ValidateSubstrateGraph(SubstrateFunction, Validation);
 	FString ExpectedToken;
 	FString SavedToken;
 	return Validation.Errors.Num() > 0 || !MakeReadinessToken(ExpectedToken)
@@ -856,6 +1003,27 @@ FGrungifyContentReport FGrungifyContentBuilder::Run(bool bForceRebuild)
 		PopulateFunction(Function, NoMask, Report);
 	}
 
+	UMaterialFunction* SubstrateFunction = FindExisting<UMaterialFunction>(SubstrateFunctionPath);
+	bool bBuildSubstrate = bRebuild;
+	if (!SubstrateFunction)
+	{
+		SubstrateFunction = NewObject<UMaterialFunction>(CreatePackage(SubstrateFunctionPath), *AssetName(SubstrateFunctionPath), AssetFlags);
+		Register(SubstrateFunction, Packages);
+		Report.Created.Add(AssetName(SubstrateFunctionPath));
+		bBuildSubstrate = true;
+	}
+	else if (bRebuild)
+	{
+		SubstrateFunction->Modify();
+		if (!ClearFunctionExpressions(SubstrateFunction, Report)) { return Finish(); }
+		Touch(SubstrateFunction, Packages);
+		Report.Rebuilt.Add(AssetName(SubstrateFunctionPath));
+	}
+	if (bBuildSubstrate)
+	{
+		PopulateSubstrateFunction(SubstrateFunction, NoMask, Report);
+	}
+
 	auto PrepareMaterial = [&](const TCHAR* Path) -> UMaterial*
 	{
 		UMaterial* Material = FindExisting<UMaterial>(Path);
@@ -925,6 +1093,8 @@ FGrungifyContentReport FGrungifyContentBuilder::Run(bool bForceRebuild)
 	UMaterial* Debug = FindExisting<UMaterial>(DebugMaterialPath);
 	UMaterial* Example = FindExisting<UMaterial>(ExampleMaterialPath);
 	ValidateGeneratedGraphs(Function, Debug, Example, NoMask, Report);
+	ValidateSubstrateGraph(SubstrateFunction, Report);
+	if (bBuildSubstrate) { CompileCheckSubstrate(SubstrateFunction, Report); }
 	// RecompileMaterial marks the package dirty even if the graph is unchanged. A no-work run
 	// already authenticated the saved graphs/shader; keep its packages and readiness genuinely clean.
 	if (bRebuild && Debug) { CompileAndCheck(Debug, Report); }
@@ -933,6 +1103,8 @@ FGrungifyContentReport FGrungifyContentBuilder::Run(bool bForceRebuild)
 	{
 		Function->Description = PendingDescription();
 		Touch(Function, Packages);
+		SubstrateFunction->Description = PendingDescription();
+		Touch(SubstrateFunction, Packages);
 		Report.Notes.Add(TEXT("Validation failed: no generated packages were saved and readiness remains false"));
 		return Finish();
 	}
@@ -944,6 +1116,12 @@ FGrungifyContentReport FGrungifyContentBuilder::Run(bool bForceRebuild)
 		Function->Description = PendingDescription().Replace(TEXT("[GrungifyContent pending validation]"), *CurrentMarker());
 		Touch(Function, Packages);
 	}
+	if (bBuildSubstrate)
+	{
+		SubstrateFunction->Description = FString(TEXT("Substrate version of MF_GrungifyWeathering: mixes one grime slab over your Substrate material. "))
+			+ TEXT("Inactive owned-material gate gives zero coverage. ") + CurrentMarker();
+		Touch(SubstrateFunction, Packages);
+	}
 	if (Packages.Num() > 0)
 	{
 		Report.bSaveAttempted = true;
@@ -953,6 +1131,8 @@ FGrungifyContentReport FGrungifyContentBuilder::Run(bool bForceRebuild)
 	{
 		Function->Description = PendingDescription();
 		Touch(Function, Packages);
+		SubstrateFunction->Description = PendingDescription();
+		Touch(SubstrateFunction, Packages);
 		Report.Errors.Add(TEXT("Generated package save failed; readiness remains false"));
 		return Finish();
 	}

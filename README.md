@@ -15,12 +15,15 @@ Each material slot is classified as **stone**, **metal** or **trim**, so the wea
 
 Everything is driven by a **Seed**, so the same seed and settings always produce the same result.
 
-> **Status:** v0.4.0 targets UE 5.8. v0.3.1 was natively verified: Editor, Development and Shipping builds, and all nine native automation tests (results below). v0.4.0 adds:
+> **Status:** v0.5.0 targets UE 5.8. v0.3.1 was natively verified: Editor, Development and Shipping builds, and all nine native automation tests (results below). v0.4.0 adds:
 > - **Workflow:** a zones panel, wear stamps, a background generation cache, seed variants, bake-to-assets with PNG round-tripping, and a material library.
 > - **Generation:** sky exposure, traced water flow, extended layers, decal and mesh scatter, and instanced meshes.
 > - **Pipeline:** Data Layer targeting, a commandlet, a Blueprint/Python API, runtime wear, and a reference scene with screenshot and cooked-build tests.
 >
-> **v0.4.0 has not been compiled or run yet.** It was written without an engine install, so expect a round of compile fixes. Preset round trips, public-action cancellation and final visual quality still need review on the intended meshes and lighting. See [Verification checklist](#verification-checklist).
+>
+> v0.5.0 adds **automatic material hookup** (no hand-editing material graphs) and **Substrate support**.
+>
+> **v0.4.0 and v0.5.0 have not been compiled or run yet.** It was written without an engine install, so expect a round of compile fixes. Preset round trips, public-action cancellation and final visual quality still need review on the intended meshes and lighting. See [Verification checklist](#verification-checklist).
 
 ---
 
@@ -32,6 +35,7 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 4. On first editor start the plugin creates its assets in the plugin content folder (*Content Browser → Settings → Show Plugin Content → Grungify Content*):
    - `BP_WeatheringZone`: the zone to drop into levels
    - `Materials/MF_GrungifyWeathering`: the material function that renders the wear
+   - `Materials/MF_GrungifySubstrate`: the same for native Substrate materials
    - `Materials/M_GrungifyMaskDebug`: shows the raw masks during preview
    - `Materials/M_GrungifyExample`: a minimal master material that already uses the function
    - `Materials/T_GrungifyNoMask`: the black default for the mask texture parameter
@@ -43,16 +47,44 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 
 ### Content versioning
 
-The generated material assets carry a marker of the form `[GrungifyContent v5 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
+The generated material assets carry a marker of the form `[GrungifyContent v6 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
 
 - **Tools → Grungify → Update Plugin Content** creates missing assets and rebuilds outdated ones.
 - **Rebuild Plugin Content** forces a rebuild of all the generated material assets.
 
-Every build checks graph connections, channel outputs and ownership gates, compiles the debug and example materials, and checks package saves. Failed validation prevents saving generated packages. Readiness requires a successful build and a `Saved/Grungify/ContentReady.txt` token matching the shader and all five saved packages. An interrupted or partial save remains eligible for repair. Results go to the Output Log and `Saved/Grungify/ContentReport.txt`, with a notification if anything failed.
+Every build checks graph connections, channel outputs and ownership gates, compiles the debug and example materials, and checks package saves. Failed validation prevents saving generated packages. Readiness requires a successful build and a `Saved/Grungify/ContentReady.txt` token matching the shader and all six saved packages. An interrupted or partial save remains eligible for repair. Results go to the Output Log and `Saved/Grungify/ContentReport.txt`, with a notification if anything failed.
 
 ## Hook up your materials (once per master material)
 
-The zone writes masks; the material function renders them. In each master material you want weathered:
+The zone writes masks; your materials render them. Let Grungify wire itself in:
+
+- **Tools → Grungify → Hook Up Materials In Level**: finds every master material used by static meshes inside your zones (or the whole level, if it has no zones yet) that doesn't use Grungify, lists them, and hooks them all up after you confirm.
+- **Right-click materials or material instances in the Content Browser → Add Grungify / Remove Grungify**, or the same from *Tools → Grungify* for the current selection. An instance resolves to its parent material, so every instance of that parent gets weathering.
+- From Python or Editor Utility Blueprints: `UGrungifyMaterialHookup.add_grungify_to_material(material)`, `remove_grungify_from_material`, `uses_grungify` and `find_unhooked_materials_in_level`.
+
+What it does for each kind of material:
+
+| Material | What gets inserted |
+|---|---|
+| Ordinary (pins connected) | `MF_GrungifyWeathering` between your Base Color, Roughness, Metallic and Normal and the material outputs. Unconnected pins and *Use Constant* values become constants with the same values, so nothing changes on unweathered meshes. World-space normals and constant normals are left alone. |
+| *Use Material Attributes* (including material layers) | Get Material Attributes → `MF_GrungifyWeathering` → Set Material Attributes, routing the same four attributes and passing everything else through. |
+| Substrate (*Front Material* connected) | `MF_GrungifySubstrate` between your material and Front Material. If Front Material is a single slab, its normal feeds the grime layer. See [Substrate](#substrate). |
+
+Safety:
+
+- **Backups:** before the first change, a copy goes to `/Game/Grungify/Backups/<original path>/<Name>_PreGrungify`. Later Adds keep that first copy.
+- **Compile check:** each hooked-up material is compiled straight away. If it doesn't compile, the change is reverted and reported.
+- **Remove** puts back exactly the original wiring, including component masks, *Use Constant* values and unconnected pins. It only touches nodes the tool inserted; wiring you added by hand is left for you.
+- **Open editors:** a material's open editor is closed before it's changed, so the two can't clash.
+- **Skipped materials:** engine content, Grungify's own materials, unlit materials and non-surface domains (decals, post process, UI) are skipped with a reason.
+- **Saving:** changed materials are left unsaved, ready for review.
+- **Report:** results go to the notification and `Saved/Grungify/MaterialHookup.txt`.
+
+Zone reports flag every included slot whose material doesn't use Grungify, and say how to fix it.
+
+### Wiring it by hand
+
+If you'd rather place the function yourself, in each master material you want weathered:
 
 ```
 [your Base Color] ──► BaseColor ┐
@@ -73,6 +105,27 @@ The zone writes masks; the material function renders them. In each master materi
 - The shading code lives in `Shaders/Private/Grungify.ush`, so you can tune the look there without rebuilding the graph.
 
 You don't need materials hooked up to start: set **Preview Display** to *All Masks* and the preview swaps in the debug material.
+
+## Substrate
+
+Projects with Substrate enabled are supported two ways:
+
+- **Legacy-pin materials** keep using `MF_GrungifyWeathering`. Substrate converts them automatically, as it does any legacy material.
+- **Native Substrate materials** use `MF_GrungifySubstrate`: Material (Substrate) in, Material out. It mixes one **grime slab** over your material with *Substrate Horizontal Mixing*.
+  - The slab's albedo, F0, roughness and coverage come from the same masks, noise and palette as the legacy function.
+  - All the wear layers are composited into that one slab, so the material gains exactly one extra closure, however many layers are active.
+  - Its normal is your slab's normal, plus relief when `Grungify Relief Strength` is above 0.
+  - Inactive meshes get zero coverage, so they look the same, though the material still carries the extra closure.
+
+Differences from the legacy look: the legacy function edits your material's values directly, while Substrate layers grime on top. A few effects are therefore approximated:
+
+- Handling polish on metal is a polished-metal layer rather than lowering your roughness.
+- Darkening from handling and moisture is a dark layer rather than a multiply. This is exact for albedo.
+- Fresh stone at chips uses `Grungify Stone Chip Color` (Substrate function only) rather than brightening your albedo.
+
+Compare the two on the reference scene if you mix legacy and Substrate materials.
+
+The content build always creates `MF_GrungifySubstrate`. In a project with Substrate enabled, it also compiles a throwaway Substrate material that uses the function, to prove it works. In a project without Substrate, the report notes that this compile check was skipped.
 
 ## Using a zone
 
@@ -455,7 +508,7 @@ Texture generation skips edge-distance queries and weathering evaluation when a 
 
 These cases should be checked in-editor on a test level, never on production rooms:
 
-1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v5 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
+1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v6 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
 2. **Channel masks:** in MF_GrungifyWeathering, the Roughness mask is R only and the Metallic mask is G only.
 3. **Exact restore:** on a mesh whose default custom primitive data is `[]`, run Preview → Cancel Preview, and separately Apply → Clear. The data is `[]` again. Repeat on a mesh with painted vertex colours, a mesh with only some material slots overridden, and a mesh whose CPD indices 0–4 are already in use (it should be reported as a conflict and left untouched).
 4. **Undo:** run Apply → Ctrl+Z and Clear → Ctrl+Z. Delete a zone while previewing, then Ctrl+Z.
@@ -482,6 +535,7 @@ These cases should be checked in-editor on a test level, never on production roo
       - the screenshot functional test options
       - render-target drawing in runtime wear
       - World Partition actor descriptors in the commandlet (`ForEachActorDescInstance`, 5.4+ API), and map loading through `UEditorLoadingAndSavingUtils` inside a commandlet
+      - Substrate expression members (`DiffuseAlbedo`, `F0`, `Background`, `Foreground`, `Mix`), custom-node additional outputs, and Get/Set Material Attributes setup in the hookup tool
       - `UStaticMesh::NaniteSettings` access in the reference scene (use the supported `Get/SetNaniteSettings` accessors)
     - Then run `Automation RunTests Grungify` and check that the existing `Grungify.State`, `Grungify.Content` and `Grungify.Generation` tests still pass. The texture-bake conservation test should be unchanged, since every new feature defaults to off.
 14. **Reference scene and screenshots:**
@@ -504,6 +558,16 @@ These cases should be checked in-editor on a test level, never on production roo
 19. **Extended layers:** with the Wet Sewer preset, check pools at the bottom of traced paths, the water line, and moss. A lamp gets soot above it. A tagged fire gets scorch. Bolts get rust bloom. A traffic path scuffs the floor and the bottom of the walls.
 20. **Scatter and Data Layers:** scatter entries place pieces only where the mask passes the threshold, in the outliner folder and data layers. Clear removes them. A zone restricted to a Data Layer skips other actors and reports why.
 21. **Commandlet:** run `-run=Grungify -Operation=DryRun` on a World Partition map; it reports every zone and exits 0. Then run `-Operation=Apply -Save`.
+22. **Material hookup:**
+    - Run *Hook Up Materials In Level* on a level with unhooked materials. Check that it covers an ordinary material with constant pins, a *Use Material Attributes* material with layers, and a Substrate slab material.
+    - Each compiles, shows weathering after Preview, and looks unchanged on meshes outside zones.
+    - Backups appear under `/Game/Grungify/Backups`.
+    - *Remove Grungify* restores the original graphs. `Grungify.Content.MaterialHookupRoundTrip` checks this automatically for the legacy path.
+    - Run it on a material that's open in the material editor.
+23. **Substrate:**
+    - In a Substrate project, the content build reports no compile-check note or errors for `MF_GrungifySubstrate`.
+    - A hooked-up Substrate material shows chips, dust, runoff and the extended layers, with a look close to the legacy function on the reference scene.
+    - *Substrate Material Complexity* view shows one extra closure.
 
 ## Layout
 
@@ -513,6 +577,6 @@ Shaders/Private/Grungify.ush          Material-side noise and shading
 Source/GrungifyShaders/               Maps /Plugin/Grungify for the shader include (PostConfigInit)
 Source/Grungify/                      Runtime: zone actor, settings, mask generation, wear stamps, traffic paths,
                                       Blueprint library, runtime wear subsystem, cooked-build test
-Source/GrungifyEditor/                Asset builder, material library, reference scene, zones panel, commandlet,
+Source/GrungifyEditor/                Asset builder, material hookup, material library, reference scene, zones panel, commandlet,
                                       viewport visualizer, Tools menu
 ```
