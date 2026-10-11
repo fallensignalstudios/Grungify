@@ -36,8 +36,9 @@ struct FGrungifyHookupResult
  *  - legacy materials: Base Color, Roughness, Metallic and Normal are routed through MF_GrungifyWeathering;
  *  - "Use Material Attributes" materials: Get/Set Material Attributes nodes route the same four attributes;
  *  - Substrate materials (Front Material connected): MF_GrungifySubstrate mixes its grime slab over the material.
- * Every inserted node is tagged, so Remove puts back exactly the original wiring (including constants), and
- * a backup copy is kept in /Game/Grungify/Backups the first time a material is changed.
+ * Inserted nodes are tagged for removal. Legacy dormant constant wiring/unconnected pin metadata and world-space
+ * attribute normals are refused before changing the graph. Add/Remove are editor undo transactions. A backup copy
+ * must be saved to /Game/Grungify/Backups before a first backed-up change; an unsaved duplicate is insufficient.
  * Material instances resolve to their parent material, which changes every instance of it, as intended.
  */
 UCLASS()
