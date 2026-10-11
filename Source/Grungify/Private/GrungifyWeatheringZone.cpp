@@ -1144,6 +1144,13 @@ void AGrungifyWeatheringZone::BuildContext(UStaticMeshComponent* Component, TMap
 		{
 			Detail.Warnings.Add(TEXT("slot has no material, so there is nothing to bind the weathering to"));
 		}
+		float ActiveDefault = 0.f;
+		if (!Info.bExcluded && Material && !Material->GetScalarParameterDefaultValue(FHashedMaterialParameterInfo(Grungify::ActiveParameterName()), ActiveDefault))
+		{
+			// Masks are still written (the debug display shows them), but the final material can't show them.
+			Detail.Warnings.Add(FString::Printf(TEXT("material %s doesn't use Grungify, so the weathering won't show in Final Material; ")
+				TEXT("use Tools > Grungify > Hook Up Materials In Level, or right-click the material > Add Grungify"), *Material->GetName()));
+		}
 
 		Info.Description = FString::Printf(TEXT("%d %s -> %s%s%s%s"),
 			Slot,

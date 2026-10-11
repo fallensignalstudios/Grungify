@@ -22,6 +22,9 @@ public class GrungifyEditor : ModuleRules
 			"DeveloperSettings",
 			// AScreenshotFunctionalTest for the reference scene's screenshot tests.
 			"FunctionalTesting",
+			"RenderCore",
+			"ContentBrowser",
+			"AssetTools",
 			"Grungify"
 		});
 	}

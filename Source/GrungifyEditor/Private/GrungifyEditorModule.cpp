@@ -6,6 +6,7 @@
 #include "Framework/Notifications/NotificationManager.h"
 #include "GrungifyContentBuilder.h"
 #include "GrungifyLibraryBuilder.h"
+#include "GrungifyMaterialHookup.h"
 #include "GrungifyReferenceScene.h"
 #include "GrungifySettings.h"
 #include "GrungifyWeatheringZone.h"
@@ -366,6 +367,36 @@ private:
 			LOCTEXT("ZonesPanel", "Weathering Zones Panel"),
 			LOCTEXT("ZonesPanelTip", "List every weathering zone in the level with its status, and run actions on one or all of them."),
 			FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&GrungifyZonesPanel::Open)));
+
+		Section.AddMenuEntry("GrungifyHookUpLevel",
+			LOCTEXT("HookUpLevel", "Hook Up Materials In Level"),
+			LOCTEXT("HookUpLevelTip", "Find the master materials used inside weathering zones (or the whole level when there are none) that don't use Grungify yet, and wire Grungify into them. Each is backed up first."),
+			FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&UGrungifyMaterialHookup::HookUpLevel)));
+
+		Section.AddMenuEntry("GrungifyHookUpSelected",
+			LOCTEXT("HookUpSelected", "Add Grungify to Selected Materials"),
+			LOCTEXT("HookUpSelectedTip", "Wire Grungify into the materials (or the parents of the material instances) selected in the Content Browser."),
+			FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&UGrungifyMaterialHookup::AddToSelectedAssets)));
+
+		Section.AddMenuEntry("GrungifyUnhookSelected",
+			LOCTEXT("UnhookSelected", "Remove Grungify from Selected Materials"),
+			LOCTEXT("UnhookSelectedTip", "Put back the original wiring of materials Grungify was added to by Add Grungify or Hook Up Materials."),
+			FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&UGrungifyMaterialHookup::RemoveFromSelectedAssets)));
+
+		// Right-click on materials and material instances in the Content Browser.
+		for (const TCHAR* MenuName : { TEXT("ContentBrowser.AssetContextMenu.Material"), TEXT("ContentBrowser.AssetContextMenu.MaterialInstanceConstant") })
+		{
+			UToolMenu* AssetMenu = UToolMenus::Get()->ExtendMenu(MenuName);
+			FToolMenuSection& AssetSection = AssetMenu->FindOrAddSection("Grungify", LOCTEXT("AssetSection", "Grungify"));
+			AssetSection.AddMenuEntry("GrungifyAddToMaterial",
+				LOCTEXT("AddToMaterial", "Add Grungify"),
+				LOCTEXT("AddToMaterialTip", "Wire Grungify weathering into this material (for an instance, its parent). Legacy, Material Attributes and Substrate materials are supported. A backup goes to /Game/Grungify/Backups."),
+				FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&UGrungifyMaterialHookup::AddToSelectedAssets)));
+			AssetSection.AddMenuEntry("GrungifyRemoveFromMaterial",
+				LOCTEXT("RemoveFromMaterial", "Remove Grungify"),
+				LOCTEXT("RemoveFromMaterialTip", "Put back the wiring this material had before Add Grungify."),
+				FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&UGrungifyMaterialHookup::RemoveFromSelectedAssets)));
+		}
 
 		Section.AddMenuEntry("GrungifyDryRunAll",
 			LOCTEXT("DryRunAll", "Dry Run All Weathering Zones"),

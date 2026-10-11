@@ -408,3 +408,122 @@ float3 GrungifyMaskDebugFull(float MaskMode, float4 VertexMasks, float4 TextureM
 	if (C == 9) return saturate(float3(0.2, 0.5, 1.0) * E.r + float3(0.5, 0.5, 0.5) * E.g + float3(1.0, 0.4, 0.0) * E.b + float3(0.2, 0.9, 0.1) * E.a);
 	return GrungifyMaskDebug(501.0, GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks, InstanceMasks), TextureMasks, Channel);
 }
+
+// ---------------------------------------------------------------- Substrate
+
+// Substrate materials are weathered by mixing one "grime" slab over the artist's material, so the shading model
+// is never rewritten and only one extra closure is added. Each wear layer is composited into that slab with the
+// "over" operator: compositing every layer this way and mixing the result over the base gives the same albedo as
+// applying the layers one after another with lerps, as GrungifyEvaluateFull does for legacy materials.
+struct FGrungifyGrime
+{
+	float3 Albedo;
+	float3 F0;
+	float Roughness;
+	float Coverage;
+};
+
+void GrungifyGrimeOver(inout FGrungifyGrime G, float Weight, float3 Albedo, float3 F0, float Roughness)
+{
+	const float W = saturate(Weight);
+	if (W <= 0.0)
+	{
+		return;
+	}
+	const float Covered = G.Coverage + W * (1.0 - G.Coverage);
+	const float Keep = G.Coverage * (1.0 - W);
+	G.Albedo = (G.Albedo * Keep + Albedo * W) / Covered;
+	G.F0 = (G.F0 * Keep + F0 * W) / Covered;
+	G.Roughness = (G.Roughness * Keep + Roughness * W) / Covered;
+	G.Coverage = Covered;
+}
+
+FGrungifyGrime GrungifyEvaluateGrime(
+	float MaskMode, float4 VertexMasks, float4 TextureMasks, float4 InstanceMasks, float4 ExtendedMasks,
+	float3 WorldPos, float3 WorldNormal,
+	float SurfaceFromZone, float SurfaceOverride,
+	float FeatureScaleCm, float SeedOffset,
+	float3 DustColor, float3 RunoffColor, float3 ChipColor, float3 StoneChipColor,
+	float Strength, float4 ChannelStrength,
+	float3 MossColor, float3 SootColor, float3 SaltColor, float4 ExtendedStrength, float CrackStrength)
+{
+	FGrungifyGrime G;
+	G.Albedo = float3(0.0, 0.0, 0.0);
+	G.F0 = float3(0.04, 0.04, 0.04);
+	G.Roughness = 1.0;
+	G.Coverage = 0.0;
+
+	// Inactive: zero coverage, so the mix returns the artist's material.
+	if (!GrungifyHasValidMaskMode(MaskMode))
+	{
+		return G;
+	}
+
+	const float3 Dielectric = float3(0.04, 0.04, 0.04);
+	const float3 Black = float3(0.0, 0.0, 0.0);
+	const float4 Raw = GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks, InstanceMasks);
+	const float4 Masks = saturate(Raw * Strength * ChannelStrength);
+	const float Surface = SurfaceOverride >= 0.0 ? SurfaceOverride : SurfaceFromZone;
+	const int SurfaceId = (int)round(Surface);
+	const float3 P = GrungifyNoisePos(WorldPos, FeatureScaleCm, SeedOffset);
+	const FGrungifyLayers L = GrungifyLayers(Masks, P, WorldNormal.z);
+
+	// Same order as GrungifyEvaluate: handling, runoff, chips, dust.
+	if (SurfaceId == 1)
+	{
+		GrungifyGrimeOver(G, L.Handling * 0.5, Black, float3(0.7, 0.7, 0.7), 0.15);
+		GrungifyGrimeOver(G, L.Runoff * 0.85, RunoffColor * float3(1.6, 1.1, 0.8), Dielectric, 0.85);
+		GrungifyGrimeOver(G, L.Chip, Black, float3(0.62, 0.62, 0.64), 0.35);
+	}
+	else
+	{
+		GrungifyGrimeOver(G, L.Handling * 0.18, Black, Dielectric, 0.3);
+		GrungifyGrimeOver(G, L.Runoff * 0.8, RunoffColor, Dielectric, 0.7);
+		if (SurfaceId == 2)
+		{
+			GrungifyGrimeOver(G, L.Chip, ChipColor, Dielectric, 0.8);
+		}
+		else
+		{
+			GrungifyGrimeOver(G, L.Chip * 0.6, StoneChipColor, Dielectric, 0.85);
+		}
+	}
+	GrungifyGrimeOver(G, L.Dust * 0.85, DustColor, Dielectric, 0.92);
+
+	const uint Seed = 2027u;
+	if (CrackStrength > 0.0 && SurfaceId == 0)
+	{
+		const float Where = saturate((Raw.r * 1.5 + Raw.b * 0.5) * Strength) * CrackStrength;
+		if (Where > 0.01)
+		{
+			const float Border = GrungifyCellBorder(P * 1.5, Seed);
+			const float Crack = (1.0 - smoothstep(0.0, 0.045, Border)) * smoothstep(0.3, 0.6, GrungifyFbm(P * 0.7, Seed + 3u) + Where * 0.5);
+			GrungifyGrimeOver(G, Crack * saturate(Where) * 0.55, Black, Dielectric, 1.0);
+		}
+	}
+
+	if (MaskMode == 502.0)
+	{
+		const float4 E = saturate(ExtendedMasks * ExtendedStrength * Strength);
+
+		const float Moisture = E.r * lerp(0.7, 1.0, GrungifyFbm(P * 0.6, Seed + 5u));
+		GrungifyGrimeOver(G, Moisture * 0.4, Black, float3(0.02, 0.02, 0.02), 0.1);
+		if (SurfaceId != 1)
+		{
+			const float Salt = smoothstep(0.12, 0.3, Moisture) * (1.0 - smoothstep(0.35, 0.55, Moisture)) * GrungifyFbm(P * 2.5, Seed + 7u);
+			GrungifyGrimeOver(G, Salt * 1.5, SaltColor, Dielectric, 0.95);
+		}
+
+		const float Soot = E.g * lerp(0.6, 1.0, GrungifyFbm(P * 0.9, Seed + 11u));
+		GrungifyGrimeOver(G, Soot * 0.9, SootColor, Dielectric, 0.95);
+
+		const float Scorch = E.b * lerp(0.5, 1.0, GrungifyFbm(P * 1.4, Seed + 13u));
+		GrungifyGrimeOver(G, Scorch * Scorch * 1.5, SootColor * 0.5, Dielectric, 0.98);
+
+		const float MossNoise = GrungifyFbm(P * 1.8, Seed + 17u);
+		const float Moss = E.a > 0.01 ? smoothstep(MossNoise - 0.05, MossNoise + 0.05, E.a * 0.9) : 0.0;
+		GrungifyGrimeOver(G, Moss, MossColor * lerp(0.7, 1.25, GrungifyFbm(P * 4.0, Seed + 19u)), Dielectric, 0.9);
+	}
+
+	return G;
+}
