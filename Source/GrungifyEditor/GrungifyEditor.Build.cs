@@ -6,13 +6,13 @@ public class GrungifyEditor : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine" });
+
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			"Core",
-			"CoreUObject",
-			"Engine",
 			"Slate",
 			"SlateCore",
+			"InputCore",
 			"UnrealEd",
 			"ToolMenus",
 			"MaterialEditor",

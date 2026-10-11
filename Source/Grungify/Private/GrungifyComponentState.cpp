@@ -114,6 +114,7 @@ namespace Grungify
 		if (const UInstancedStaticMeshComponent* Instanced = Cast<UInstancedStaticMeshComponent>(Component))
 		{
 			OutRecord.bHasInstanceData = true;
+			OutRecord.InstanceCount = Instanced->GetInstanceCount();
 			OutRecord.NumInstanceCustomDataFloats = Instanced->NumCustomDataFloats;
 			OutRecord.InstanceCustomData = Instanced->PerInstanceSMCustomData;
 		}
@@ -151,6 +152,24 @@ namespace Grungify
 				|| Backup.Colors.Num() != int32(RenderData->LODResources[LODIndex].GetNumVertices())))
 			{
 				UE_LOG(LogGrungify, Error, TEXT("%s LOD%d: geometry changed since capture; state and original backup retained."), *Component->GetPathName(), LODIndex);
+				return false;
+			}
+		}
+
+		UInstancedStaticMeshComponent* Instanced = nullptr;
+		if (Record.bHasInstanceData)
+		{
+			Instanced = Cast<UInstancedStaticMeshComponent>(Component);
+			const int32 NumFloats = Record.NumInstanceCustomDataFloats;
+			// Older nonzero-stride backups encode their original count in the array length.
+			const int32 CapturedInstances = Record.InstanceCount != INDEX_NONE ? Record.InstanceCount
+				: NumFloats > 0 && Record.InstanceCustomData.Num() % NumFloats == 0
+					? Record.InstanceCustomData.Num() / NumFloats : INDEX_NONE;
+			if (!Instanced || NumFloats < 0 || CapturedInstances < 0
+				|| Instanced->GetInstanceCount() != CapturedInstances
+				|| int64(Record.InstanceCustomData.Num()) != int64(CapturedInstances) * NumFloats)
+			{
+				UE_LOG(LogGrungify, Error, TEXT("%s: instance layout changed or cannot be verified; state and original backup retained."), *Component->GetPathName());
 				return false;
 			}
 		}
@@ -242,23 +261,15 @@ namespace Grungify
 		}
 
 		// Instanced meshes: put the per-instance custom data back exactly (count and values).
-		if (Record.bHasInstanceData)
+		if (Instanced)
 		{
-			if (UInstancedStaticMeshComponent* Instanced = Cast<UInstancedStaticMeshComponent>(Component))
+			const int32 NumFloats = Record.NumInstanceCustomDataFloats;
+			Instanced->SetNumCustomDataFloats(NumFloats);
+			if (NumFloats > 0)
 			{
-				const int32 NumFloats = Record.NumInstanceCustomDataFloats;
-				const int32 Instances = Instanced->GetInstanceCount();
-				Instanced->SetNumCustomDataFloats(NumFloats);
-				if (NumFloats > 0 && Record.InstanceCustomData.Num() == Instances * NumFloats)
+				for (int32 Index = 0; Index < Instanced->GetInstanceCount(); ++Index)
 				{
-					for (int32 Index = 0; Index < Instances; ++Index)
-					{
-						Instanced->SetCustomData(Index, TArrayView<const float>(Record.InstanceCustomData.GetData() + Index * NumFloats, NumFloats));
-					}
-				}
-				else if (NumFloats > 0)
-				{
-					UE_LOG(LogGrungify, Warning, TEXT("%s: instance count changed since the backup; per-instance custom data reset to zero."), *Component->GetPathName());
+					Instanced->SetCustomData(Index, TArrayView<const float>(Record.InstanceCustomData.GetData() + Index * NumFloats, NumFloats));
 				}
 			}
 		}

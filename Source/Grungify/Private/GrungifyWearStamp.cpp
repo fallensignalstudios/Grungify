@@ -6,6 +6,7 @@
 #if WITH_EDITOR
 #include "EngineUtils.h"
 #include "GrungifyGenerator.h"
+#include "GrungifyZoneComponent.h"
 #endif
 
 AGrungifyWearStamp::AGrungifyWearStamp()

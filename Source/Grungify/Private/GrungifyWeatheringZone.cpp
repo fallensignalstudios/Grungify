@@ -18,6 +18,7 @@
 #include "Materials/MaterialInstanceConstant.h"
 #include "UObject/GarbageCollection.h"
 #include "WorldPartition/DataLayer/DataLayerAsset.h"
+#include "WorldPartition/DataLayer/DataLayerManager.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/Level.h"
 #include "Engine/StaticMesh.h"
@@ -208,6 +209,21 @@ void AGrungifyWeatheringZone::BakeToAssets()
 	if (BakedPackages.Num() > 0)
 	{
 		const bool bSaved = UEditorLoadingAndSavingUtils::SavePackages(BakedPackages, /*bOnlyDirty*/ false);
+		if (!bSaved)
+		{
+			const FString Warning = TEXT("Bake To Assets: one or more generated packages could not be saved; dirty assets remain in memory.");
+			LastReport.Warnings.AddUnique(Warning);
+			UE_LOG(LogGrungify, Warning, TEXT("%s: %s"), *GetActorNameOrLabel(), *Warning);
+			// ApplyInternal already emitted its report before the package-save result was known.
+			if (bWriteReportFiles && !LastReportFile.IsEmpty())
+			{
+				FString Json;
+				if (!FJsonObjectConverter::UStructToJsonObjectString(LastReport, Json) || !FFileHelper::SaveStringToFile(Json, *LastReportFile))
+				{
+					UE_LOG(LogGrungify, Warning, TEXT("%s: could not update the bake report with its save failure."), *GetActorNameOrLabel());
+				}
+			}
+		}
 		Status += FString::Printf(TEXT(" Baked %d asset(s) into %s%s."), BakedPackages.Num(), *BakeFolder.Path,
 			bSaved ? TEXT("") : TEXT(" (some could not be saved; save them from the Content Browser)"));
 		UE_LOG(LogGrungify, Log, TEXT("%s: %s"), *GetActorNameOrLabel(), *Status);
@@ -267,7 +283,8 @@ void AGrungifyWeatheringZone::ApplyInternal(const TCHAR* Operation)
 		}
 	}
 
-	for (const FGrungifyComponentResult& Result : Results)
+	TArray<FGrungifyComponentResult> CommittedResults;
+	for (FGrungifyComponentResult& Result : Results)
 	{
 		WriteTask.EnterProgressFrame(1.f);
 		++WritePhase.Items;
@@ -328,13 +345,28 @@ void AGrungifyWeatheringZone::ApplyInternal(const TCHAR* Operation)
 				AppliedRecords.RemoveAt(RecordIndex);
 			}
 		}
+		else
+		{
+			CommittedResults.Add(MoveTemp(Result));
+		}
 	}
 
 	WritePhase.Finish();
 
-	// Scatter is part of the applied state: replace the previous pieces with this run's.
-	ClearScatteredActors();
-	ScatterFromResults(Results);
+	// Never discard previous scatter after a partial write or conflict.
+	const bool bWriteFailure = LastReport.Components.ContainsByPredicate([](const FGrungifyComponentReport& Report)
+	{
+		return Report.Result == TEXT("failed") || Report.bCustomDataConflict;
+	});
+	if (CommittedResults.Num() == Results.Num() && !bWriteFailure)
+	{
+		ClearScatteredActors();
+		ScatterFromResults(CommittedResults);
+	}
+	else
+	{
+		LastReport.Warnings.AddUnique(TEXT("Scatter retained from previous Apply: one or more component writes failed or conflicted; no replacement scatter was generated."));
+	}
 	FinishReport(Start);
 }
 #endif
@@ -1261,6 +1293,7 @@ namespace
 		}
 		H.Add(P.ZoneTransform.GetLocation());
 		H.Add(P.ZoneTransform.GetRotation().Euler());
+		H.Add(P.ZoneTransform.GetScale3D());
 		H.Add(P.ZoneExtent);
 		H.Add(P.WearDir);
 		H.Add(uint32(P.MaskOutput));
@@ -1295,6 +1328,7 @@ namespace
 		for (const FGrungifyPool& Pool : P.Pools)
 		{
 			H.Add(Pool.Center);
+			H.Add(Pool.Radius);
 		}
 		for (const FGrungifyStampData& Stamp : P.Stamps)
 		{
@@ -1311,7 +1345,7 @@ namespace
 	}
 
 	/** Everything about one component that changes its masks, beyond the run-wide inputs. */
-	uint32 HashComponent(UStaticMeshComponent* Component, const FGrungifyComponentReport& Report)
+	uint32 HashComponent(UStaticMeshComponent* Component, const FGrungifyComponentContext& Context)
 	{
 		FHasher H;
 		H.Add(Component->GetPathName());
@@ -1330,10 +1364,7 @@ namespace
 			const UMaterialInterface* Material = UnwrapOwnedMaterial(Component->GetMaterial(Slot), Component);
 			H.Add(Material ? Material->GetPathName() : FString());
 		}
-		for (const FGrungifySlotReport& Slot : Report.SlotDetails)
-		{
-			H.Add(Slot.Reason + Slot.Surface + Slot.Profile + Slot.Gates + Slot.RailSource);
-		}
+		H.Add(Grungify::HashSlotContext(Context));
 		if (const UInstancedStaticMeshComponent* Instanced = Cast<UInstancedStaticMeshComponent>(Component))
 		{
 			H.Add(uint32(Instanced->GetInstanceCount()));
@@ -1514,7 +1545,7 @@ void AGrungifyWeatheringZone::GatherScene(FGrungifyGenerationJob& Job, const FBo
 				Stamp.Radius = It->RadiusCm;
 				Stamp.Falloff = It->Falloff;
 				Stamp.EdgeNoise = It->EdgeNoise;
-				Stamp.Layers = It->Layers;
+				Stamp.Layers = It->WearLayers;
 			}
 		}
 	}
@@ -1803,7 +1834,7 @@ bool AGrungifyWeatheringZone::PrepareJob(FGrungifyGenerationJob& Job, const TCHA
 
 			if (bUseGenerationCache)
 			{
-				Item.Key = HashCombine(Job.EnvironmentHash, HashComponent(Component, Item.Report));
+				Item.Key = HashCombine(Job.EnvironmentHash, HashComponent(Component, Item.Context));
 				if (const TSharedPtr<FGrungifyCacheEntry>* Entry = GenerationCache.Find(Item.Path))
 				{
 					if ((*Entry)->Key == Item.Key && (*Entry)->Result.IsValid())
@@ -1869,9 +1900,9 @@ void AGrungifyWeatheringZone::CollectJob(FGrungifyGenerationJob& Job, TArray<FGr
 		Report.bFromCache = Item.bFromCache;
 		LastReport.CacheHits += Item.bFromCache ? 1 : 0;
 
-		if (AGrungifyWeatheringZone* Owner = Item.TakeOverFrom.Get())
+		if (AGrungifyWeatheringZone* AppliedOwner = Item.TakeOverFrom.Get())
 		{
-			OutTakeOvers.Add(Component, Owner);
+			OutTakeOvers.Add(Component, AppliedOwner);
 		}
 		Result.ReportIndex = LastReport.Components.Add(MoveTemp(Report));
 		OutResults.Add(MoveTemp(Result));
@@ -2217,7 +2248,12 @@ void AGrungifyWeatheringZone::ScatterFromResults(const TArray<FGrungifyComponent
 				{
 					if (DataLayer)
 					{
-						Spawned->AddDataLayer(DataLayer);
+						const UDataLayerManager* LayerManager = UDataLayerManager::GetDataLayerManager(World);
+						const UDataLayerInstance* LayerInstance = LayerManager ? LayerManager->GetDataLayerInstanceFromAsset(DataLayer) : nullptr;
+						if (!LayerInstance || !Spawned->AddDataLayer(LayerInstance))
+						{
+							LastReport.Warnings.AddUnique(FString::Printf(TEXT("Could not assign scatter to Data Layer %s; no assignable instance in this world."), *DataLayer->GetPathName()));
+						}
 					}
 				}
 				ScatteredActors.Add(Spawned);
@@ -2353,9 +2389,9 @@ bool AGrungifyWeatheringZone::WriteBakedAssets(const FGrungifyComponentResult& R
 	UStaticMeshComponent* Component = Result.Component;
 	FString Folder = BakeFolder.Path.IsEmpty() ? FString(TEXT("/Game/Grungify/Baked")) : BakeFolder.Path;
 	Folder.RemoveFromEnd(TEXT("/"));
-	const AActor* Owner = Component->GetOwner();
+	const AActor* ComponentOwner = Component->GetOwner();
 	const FString Base = SanitizeAssetName(FString::Printf(TEXT("%s_%s_%s"), *GetActorNameOrLabel(),
-		Owner ? *Owner->GetActorNameOrLabel() : TEXT("NoOwner"), *Component->GetName()));
+		ComponentOwner ? *ComponentOwner->GetActorNameOrLabel() : TEXT("NoOwner"), *Component->GetName()));
 	const FString PngDirectory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Grungify"), TEXT("Bakes"), SanitizeAssetName(GetActorNameOrLabel()));
 
 	// Re-baking updates the same assets, so materials and levels that reference them stay valid.

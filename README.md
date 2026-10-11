@@ -312,6 +312,16 @@ for report in unreal.GrungifyBlueprintLibrary.run_all_zones(world, unreal.Grungi
     print(report.zone, report.weathered, report.skipped, report.seconds)
 ```
 
+The editor builders are also available to Blueprint and Python through `UGrungifyEditorLibrary`:
+
+```python
+message = unreal.GrungifyEditorLibrary.build_reference_scene()
+# A message string means success; None means failure (the log contains details).
+# This explicitly creates/saves /Game/Grungify/Reference and opens its map.
+# Run it in an isolated test project or after saving your current work.
+message = unreal.GrungifyEditorLibrary.build_material_library(False)
+```
+
 ### Runtime wear (gameplay)
 
 `UGrungifyRuntimeWearSubsystem` (a world subsystem) paints extra wear into **texture-output** meshes during play: impacts, footsteps, scorch marks.
@@ -323,6 +333,7 @@ for report in unreal.GrungifyBlueprintLibrary.run_all_zones(world, unreal.Grungi
 - **Component:** `UGrungifyRuntimeWearComponent` paints under its owner with `EmitWear`, for example from footstep notifies.
 - **How it works:** on a component's first hit, its baked mask textures are copied into render targets, and its slots switch to dynamic material instances that read them. Reset switches back to the baked result.
 - **Setup:** enable *Project Settings → Physics → Support UV From Hit Results*, and trace against complex collision so hits carry a face index. Meshes weathered with vertex-colour or instanced output can't be painted at runtime.
+- **Current channel limit:** runtime Handling and Moss painting returns `false` before changing materials or masks. UE canvas additive drawing writes RGB only; alpha holdout erases existing masks rather than accumulating alpha. These alpha channels need a dedicated channel-preserving render pass and a real GPU readback test before they can be enabled safely. Procedural Handling and Moss generation is unaffected.
 
 
 ### Reports
@@ -471,7 +482,7 @@ These cases should be checked in-editor on a test level, never on production roo
       - the screenshot functional test options
       - render-target drawing in runtime wear
       - World Partition actor descriptors in the commandlet (`ForEachActorDescInstance`, 5.4+ API), and map loading through `UEditorLoadingAndSavingUtils` inside a commandlet
-      - `UStaticMesh::NaniteSettings` access in the reference scene (switch to `Get/SetNaniteSettings` if it's private)
+      - `UStaticMesh::NaniteSettings` access in the reference scene (use the supported `Get/SetNaniteSettings` accessors)
     - Then run `Automation RunTests Grungify` and check that the existing `Grungify.State`, `Grungify.Content` and `Grungify.Generation` tests still pass. The texture-bake conservation test should be unchanged, since every new feature defaults to off.
 14. **Reference scene and screenshots:**
     - Run *Tools → Grungify → Build Reference Scene*, then `Automation RunTests Project.Functional Tests` with the map open.

@@ -155,12 +155,15 @@ class FGrungifyGateSampler
 public:
 	bool Init(UTexture2D* Texture, FString& OutError);
 	float Sample(const FVector2f& UV, EGrungifyChannel Channel) const;
+	/** Identity of the copied source pixels and layout, computed once on Init. */
+	uint32 Hash() const { return ContentHash; }
 
 private:
 	int32 Width = 0;
 	int32 Height = 0;
 	int32 BytesPerPixel = 0;
 	TArray64<uint8> Pixels;
+	uint32 ContentHash = 0;
 };
 
 struct FGrungifyGenerationParams
@@ -387,6 +390,9 @@ namespace Grungify
 
 	/** True if the rule targets this slot. */
 	bool RuleMatchesSlot(const FGrungifySlotRule& Rule, const UStaticMeshComponent* Component, int32 MaterialIndex, FString* OutWhy = nullptr);
+
+	/** Hashes effective generation inputs, not rounded diagnostic labels. */
+	uint32 HashSlotContext(const FGrungifyComponentContext& Context);
 
 	/**
 	 * Checks the mask UV channel of a mesh LOD: presence, 0..1 range, overlapping islands, zero-area triangles,

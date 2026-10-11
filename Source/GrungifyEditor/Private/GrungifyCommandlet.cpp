@@ -39,7 +39,7 @@ namespace
 		TEXT("      [-LoadPadding=200] [-unattended -nullrhi]"),
 		TEXT(""),
 		TEXT("  -Map          Long package names of the maps to process, comma separated."),
-		TEXT("  -Operation    What to run on each zone. Bake = Bake To Assets."),
+		TEXT("  -Operation    What to run on each zone. Bake = Bake To Assets and requires -Save."),
 		TEXT("  -Zones        Only zones with these actor labels (case-insensitive), comma separated."),
 		TEXT("  -Save         Save dirty map, actor and content packages. Without it nothing is saved."),
 		TEXT("  -Report       Folder for one JSON report per zone (default Saved/Grungify/Commandlet)."),
@@ -441,6 +441,13 @@ int32 UGrungifyCommandlet::Main(const FString& Params)
 		PrintUsage();
 		return ExitUsage;
 	}
+	Runner.bSave = Switches.Contains(TEXT("Save"));
+	// BakeToAssets saves its outputs itself; reject before loading or modifying any map.
+	if (Runner.Operation == EGrungifyOperation::Bake && !Runner.bSave)
+	{
+		UE_LOG(LogGrungifyCommandlet, Error, TEXT("Bake requires -Save because it writes reusable assets."));
+		return ExitUsage;
+	}
 
 	// Check every map up front so a typo fails fast instead of after an hour of baking.
 	TArray<FString> Maps;
@@ -468,8 +475,6 @@ int32 UGrungifyCommandlet::Main(const FString& Params)
 	{
 		Runner.LoadPaddingCm = FMath::Max(0.0, FCString::Atod(**PaddingParam));
 	}
-	Runner.bSave = Switches.Contains(TEXT("Save"));
-
 	const FString* ReportParam = ParamMap.Find(TEXT("Report"));
 	Runner.ReportDir = ReportParam && !ReportParam->IsEmpty()
 		? FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), ReportParam->TrimQuotes())
