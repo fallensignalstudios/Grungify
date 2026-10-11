@@ -71,8 +71,7 @@ bool AGrungifyWeatheringZone::GenerateLandscapes(const FGrungifyGenerationJob& J
 	TArray<ALandscapeProxy*> Proxies;
 	for (TActorIterator<ALandscapeProxy> It(World); It; ++It)
 	{
-		const FBox Bounds = It->GetComponentsBoundingBox(/*bNonColliding*/ true);
-		if (Bounds.IsValid && Bounds.Intersect(ZoneBox) && !Grungify::HasIgnoreTag(*It, nullptr))
+		if (ShouldConsiderActor(*It, ZoneBox))
 		{
 			Proxies.Add(*It);
 		}
@@ -124,20 +123,9 @@ bool AGrungifyWeatheringZone::GenerateLandscapes(const FGrungifyGenerationJob& J
 		Result->SizeX = FMath::Clamp(FMath::CeilToInt(Size.X / Texel), 1, MaxLandscapeTexels);
 		Result->SizeY = FMath::Clamp(FMath::CeilToInt(Size.Y / Texel), 1, MaxLandscapeTexels);
 
-		// Same inputs and same landscape shape: reuse the last masks.
-		const uint32 Key = HashCombine(HashCombine(Job.EnvironmentHash, GetTypeHash(Result->ProxyPath)),
-			HashCombine(HashCombine(GetTypeHash(Min), GetTypeHash(Size)), HashCombine(GetTypeHash(LandscapeContactRadiusCm),
-				HashCombine(GetTypeHash(LandscapeContactStrength), GetTypeHash(ProxyBox)))));
-		if (const TSharedPtr<FGrungifyLandscapeResult>* Cached = LandscapeCache.Find(Result->ProxyPath))
-		{
-			if ((*Cached)->Key == Key && bUseGenerationCache)
-			{
-				PendingLandscapes.Add(*Cached);
-				LastReport.CacheHits += 1;
-				continue;
-			}
-		}
-		Result->Key = Key;
+		// Bounds and proxy path cannot detect a same-bounds sculpt or collision rebuild.
+		// Recompute terrain masks until a complete height/contact/profile revision key exists;
+		// the separate per-mesh cache is unaffected.
 
 		const int32 Count = Result->SizeX * Result->SizeY;
 		const double StepX = Size.X / Result->SizeX;
@@ -262,16 +250,12 @@ bool AGrungifyWeatheringZone::GenerateLandscapes(const FGrungifyGenerationJob& J
 			}
 			continue;
 		}
-		// The inputs are only needed to generate; keep the cache lean.
+		// The inputs are only needed to generate; keep the pending result lean.
 		Result->Positions.Empty();
 		Result->Normals.Empty();
 		Result->Contact.Empty();
 		Result->Valid.Empty();
 		Result->Seconds = float(FPlatformTime::Seconds() - Start);
-		if (bUseGenerationCache)
-		{
-			LandscapeCache.Add(Result->ProxyPath, Result);
-		}
 		PendingLandscapes.Add(Result);
 		++Phase.Items;
 	}
@@ -313,13 +297,38 @@ void AGrungifyWeatheringZone::WriteLandscapes(TArray<FGrungifyLandscapeRecord>& 
 	for (const TSharedPtr<FGrungifyLandscapeResult>& Result : PendingLandscapes)
 	{
 		ALandscapeProxy* Proxy = Cast<ALandscapeProxy>(Result->Proxy.Get());
-		if (!Proxy)
+		if (!Proxy || !ShouldConsiderActor(Proxy, ZoneBox))
+		{
+			continue;
+		}
+		// Recheck component admission before any texture creation or package mutation.
+		// A component Ignore tag must work even when its landscape proxy is included.
+		TArray<ULandscapeComponent*> Admitted;
+		int32 Taken = 0;
+		for (ULandscapeComponent* Component : Proxy->LandscapeComponents)
+		{
+			if (!Component || !Component->Bounds.GetBox().Intersect(ZoneBox)
+				|| Grungify::HasIgnoreTag(Proxy, Component))
+			{
+				continue;
+			}
+			if (Others.Contains(Component))
+			{
+				++Taken;
+				continue;
+			}
+			if (Component->GetLandscapeMaterial())
+			{
+				Admitted.Add(Component);
+			}
+		}
+		if (Admitted.Num() == 0)
 		{
 			continue;
 		}
 		Proxy->Modify();
 		UTexture2D* Texture = CreateLandscapeTexture(Proxy, TEXT("GrungifyLandscapeMask"), Result->SizeX, Result->SizeY, Result->Pixels);
-		UTexture2D* Extended = Result->ExtendedPixels.Num() > 0
+		UTexture2D* ExtendedTexture = Result->ExtendedPixels.Num() > 0
 			? CreateLandscapeTexture(Proxy, TEXT("GrungifyLandscapeExtendedMask"), Result->SizeX, Result->SizeY, Result->ExtendedPixels) : nullptr;
 		if (!Texture)
 		{
@@ -330,18 +339,8 @@ void AGrungifyWeatheringZone::WriteLandscapes(TArray<FGrungifyLandscapeRecord>& 
 		TMap<UMaterialInterface*, UMaterialInstanceConstant*> Instances;
 		int32 Bound = 0;
 		int32 NotHooked = 0;
-		int32 Taken = 0;
-		for (ULandscapeComponent* Component : Proxy->LandscapeComponents)
+		for (ULandscapeComponent* Component : Admitted)
 		{
-			if (!Component || !Component->Bounds.GetBox().Intersect(ZoneBox))
-			{
-				continue;
-			}
-			if (Others.Contains(Component))
-			{
-				++Taken;
-				continue;
-			}
 			UMaterialInterface* Parent = Component->GetLandscapeMaterial();
 			if (!Parent)
 			{
@@ -357,7 +356,7 @@ void AGrungifyWeatheringZone::WriteLandscapes(TArray<FGrungifyLandscapeRecord>& 
 			if (!Instance)
 			{
 				Instance = NewObject<UMaterialInstanceConstant>(Proxy, MakeUniqueObjectName(Proxy, UMaterialInstanceConstant::StaticClass(), TEXT("GrungifyLandscapeMI")), RF_Transactional);
-				Grungify::ConfigureOwnedInstance(Instance, Parent, Texture, Extended, EGrungifySurfaceType::Stone, &Palette, LandscapeTexelSizeCm);
+				Grungify::ConfigureOwnedInstance(Instance, Parent, Texture, ExtendedTexture, EGrungifySurfaceType::Stone, &Palette, LandscapeTexelSizeCm);
 				// MF_GrungifyLandscape reads these as ordinary parameters (landscapes have no custom primitive data).
 				Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Mask Mode")), Grungify::MaskModeTexture);
 				Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Surface Type")), 0.f);

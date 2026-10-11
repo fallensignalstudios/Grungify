@@ -2118,7 +2118,7 @@ bool AGrungifyWeatheringZone::TickBackgroundJob(float DeltaTime)
 	TArray<FGrungifyComponentResult> Results;
 	TMap<UMeshComponent*, AGrungifyWeatheringZone*> TakeOvers;
 	CollectJob(*Job, Results, TakeOvers);
-	// Landscape traces need the game thread; they're quick next to mesh generation, and mostly cached while you tweak.
+	// Landscape traces need the game thread and are retraced each run; only mesh results are cached.
 	GenerateLandscapes(*Job, TFunction<bool()>());
 	Modify();
 	if (RestorePreview())
@@ -2368,13 +2368,10 @@ bool AGrungifyWeatheringZone::WriteResult(const FGrungifyComponentResult& Result
 		UTexture2D* Texture = Grungify::CreateMaskTexture(Component, Result.TextureSize, Result.TexturePixels);
 		UTexture2D* ExtendedTexture = Result.ExtendedPixels.Num() > 0 ? Grungify::CreateMaskTexture(Component, Result.TextureSize, Result.ExtendedPixels) : nullptr;
 		if (!Texture || (Result.ExtendedPixels.Num() > 0 && !ExtendedTexture)
-			|| !Grungify::BindOwnedMaterials(Component, Texture, Result.MaterialSurfaces, DebugMaterial, &Palette, ExtendedTexture, Result.TexelSizeCm))
+			|| !Grungify::BindOwnedMaterials(Component, Texture, Result.MaterialSurfaces, DebugMaterial, &Palette, ExtendedTexture, Result.TexelSizeCm,
+				Result.MaskUVChannelUsed == 0 && UGrungifySettings::Get()->MaskUVChannel != 0))
 		{
 			return Fail(TEXT("texture or admitted material bindings could not be written"));
-		}
-		if (Result.MaskUVChannelUsed == 0 && UGrungifySettings::Get()->MaskUVChannel != 0)
-		{
-			Grungify::SetOwnedScalar(Component, TEXT("Grungify Use UV0"), 1.f);
 		}
 	}
 	else

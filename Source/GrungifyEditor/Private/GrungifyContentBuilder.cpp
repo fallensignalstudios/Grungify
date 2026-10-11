@@ -1075,8 +1075,8 @@ namespace
 	}
 
 	/**
-	 * A plugin installed in the engine (Fab / Marketplace) is shared and read-only: its prebuilt content must never be
-	 * rebuilt on a buyer's machine. Copying the plugin into the project's Plugins folder makes it writable again.
+	 * Engine plugins are shared: validate their prebuilt content without rebuilding it in place.
+	 * BuildPlugin also sets Installed on packaged project plugins; that metadata is not a filesystem write policy.
 	 */
 	bool CanWritePluginContent(FString& OutWhy)
 	{
@@ -1086,16 +1086,20 @@ namespace
 			OutWhy = TEXT("plugin not found");
 			return false;
 		}
-		if (Plugin->GetType() == EPluginType::Engine || Plugin->GetDescriptor().bInstalled)
+		if (Plugin->GetType() == EPluginType::Engine)
 		{
 			OutWhy = TEXT("Grungify is installed in the engine (for example from Fab), so its content is read-only");
 			return false;
 		}
-		const FString Function = FPackageName::LongPackageNameToFilename(FunctionPath, FPackageName::GetAssetPackageExtension());
-		if (FPaths::FileExists(Function) && IFileManager::Get().IsReadOnly(*Function))
+		for (const TCHAR* Path : { ZoneBlueprintPath, FunctionPath, SubstrateFunctionPath, LandscapeFunctionPath,
+			DisplacementFunctionPath, DebugMaterialPath, ExampleMaterialPath, NoMaskTexturePath })
 		{
-			OutWhy = TEXT("the plugin's content files are read-only (check them out of source control to rebuild)");
-			return false;
+			const FString File = FPackageName::LongPackageNameToFilename(Path, FPackageName::GetAssetPackageExtension());
+			if (FPaths::FileExists(File) && IFileManager::Get().IsReadOnly(*File))
+			{
+				OutWhy = FString::Printf(TEXT("the plugin's content file is read-only: %s (check it out of source control to rebuild)"), *File);
+				return false;
+			}
 		}
 		return true;
 	}
@@ -1209,7 +1213,14 @@ FGrungifyContentReport FGrungifyContentBuilder::Run(bool bForceRebuild)
 		ValidateGeneratedGraphs(Shipped, FindExisting<UMaterial>(DebugMaterialPath), FindExisting<UMaterial>(ExampleMaterialPath), FindExisting<UTexture2D>(NoMaskTexturePath), Report);
 		for (const FExtraFunction& Extra : ExtraFunctions())
 		{
-			Extra.Validate(FindExisting<UMaterialFunction>(Extra.Path), Report);
+			UMaterialFunction* Function = FindExisting<UMaterialFunction>(Extra.Path);
+			if (!Function || !Function->Description.Contains(CurrentMarker()))
+			{
+				Report.Errors.Add(FString::Printf(TEXT("%s: shipped content is missing or was built for different settings (expected %s)"),
+					Extra.Path, *CurrentMarker()));
+				continue;
+			}
+			Extra.Validate(Function, Report);
 		}
 		FString Token;
 		if (Report.Errors.Num() == 0 && MakeReadinessToken(Token) && IFileManager::Get().MakeDirectory(*SavedDirectory, true)

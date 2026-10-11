@@ -327,7 +327,6 @@ struct FGrungifyLandscapeResult
 {
 	TWeakObjectPtr<AActor> Proxy;
 	FString ProxyPath;
-	uint32 Key = 0;
 	/** World-space XY rectangle covered by the textures. */
 	FVector2D Min = FVector2D::ZeroVector;
 	FVector2D Size = FVector2D::ZeroVector;
@@ -485,16 +484,14 @@ namespace Grungify
 	/** Owns only admitted slots; Texture is null for vertex masks. Excluded material identities are retained. */
 	bool BindOwnedMaterials(UMeshComponent* Component, UTexture2D* Texture,
 		const TArray<EGrungifySurfaceType>& MaterialSurfaces, UMaterialInterface* ParentOverride,
-		const FGrungifyPalette* Palette = nullptr, UTexture2D* ExtendedTexture = nullptr, float TexelSizeCm = 0.f);
+		const FGrungifyPalette* Palette = nullptr, UTexture2D* ExtendedTexture = nullptr, float TexelSizeCm = 0.f,
+		bool bUseUV0 = false);
 
 	/** Writes per-instance masks at UGrungifySettings::InstanceCustomDataIndex. False (nothing written) if those indices are in use. */
 	bool WriteInstanceMasks(UInstancedStaticMeshComponent* Component, const TArray<FVector4f>& Masks);
 
 	/** True if none of the per-instance custom data floats Grungify uses hold another system's values. */
 	bool InstanceSlotsFree(const FGrungifyComponentRecord& OriginalState);
-
-	/** Sets a scalar on every material instance the component owns (the zone's per-slot instances). */
-	void SetOwnedScalar(UMeshComponent* Component, FName Parameter, float Value);
 
 	/** Shared setup of an owned or baked instance: textures, activation, surface, texel size, palette. */
 	void ConfigureOwnedInstance(UMaterialInstanceConstant* Instance, UMaterialInterface* Parent, UTexture2D* Texture, UTexture2D* ExtendedTexture,

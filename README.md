@@ -19,7 +19,7 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 > - **v0.4:** zones panel, wear stamps, cache and background preview, seed variants, Bake To Assets, sky exposure, water flow, extended layers, scatter, instanced meshes, Data Layers, a commandlet, a Blueprint/Python API, runtime wear and a reference scene.
 > - **v0.5:** automatic material hookup and Substrate.
 >
-> **v0.6.0 has not been compiled or run yet.** It was written without an engine install, so expect a round of compile fixes. It adds:
+> **v0.6.1 passed native UE 5.8.3 builds and all 19 automation tests.** Four fixed reference views render successfully; approved screenshot baselines, packaged game rendering and the new terrain/displacement shader paths remain unverified. The 0.6 update adds:
 > - **A stronger default look**, with a **Grungify Contrast** control (see [Look strength](#look-strength)).
 > - **Skeletal meshes, landscape, height blending and Nanite displacement.**
 > - **Fab packaging:** a showcase map, build scripts and a readiness check, read-only installed content, engine-compatibility wrappers for 5.5–5.8, and copyright headers.
@@ -573,6 +573,9 @@ Backups made before v0.2.1 have no separate live-data snapshot. Restoring one us
 
 ## Native verification (UE 5.8.3, 2026-10-11)
 
+- v0.6.1 passed strict Win64 Editor Development, Game Development and Game Shipping builds with unchanged source hashes. All 19 native automation tests passed (18 plain successes and one expected occupied-data warning); the editor exited normally with code 0. Tests include project plugins with `Installed=true`, all eight generated outputs and their saved hashes, landscape actor filtering, excluded-slot UV fallback conservation, and the retained material-hookup/Undo/Redo checks.
+- The v0.6.1 isolated reference builder saved seven weathered meshes and four screenshot actors. All four 1280 × 720 screenshot tests rendered and exited normally with code 0; each warned that no approved comparison baseline exists. Coffer/trim edge wear and vent runoff read more strongly than v0.5.1 in matching views. Broad faces remain flat and the thin rail remains visually clean; some edge treatment forms continuous bands. This establishes a visible strength gain, not final environment art acceptance.
+- v0.6.1 fixes the new showcase's stamp field and setup-time live-preview ordering, landscape targeting, stale landscape-cache reuse, and UV fallback writes to excluded materials. Landscapes are deliberately retraced on every generation until their sculpt/contact/profile revisions can be keyed correctly. The landscape test uses a transient bounded proxy; it does not prove rendered terrain wear. Landscape/displacement readiness validates graph structure and saved bytes without compiling or rendering those new paths. Substrate remained disabled in the verified host.
 - v0.5.1 passed Win64 `BuildPlugin` for UnrealEditor Development, UnrealGame Development and UnrealGame Shipping, with `-NoPCH -NoSharedPCH -DisableUnity` and unchanged source hashes throughout the build.
 - v0.5.1 passed all 18 native automation tests (17 plain successes and one expected occupied-data warning). The material-hookup fixture exercises Add/Remove, Undo/Redo, unchanged legacy connections, unsupported-input refusal and backup failure. The cache/scatter, exact instance-layout restoration and runtime-wear admission tests also passed. The actual editor process exited normally with code 0.
 - The v0.5.1 reference builder saved seven weathered meshes and four functional screenshot actors in the isolated host project. `Grungify.Runtime.ReferenceSceneCooked` checks editor-loaded bindings and textures; its name does not establish a packaged or cooked rendering pass. Substrate was disabled, so its generated graph was validated but its enabled shader/render path remains unverified.
@@ -683,7 +686,7 @@ See `Docs/Fab.md` for the full checklist, listing draft and media shot list, and
 4. **Fill in the descriptor URLs.** `DocsURL`, `SupportURL`, `FabURL` and `CreatedByURL` in `Grungify.uplugin` are empty on purpose. Then set `IsBetaVersion` to false for release.
 5. **Replace the icon.** `Resources/Icon128.png` is a generated placeholder; swap in real art.
 
-**Installed copies are read-only.** When Grungify is installed in the engine (from Fab), it validates its shipped content instead of rebuilding it. That content was built for CPD index 0, UV channel 1 and instance data index 0. A project that changes those settings is told to copy the plugin into its own `Plugins` folder, where the content can be rebuilt.
+**Engine copies are read-only.** When Grungify is installed in the engine (from Fab), it validates its shipped content instead of rebuilding it. That content was built for CPD index 0, UV channel 1 and instance data index 0. A project that changes those settings is told to copy the plugin into its own `Plugins` folder, where writable content can be rebuilt. `BuildPlugin` also sets `Installed=true` on packaged project plugins; that metadata alone does not forbid rebuilding their content. Read-only files still refuse regeneration.
 
 ## Layout
 

@@ -588,19 +588,6 @@ namespace Grungify
 		Instance->PostEditChange();
 	}
 
-	void SetOwnedScalar(UMeshComponent* Component, FName Parameter, float Value)
-	{
-		for (int32 Slot = 0; Slot < Component->GetNumMaterials(); ++Slot)
-		{
-			UMaterialInstanceConstant* Instance = Cast<UMaterialInstanceConstant>(Component->GetMaterial(Slot));
-			if (Instance && Instance->GetOuter() == Component)
-			{
-				Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(Parameter), Value);
-				Instance->PostEditChange();
-			}
-		}
-	}
-
 	bool InstanceSlotsFree(const FGrungifyComponentRecord& OriginalState)
 	{
 		const int32 Base = UGrungifySettings::Get()->InstanceCustomDataIndex;
@@ -624,7 +611,7 @@ namespace Grungify
 
 	bool BindOwnedMaterials(UMeshComponent* Component, UTexture2D* Texture,
 		const TArray<EGrungifySurfaceType>& MaterialSurfaces, UMaterialInterface* ParentOverride,
-		const FGrungifyPalette* Palette, UTexture2D* ExtendedTexture, float TexelSizeCm)
+		const FGrungifyPalette* Palette, UTexture2D* ExtendedTexture, float TexelSizeCm, bool bUseUV0)
 	{
 		if (MaterialSurfaces.Num() != Component->GetNumMaterials())
 		{
@@ -653,6 +640,13 @@ namespace Grungify
 			const FName Name = MakeUniqueObjectName(Component, UMaterialInstanceConstant::StaticClass(), *FString::Printf(TEXT("%s%d"), MaskInstancePrefix, Slot));
 			UMaterialInstanceConstant* Instance = NewObject<UMaterialInstanceConstant>(Component, Name, RF_Transactional);
 			ConfigureOwnedInstance(Instance, Parent, Texture, ExtendedTexture, MaterialSurfaces[Slot], Palette, TexelSizeCm);
+			if (bUseUV0)
+			{
+				// Only this newly-created admitted instance belongs to this write. A preexisting
+				// component-outer MIC in an excluded slot must never receive parameter edits.
+				Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Use UV0")), 1.f);
+				Instance->PostEditChange();
+			}
 			Component->SetMaterial(Slot, Instance);
 		}
 		return true;

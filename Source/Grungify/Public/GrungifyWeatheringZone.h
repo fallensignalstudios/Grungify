@@ -347,7 +347,7 @@ public:
 
 	// ------------------------------------------------------------ Performance
 
-	/** Reuse per-mesh results when nothing affecting that mesh changed (makes live preview and variant flipping fast). */
+	/** Reuse per-mesh results when nothing affecting that mesh changed. Landscapes are retraced on every run. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Performance")
 	bool bUseGenerationCache = true;
 
@@ -565,7 +565,7 @@ private:
 	/** Puts landscape components back; returns false if any couldn't be restored (their records stay). */
 	bool RestoreLandscapes(TArray<FGrungifyLandscapeRecord>& Records);
 	TArray<TSharedPtr<FGrungifyLandscapeResult>> PendingLandscapes;
-	TMap<FString, TSharedPtr<FGrungifyLandscapeResult>> LandscapeCache;
+	friend class FGrungifyLandscapeScopeTest;
 
 	bool bBakingToAssets = false;
 	TArray<UPackage*> BakedPackages;

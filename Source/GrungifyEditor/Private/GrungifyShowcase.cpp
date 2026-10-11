@@ -426,15 +426,20 @@ namespace
 					ZoneClass = Blueprint->GeneratedClass;
 				}
 			}
-			AGrungifyWeatheringZone* NewZone = Finish(World->SpawnActor<AGrungifyWeatheringZone>(ZoneClass, Center, FRotator::ZeroRotator, SpawnParams()),
-				TEXT("WeatheringZone_") + Name);
+			AGrungifyWeatheringZone* NewZone = World->SpawnActor<AGrungifyWeatheringZone>(ZoneClass, Center, FRotator::ZeroRotator, SpawnParams());
+			if (NewZone)
+			{
+				// Labels and preset edits can invoke PostEditChange; retire any spawn preview first.
+				NewZone->bLivePreview = false;
+				NewZone->CancelPreview();
+			}
+			NewZone = Finish(NewZone, TEXT("WeatheringZone_") + Name);
 			if (!NewZone || !NewZone->GetZoneComponent())
 			{
 				Error = FString::Printf(TEXT("could not spawn the %s weathering zone"), *Name);
 				bFailed = true;
 				return nullptr;
 			}
-			NewZone->bLivePreview = false;
 			if (Preset)
 			{
 				// Assigning Preset only loads it through the Details panel, so load it explicitly.
@@ -781,8 +786,8 @@ namespace
 		{
 			Stamp->RadiusCm = 120.f;
 			Stamp->Falloff = 0.6f;
-			Stamp->Layers.Dust = 1.f;
-			Stamp->Layers.EdgeChips = 0.4f;
+			Stamp->WearLayers.Dust = 1.f;
+			Stamp->WearLayers.EdgeChips = 0.4f;
 			// Syncs the sphere to the radius.
 			Stamp->PostEditChange();
 		}
@@ -793,14 +798,14 @@ namespace
 		{
 			Stamp->RadiusCm = 90.f;
 			Stamp->Falloff = 0.4f;
-			Stamp->Layers.EdgeChips = -1.f;
-			Stamp->Layers.Dust = -1.f;
-			Stamp->Layers.Runoff = -1.f;
-			Stamp->Layers.Handling = -1.f;
-			Stamp->Layers.Moisture = -1.f;
-			Stamp->Layers.Soot = -1.f;
-			Stamp->Layers.Scorch = -1.f;
-			Stamp->Layers.Moss = -1.f;
+			Stamp->WearLayers.EdgeChips = -1.f;
+			Stamp->WearLayers.Dust = -1.f;
+			Stamp->WearLayers.Runoff = -1.f;
+			Stamp->WearLayers.Handling = -1.f;
+			Stamp->WearLayers.Moisture = -1.f;
+			Stamp->WearLayers.Soot = -1.f;
+			Stamp->WearLayers.Scorch = -1.f;
+			Stamp->WearLayers.Moss = -1.f;
 			Stamp->PostEditChange();
 		}
 		Text(Name + TEXT("_Label_Clean"), TEXT("wear stamp: clean patch"), At(400., 360., 285.), 22.f, FColor(255, 210, 80));

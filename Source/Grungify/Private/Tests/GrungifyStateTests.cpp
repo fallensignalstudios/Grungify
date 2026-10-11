@@ -250,6 +250,26 @@ bool FGrungifyMaterialOwnershipTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("Clear raw materials"), Grungify::RestoreRecord(Before, false));
 	TestTrue(TEXT("Original raw array shape"), Component->OverrideMaterials == Before.OverrideMaterials);
+
+	// An unrelated component-owned MIC is not ours merely because it has the same Outer.
+	UMaterialInstanceConstant* Excluded = NewObject<UMaterialInstanceConstant>(Component);
+	Excluded->SetParentEditorOnly(Original);
+	Excluded->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Use UV0")), .25f);
+	Component->SetMaterial(1, Excluded);
+	Grungify::CaptureRecord(Component, Before);
+	const TArray<FScalarParameterValue> ExcludedScalars = Excluded->ScalarParameterValues;
+	const TArray<FTextureParameterValue> ExcludedTextures = Excluded->TextureParameterValues;
+	TestTrue(TEXT("Bind UV0 fallback only to admitted slot"), Grungify::BindOwnedMaterials(
+		Component, nullptr, Surfaces, nullptr, nullptr, nullptr, 0.f, true));
+	Owned = Cast<UMaterialInstanceConstant>(Component->GetMaterial(0));
+	float UseUV0 = 0.f;
+	TestTrue(TEXT("New admitted MIC selects actual UV0 bake"), Owned
+		&& Owned->GetScalarParameterValue(FMaterialParameterInfo(TEXT("Grungify Use UV0")), UseUV0) && UseUV0 == 1.f);
+	TestTrue(TEXT("Excluded MIC identity and all scalar/texture overrides held"), Component->GetMaterial(1) == Excluded
+		&& Excluded->ScalarParameterValues == ExcludedScalars && Excluded->TextureParameterValues == ExcludedTextures);
+	TestTrue(TEXT("Restore fallback bindings"), Grungify::RestoreRecord(Before, false));
+	TestTrue(TEXT("Excluded preexisting MIC remains exact after restoration"), Component->OverrideMaterials == Before.OverrideMaterials
+		&& Excluded->ScalarParameterValues == ExcludedScalars && Excluded->TextureParameterValues == ExcludedTextures);
 	return true;
 }
 
