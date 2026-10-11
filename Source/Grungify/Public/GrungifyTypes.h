@@ -10,6 +10,7 @@ class UMaterialInterface;
 class UStaticMeshComponent;
 class UStaticMesh;
 class UTexture2D;
+class UDataLayerAsset;
 
 GRUNGIFY_API DECLARE_LOG_CATEGORY_EXTERN(LogGrungify, Log, All);
 
@@ -32,7 +33,12 @@ enum class EGrungifyPreviewDisplay : uint8
 	EdgeChips UMETA(DisplayName = "Edge Chips Mask"),
 	Dust UMETA(DisplayName = "Dust Mask"),
 	Runoff UMETA(DisplayName = "Runoff Mask"),
-	Handling UMETA(DisplayName = "Handling Mask")
+	Handling UMETA(DisplayName = "Handling Mask"),
+	Moisture UMETA(DisplayName = "Moisture Mask (texture output)"),
+	Soot UMETA(DisplayName = "Soot Mask (texture output)"),
+	Scorch UMETA(DisplayName = "Scorch Mask (texture output)"),
+	Moss UMETA(DisplayName = "Moss Mask (texture output)"),
+	AllExtended UMETA(DisplayName = "All Extended Masks (texture output)")
 };
 
 /** How the zone finds the floor that "dust at feet" and "hand height" are measured from. */
@@ -75,6 +81,20 @@ enum class EGrungifyChannel : uint8
 	G,
 	B,
 	A
+};
+
+/** Every wear layer, for stamps, scatter and runtime wear. Primary layers live in mask texture 1 / vertex colour; extended layers in mask texture 2. */
+UENUM(BlueprintType)
+enum class EGrungifyWearLayer : uint8
+{
+	EdgeChips,
+	Dust,
+	Runoff,
+	Handling,
+	Moisture UMETA(ToolTip = "Damp patches, pooling and water lines; the shader adds efflorescence on stone."),
+	Soot,
+	Scorch,
+	Moss UMETA(ToolTip = "Moss and lichen on damp, sheltered, north-facing stone and trim.")
 };
 
 /** Per-surface multipliers for each wear layer. */
@@ -258,6 +278,195 @@ struct GRUNGIFY_API FGrungifyPalette
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideReliefStrength", ClampMin = "0", UIMax = "2"))
 	float ReliefStrength = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideCrackStrength = false;
+
+	/** Crack Strength: hairline cracks across stone where it is chipped and exposed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideCrackStrength", ClampMin = "0", UIMax = "2"))
+	float CrackStrength = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideMoistureStrength = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideMoistureStrength", ClampMin = "0", UIMax = "2"))
+	float MoistureStrength = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideSootStrength = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideSootStrength", ClampMin = "0", UIMax = "2"))
+	float SootStrength = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideScorchStrength = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideScorchStrength", ClampMin = "0", UIMax = "2"))
+	float ScorchStrength = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideMossStrength = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideMossStrength", ClampMin = "0", UIMax = "2"))
+	float MossStrength = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideMossColor = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideMossColor"))
+	FLinearColor MossColor = FLinearColor(0.12f, 0.18f, 0.05f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideSootColor = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideSootColor"))
+	FLinearColor SootColor = FLinearColor(0.03f, 0.028f, 0.025f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideEfflorescenceColor = false;
+
+	/** Salt bloom left on damp stone as it dries. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideEfflorescenceColor"))
+	FLinearColor EfflorescenceColor = FLinearColor(0.78f, 0.76f, 0.70f);
+};
+
+/**
+ * Layers beyond the four primary ones. They are stored in a second mask texture, so they need Texture mask output
+ * (Auto switches to texture for any mesh that has the mask UV channel when one of these is above zero).
+ */
+USTRUCT(BlueprintType)
+struct GRUNGIFY_API FGrungifyExtendedLayers
+{
+	GENERATED_BODY()
+
+	/** Damp ground around pools, along traced water paths and below the water line. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0", UIMax = "2"))
+	float MoistureIntensity = 0.f;
+
+	/** How far dampness spreads around a pool. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0", UIMax = "300", Units = "cm"))
+	float PoolDampRadiusCm = 60.f;
+
+	/** Height of an old flood line above the floor (0 = none). Everything below is damp, with a tide mark at the top. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moisture", meta = (ClampMin = "0", UIMax = "300", Units = "cm"))
+	float WaterLineHeightCm = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moss", meta = (ClampMin = "0", UIMax = "2"))
+	float MossIntensity = 0.f;
+
+	/** Which way is north, as a yaw in the world (0 = +X). Moss favours north-facing surfaces. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moss", meta = (UIMin = "-180", UIMax = "180", Units = "deg"))
+	float NorthYawDegrees = 0.f;
+
+	/** 0 = moss grows on any facing, 1 = only north-facing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Moss", meta = (ClampMin = "0", ClampMax = "1"))
+	float MossNorthBias = 0.6f;
+
+	/** Soot plumes above lights and fire sources (actors tagged Grungify.Fire or named like fire, torch, brazier, candle). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Soot & Scorch", meta = (ClampMin = "0", UIMax = "2"))
+	float SootIntensity = 0.f;
+
+	/** Also treat point and spot lights in the zone as soot sources (lamps, sconces). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Soot & Scorch")
+	bool bSootFromLights = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Soot & Scorch", meta = (ClampMin = "10", UIMax = "500", Units = "cm"))
+	float SootRadiusCm = 120.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Soot & Scorch", meta = (ClampMin = "10", UIMax = "1000", Units = "cm"))
+	float SootPlumeHeightCm = 300.f;
+
+	/** Burn marks right around fire sources (not lights). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Soot & Scorch", meta = (ClampMin = "0", UIMax = "2"))
+	float ScorchIntensity = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Soot & Scorch", meta = (ClampMin = "5", UIMax = "300", Units = "cm"))
+	float ScorchRadiusCm = 70.f;
+
+	/** Scuffs along Grungify Traffic Path splines: polish on the floor, kick chips low on walls. Uses primary layers. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Traffic", meta = (ClampMin = "0", UIMax = "2"))
+	float ScuffIntensity = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Traffic", meta = (ClampMin = "0", UIMax = "50", Units = "cm"))
+	float ScuffWallHeightCm = 35.f;
+
+	/** Rust stains blooming around fasteners on metal (meshes tagged Grungify.Fastener or named bolt, rivet, screw, nut). Uses the runoff layer. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rust Bloom", meta = (ClampMin = "0", UIMax = "2"))
+	float RustBloomIntensity = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rust Bloom", meta = (ClampMin = "1", UIMax = "50", Units = "cm"))
+	float RustBloomRadiusCm = 10.f;
+
+	bool UsesExtendedTexture() const { return MoistureIntensity > 0.f || MossIntensity > 0.f || SootIntensity > 0.f || ScorchIntensity > 0.f; }
+};
+
+/** Scatters decals or small meshes where a wear layer is strong. Placed on Apply, removed by Clear. */
+USTRUCT(BlueprintType)
+struct GRUNGIFY_API FGrungifyScatterEntry
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter")
+	bool bEnabled = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter")
+	EGrungifyWearLayer Layer = EGrungifyWearLayer::EdgeChips;
+
+	/** Mask strength needed before anything is placed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter", meta = (ClampMin = "0", ClampMax = "1"))
+	float Threshold = 0.4f;
+
+	/** Placements per square metre where the layer is above the threshold. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter", meta = (ClampMin = "0", UIMax = "20"))
+	float DensityPerM2 = 0.5f;
+
+	/** Deferred decal material (projected along the surface normal). Leave empty to scatter Mesh instead. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter")
+	TObjectPtr<UMaterialInterface> DecalMaterial;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter")
+	TObjectPtr<UStaticMesh> Mesh;
+
+	/** Random size (decal width, or uniform mesh scale in cm of its bounds) between X and Y. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter")
+	FVector2D SizeRangeCm = FVector2D(20.0, 60.0);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter", meta = (ClampMin = "1", UIMax = "100", Units = "cm"))
+	float DecalDepthCm = 10.f;
+
+	/** Only on these surfaces (empty = all). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scatter")
+	TArray<EGrungifySurfaceType> Surfaces;
+};
+
+/** How much a wear stamp adds (positive) or erases (negative) on each layer. */
+USTRUCT(BlueprintType)
+struct GRUNGIFY_API FGrungifyStampLayers
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stamp", meta = (UIMin = "-1", UIMax = "1"))
+	float EdgeChips = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stamp", meta = (UIMin = "-1", UIMax = "1"))
+	float Dust = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stamp", meta = (UIMin = "-1", UIMax = "1"))
+	float Runoff = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stamp", meta = (UIMin = "-1", UIMax = "1"))
+	float Handling = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stamp", meta = (UIMin = "-1", UIMax = "1"))
+	float Moisture = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stamp", meta = (UIMin = "-1", UIMax = "1"))
+	float Soot = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stamp", meta = (UIMin = "-1", UIMax = "1"))
+	float Scorch = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Stamp", meta = (UIMin = "-1", UIMax = "1"))
+	float Moss = 0.f;
 };
 
 /** A hand-placed leak that runoff streaks flow down from. */
@@ -355,6 +564,16 @@ struct GRUNGIFY_API FGrungifyComponentRecord
 	/** The complete override material array, including its length. */
 	UPROPERTY()
 	TArray<TObjectPtr<UMaterialInterface>> OverrideMaterials;
+
+	/** Instanced meshes: per-instance custom data before the zone wrote its masks. */
+	UPROPERTY()
+	bool bHasInstanceData = false;
+
+	UPROPERTY()
+	int32 NumInstanceCustomDataFloats = 0;
+
+	UPROPERTY()
+	TArray<float> InstanceCustomData;
 };
 
 /** Why one material slot was or wasn't weathered, and how it was classified. */
@@ -507,6 +726,18 @@ struct GRUNGIFY_API FGrungifyComponentReport
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	float Seconds = 0.f;
 
+	/** Reused from the generation cache (nothing that affects this mesh changed). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	bool bFromCache = false;
+
+	/** Instanced meshes: number of instances weathered. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	int32 Instances = 0;
+
+	/** Size of the extended-layer mask texture (0 if not used). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	int32 ExtendedTextureSize = 0;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	int32 Vertices = 0;
 
@@ -580,6 +811,22 @@ struct GRUNGIFY_API FGrungifyRunReport
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	FString Preset;
 
+	/** Meshes reused from the generation cache. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	int32 CacheHits = 0;
+
+	/** Decals and meshes placed by Scatter. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	int32 Scattered = 0;
+
+	/** Generation ran on a background thread (Background Generation). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	bool bBackground = false;
+
+	/** Assets written by Bake To Assets (package names). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	TArray<FString> BakedAssets;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	TArray<FString> Warnings;
 };
@@ -587,6 +834,8 @@ struct GRUNGIFY_API FGrungifyRunReport
 /** A point that runoff streaks flow down from (vent, drain, spout or hand-placed leak). */
 struct FGrungifyRunoffSource
 {
+	/** Traced water path (world points from the source down), when Trace Water Flow is on. Empty = straight down. */
+	TArray<FVector> Path;
 	FVector Origin = FVector::ZeroVector;
 	float Radius = 10.f;
 	/** 0 = the zone's runoff length. */
@@ -610,11 +859,19 @@ namespace Grungify
 	};
 
 	/** Bumped whenever the generated content changes; older assets are rebuilt in place. */
-	constexpr int32 ContentVersion = 4;
+	constexpr int32 ContentVersion = 5;
 	constexpr float MaskModeVertex = 501.f;
 	constexpr float MaskModeTexture = 502.f;
+	/** Instanced meshes: masks come from per-instance custom data. */
+	constexpr float MaskModeInstanced = 503.f;
+	/** Per-instance custom data floats Grungify writes (chips, dust, runoff, handling). */
+	constexpr int32 InstanceDataCount = 4;
 
 	inline FName MaskTextureParameterName() { return FName(TEXT("Grungify Mask Texture")); }
+	/** Second mask texture: moisture, soot, scorch, moss. */
+	inline FName ExtendedMaskTextureParameterName() { return FName(TEXT("Grungify Extended Mask Texture")); }
+	/** Physical size of one mask texel, stored on owned instances for runtime wear. */
+	inline FName MaskTexelSizeParameterName() { return FName(TEXT("Grungify Mask Texel Size")); }
 	inline FName ActiveParameterName() { return FName(TEXT("Grungify Active")); }
 	inline FName SurfaceOverrideParameterName() { return FName(TEXT("Grungify Surface Override")); }
 }

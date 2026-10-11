@@ -5,12 +5,15 @@
 #include "EngineUtils.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "GrungifyContentBuilder.h"
+#include "GrungifyLibraryBuilder.h"
+#include "GrungifyReferenceScene.h"
 #include "GrungifySettings.h"
 #include "GrungifyWeatheringZone.h"
 #include "GrungifyZoneComponent.h"
 #include "GrungifyZoneVisualizer.h"
 #include "Misc/CoreDelegates.h"
 #include "Modules/ModuleManager.h"
+#include "SGrungifyZonesPanel.h"
 #include "ScopedTransaction.h"
 #include "ToolMenus.h"
 #include "UObject/ObjectSaveContext.h"
@@ -94,6 +97,22 @@ namespace
 			Notify(LOCTEXT("ContentCurrent", "Grungify: plugin content is up to date."));
 		}
 	}
+
+	void BuildLibrary(bool bOverwrite)
+	{
+		FString Message;
+		const bool bOk = FGrungifyLibraryBuilder::Build(bOverwrite, Message);
+		UE_LOG(LogGrungify, Log, TEXT("%s"), *Message);
+		Notify(FText::FromString(TEXT("Grungify: ") + Message), !bOk);
+	}
+
+	void BuildReferenceScene()
+	{
+		FString Message;
+		const bool bOk = FGrungifyReferenceScene::Build(Message);
+		UE_LOG(LogGrungify, Log, TEXT("%s"), *Message);
+		Notify(FText::FromString(TEXT("Grungify: ") + Message), !bOk);
+	}
 }
 
 class FGrungifyEditorModule : public IModuleInterface
@@ -108,6 +127,7 @@ public:
 			Visualizer->OnRegister();
 		}
 
+		GrungifyZonesPanel::Register();
 		UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FGrungifyEditorModule::RegisterMenus));
 
 		// Create missing assets and migrate outdated ones once the editor is fully up.
@@ -159,6 +179,8 @@ public:
 			UToolMenus::UnRegisterStartupCallback(this);
 			UToolMenus::UnregisterOwner(this);
 		}
+
+		GrungifyZonesPanel::Unregister();
 
 		if (GUnrealEd)
 		{
@@ -325,7 +347,8 @@ private:
 	void OnSettingChanged(UObject* Settings, FPropertyChangedEvent& Event)
 	{
 		const FName Name = Event.GetPropertyName();
-		if (Name == GET_MEMBER_NAME_CHECKED(UGrungifySettings, CustomPrimitiveDataIndex) || Name == GET_MEMBER_NAME_CHECKED(UGrungifySettings, MaskUVChannel))
+		if (Name == GET_MEMBER_NAME_CHECKED(UGrungifySettings, CustomPrimitiveDataIndex) || Name == GET_MEMBER_NAME_CHECKED(UGrungifySettings, MaskUVChannel)
+			|| Name == GET_MEMBER_NAME_CHECKED(UGrungifySettings, InstanceCustomDataIndex))
 		{
 			RunContentBuild(/*bForce*/ false);
 			Notify(LOCTEXT("ReapplyZones", "Grungify: material content updated. Clear and re-apply existing zones so meshes use the new settings."));
@@ -338,6 +361,11 @@ private:
 
 		UToolMenu* Menu = UToolMenus::Get()->ExtendMenu("LevelEditor.MainMenu.Tools");
 		FToolMenuSection& Section = Menu->FindOrAddSection("Grungify", LOCTEXT("Section", "Grungify"));
+
+		Section.AddMenuEntry("GrungifyZonesPanel",
+			LOCTEXT("ZonesPanel", "Weathering Zones Panel"),
+			LOCTEXT("ZonesPanelTip", "List every weathering zone in the level with its status, and run actions on one or all of them."),
+			FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&GrungifyZonesPanel::Open)));
 
 		Section.AddMenuEntry("GrungifyDryRunAll",
 			LOCTEXT("DryRunAll", "Dry Run All Weathering Zones"),
@@ -373,6 +401,21 @@ private:
 			LOCTEXT("RebuildContent", "Rebuild Plugin Content"),
 			LOCTEXT("RebuildContentTip", "Rebuild MF_GrungifyWeathering and the Grungify materials in place, even if they look current."),
 			FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&RunContentBuild, true)));
+
+		Section.AddMenuEntry("GrungifyBuildLibrary",
+			LOCTEXT("BuildLibrary", "Create Material Library"),
+			LOCTEXT("BuildLibraryTip", "Create starter presets and material instances (Abandoned Industrial, Old Temple, Wet Sewer) in /Game/Grungify/Library. Existing assets are kept."),
+			FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&BuildLibrary, false)));
+
+		Section.AddMenuEntry("GrungifyRebuildLibrary",
+			LOCTEXT("RebuildLibrary", "Reset Material Library"),
+			LOCTEXT("RebuildLibraryTip", "Overwrite the starter presets and material instances in /Game/Grungify/Library with their defaults."),
+			FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&BuildLibrary, true)));
+
+		Section.AddMenuEntry("GrungifyReferenceScene",
+			LOCTEXT("ReferenceScene", "Build Reference Scene"),
+			LOCTEXT("ReferenceSceneTip", "Create /Game/Grungify/Reference/L_GrungifyReference with a fixed-seed zone and screenshot tests for visual regression checks."),
+			FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&BuildReferenceScene)));
 	}
 };
 

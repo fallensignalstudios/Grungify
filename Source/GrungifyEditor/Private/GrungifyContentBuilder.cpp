@@ -20,6 +20,7 @@
 #include "Materials/MaterialExpressionFunctionOutput.h"
 #include "Materials/MaterialExpressionMaterialFunctionCall.h"
 #include "Materials/MaterialExpressionMultiply.h"
+#include "Materials/MaterialExpressionPerInstanceCustomData.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
 #include "Materials/MaterialExpressionTextureCoordinate.h"
 #include "Materials/MaterialExpressionTextureSampleParameter2D.h"
@@ -78,7 +79,8 @@ namespace
 	FString CurrentMarker()
 	{
 		const UGrungifySettings* Settings = UGrungifySettings::Get();
-		return FString::Printf(TEXT("[GrungifyContent v%d cpd=%d uv=%d]"), Grungify::ContentVersion, Settings->CustomPrimitiveDataIndex, Settings->MaskUVChannel);
+		return FString::Printf(TEXT("[GrungifyContent v%d cpd=%d uv=%d inst=%d]"), Grungify::ContentVersion, Settings->CustomPrimitiveDataIndex,
+			Settings->MaskUVChannel, Settings->InstanceCustomDataIndex);
 	}
 
 	FString PendingDescription()
@@ -253,16 +255,24 @@ namespace
 		TEXT("SurfaceType"), TEXT("SurfaceOverride"), TEXT("FeatureScale"), TEXT("SeedOffset"),
 		TEXT("DustColor"), TEXT("RunoffColor"), TEXT("ChipColor"),
 		TEXT("Strength"), TEXT("ChipStrength"), TEXT("DustStrength"), TEXT("RunoffStrength"), TEXT("HandlingStrength"),
-		TEXT("Relief") };
+		TEXT("Relief"),
+		TEXT("InstR"), TEXT("InstG"), TEXT("InstB"), TEXT("InstA"),
+		TEXT("ExtR"), TEXT("ExtG"), TEXT("ExtB"), TEXT("ExtA"),
+		TEXT("MossColor"), TEXT("SootColor"), TEXT("SaltColor"),
+		TEXT("MoistureStrength"), TEXT("SootStrength"), TEXT("ScorchStrength"), TEXT("MossStrength"), TEXT("CrackStrength") };
 
 	const TCHAR* CommonCode =
 		TEXT("const float4 VM = float4(MaskR, MaskG, MaskB, MaskA);\n")
 		TEXT("const float4 TM = float4(TexR, TexG, TexB, TexA);\n")
-		TEXT("const float4 CS = float4(ChipStrength, DustStrength, RunoffStrength, HandlingStrength);\n");
+		TEXT("const float4 CS = float4(ChipStrength, DustStrength, RunoffStrength, HandlingStrength);\n")
+		TEXT("const float4 IM = float4(InstR, InstG, InstB, InstA);\n")
+		TEXT("const float4 EM = float4(ExtR, ExtG, ExtB, ExtA);\n")
+		TEXT("const float4 ES = float4(MoistureStrength, SootStrength, ScorchStrength, MossStrength);\n");
 
 	const TCHAR* EvaluateCode =
-		TEXT("FGrungifyResult R = GrungifyEvaluate(BaseColor, Roughness, Metallic, MaskMode, VM, TM, WorldPos, WorldNormal, ")
-		TEXT("SurfaceType, SurfaceOverride, FeatureScale, SeedOffset, DustColor.rgb, RunoffColor.rgb, ChipColor.rgb, Strength, CS);\n");
+		TEXT("FGrungifyResult R = GrungifyEvaluateFull(BaseColor, Roughness, Metallic, MaskMode, VM, TM, IM, EM, WorldPos, WorldNormal, ")
+		TEXT("SurfaceType, SurfaceOverride, FeatureScale, SeedOffset, DustColor.rgb, RunoffColor.rgb, ChipColor.rgb, Strength, CS, ")
+		TEXT("MossColor.rgb, SootColor.rgb, SaltColor.rgb, ES, CrackStrength);\n");
 
 	UMaterialExpressionCustom* AddWeatheringCustom(UMaterialFunction* Function, FBuildContext& Ctx, const FWeatheringSources& Sources,
 		const TCHAR* Description, ECustomMaterialOutputType OutputType, const FString& Body, int32 X, int32 Y)
@@ -390,12 +400,44 @@ namespace
 		S.Add(TEXT("HandlingStrength"), AddScalar(Function, TEXT("Grungify Handling Strength"), 1.f, 2600));
 		S.Add(TEXT("Relief"), AddScalar(Function, TEXT("Grungify Relief Strength"), 0.f, 2700));
 
+		// Instanced meshes: per-instance custom data (returns the default 0 on ordinary meshes).
+		const TCHAR* InstanceInputs[] = { TEXT("InstR"), TEXT("InstG"), TEXT("InstB"), TEXT("InstA") };
+		for (int32 Index = 0; Index < Grungify::InstanceDataCount; ++Index)
+		{
+			UMaterialExpressionPerInstanceCustomData* Instance = AddToFunction<UMaterialExpressionPerInstanceCustomData>(Function, -1400, 2800 + Index * 100);
+			Instance->DataIndex = uint32(UGrungifySettings::Get()->InstanceCustomDataIndex + Index);
+			S.Add(InstanceInputs[Index], Instance);
+		}
+
+		// Extended layers: moisture, soot, scorch, moss in a second mask texture on the same UVs.
+		UMaterialExpressionTextureSampleParameter2D* ExtendedTexture = AddToFunction<UMaterialExpressionTextureSampleParameter2D>(Function, -1400, 3300);
+		ExtendedTexture->ParameterName = Grungify::ExtendedMaskTextureParameterName();
+		ExtendedTexture->Group = TEXT("Grungify");
+		ExtendedTexture->Texture = NoMask;
+		ExtendedTexture->SamplerType = SAMPLERTYPE_LinearColor;
+		Ctx.Connect(MaskUV, TEXT(""), ExtendedTexture, TEXT("UVs"));
+		S.Add(TEXT("ExtR"), ExtendedTexture, TEXT("R"));
+		S.Add(TEXT("ExtG"), ExtendedTexture, TEXT("G"));
+		S.Add(TEXT("ExtB"), ExtendedTexture, TEXT("B"));
+		S.Add(TEXT("ExtA"), ExtendedTexture, TEXT("A"));
+
+		S.Add(TEXT("MossColor"), AddColor(Function, TEXT("Grungify Moss Color"), FLinearColor(0.12f, 0.18f, 0.05f), 3600));
+		S.Add(TEXT("SootColor"), AddColor(Function, TEXT("Grungify Soot Color"), FLinearColor(0.03f, 0.028f, 0.025f), 3800));
+		S.Add(TEXT("SaltColor"), AddColor(Function, TEXT("Grungify Efflorescence Color"), FLinearColor(0.78f, 0.76f, 0.70f), 4000));
+		S.Add(TEXT("MoistureStrength"), AddScalar(Function, TEXT("Grungify Moisture Strength"), 1.f, 4200));
+		S.Add(TEXT("SootStrength"), AddScalar(Function, TEXT("Grungify Soot Strength"), 1.f, 4300));
+		S.Add(TEXT("ScorchStrength"), AddScalar(Function, TEXT("Grungify Scorch Strength"), 1.f, 4400));
+		S.Add(TEXT("MossStrength"), AddScalar(Function, TEXT("Grungify Moss Strength"), 1.f, 4500));
+		S.Add(TEXT("CrackStrength"), AddScalar(Function, TEXT("Grungify Crack Strength"), 0.f, 4600));
+		// Not read by the shader; runtime wear uses it to size brushes in texels.
+		AddScalar(Function, TEXT("Grungify Mask Texel Size"), 4.f, 4700);
+
 		UMaterialExpressionCustom* ColorNode = AddWeatheringCustom(Function, Ctx, S, TEXT("Grungify Base Color"), CMOT_Float3,
 			FString(EvaluateCode) + TEXT("return R.BaseColor;"), -600, 0);
 		UMaterialExpressionCustom* SurfaceNode = AddWeatheringCustom(Function, Ctx, S, TEXT("Grungify Roughness Metallic"), CMOT_Float2,
 			FString(EvaluateCode) + TEXT("return float2(R.Roughness, R.Metallic);"), -600, 500);
 		UMaterialExpressionCustom* NormalNode = AddWeatheringCustom(Function, Ctx, S, TEXT("Grungify Relief Normal"), CMOT_Float3,
-			TEXT("return GrungifyReliefNormal(NormalTS, Relief, MaskMode, VM, TM, WorldPos, WorldNormal, ")
+			TEXT("return GrungifyReliefNormalFull(NormalTS, Relief, MaskMode, VM, TM, IM, WorldPos, WorldNormal, ")
 			TEXT("Parameters.TangentToWorld[0], Parameters.TangentToWorld[1], FeatureScale, SeedOffset, Strength, CS);"), -600, 1000);
 
 		UMaterialExpressionComponentMask* RoughnessMask = AddToFunction<UMaterialExpressionComponentMask>(Function, -200, 450);
@@ -453,12 +495,35 @@ namespace
 		Ctx.Connect(Mode, TEXT(""), OwnedMode, TEXT("A"));
 		Ctx.Connect(Active, TEXT(""), OwnedMode, TEXT("B"));
 
+		UMaterialExpressionTextureSampleParameter2D* ExtendedTexture = AddToMaterial<UMaterialExpressionTextureSampleParameter2D>(Material, -900, 850);
+		ExtendedTexture->ParameterName = Grungify::ExtendedMaskTextureParameterName();
+		ExtendedTexture->Texture = NoMask;
+		ExtendedTexture->SamplerType = SAMPLERTYPE_LinearColor;
+		Ctx.Connect(MaskUV, TEXT(""), ExtendedTexture, TEXT("UVs"));
+
+		UMaterialExpressionPerInstanceCustomData* Instance[Grungify::InstanceDataCount];
+		for (int32 Index = 0; Index < Grungify::InstanceDataCount; ++Index)
+		{
+			Instance[Index] = AddToMaterial<UMaterialExpressionPerInstanceCustomData>(Material, -900, 1100 + Index * 100);
+			Instance[Index]->DataIndex = uint32(UGrungifySettings::Get()->InstanceCustomDataIndex + Index);
+		}
+
 		UMaterialExpressionCustom* Custom = AddToMaterial<UMaterialExpressionCustom>(Material, -400, 0);
 		Custom->Description = TEXT("Grungify Mask Debug");
 		Custom->OutputType = CMOT_Float3;
 		Custom->IncludeFilePaths.Add(IncludePath);
-		Custom->Code = TEXT("return GrungifyMaskDebug(MaskMode, float4(MaskR, MaskG, MaskB, MaskA), float4(TexR, TexG, TexB, TexA), Channel);");
-		SetCustomInputs(Custom, { TEXT("MaskR"), TEXT("MaskG"), TEXT("MaskB"), TEXT("MaskA"), TEXT("TexR"), TEXT("TexG"), TEXT("TexB"), TEXT("TexA"), TEXT("MaskMode"), TEXT("Channel") });
+		Custom->Code = TEXT("return GrungifyMaskDebugFull(MaskMode, float4(MaskR, MaskG, MaskB, MaskA), float4(TexR, TexG, TexB, TexA), ")
+			TEXT("float4(InstR, InstG, InstB, InstA), float4(ExtR, ExtG, ExtB, ExtA), Channel);");
+		SetCustomInputs(Custom, { TEXT("MaskR"), TEXT("MaskG"), TEXT("MaskB"), TEXT("MaskA"), TEXT("TexR"), TEXT("TexG"), TEXT("TexB"), TEXT("TexA"),
+			TEXT("InstR"), TEXT("InstG"), TEXT("InstB"), TEXT("InstA"), TEXT("ExtR"), TEXT("ExtG"), TEXT("ExtB"), TEXT("ExtA"), TEXT("MaskMode"), TEXT("Channel") });
+		Ctx.Connect(Instance[0], TEXT(""), Custom, TEXT("InstR"));
+		Ctx.Connect(Instance[1], TEXT(""), Custom, TEXT("InstG"));
+		Ctx.Connect(Instance[2], TEXT(""), Custom, TEXT("InstB"));
+		Ctx.Connect(Instance[3], TEXT(""), Custom, TEXT("InstA"));
+		Ctx.Connect(ExtendedTexture, TEXT("R"), Custom, TEXT("ExtR"));
+		Ctx.Connect(ExtendedTexture, TEXT("G"), Custom, TEXT("ExtG"));
+		Ctx.Connect(ExtendedTexture, TEXT("B"), Custom, TEXT("ExtB"));
+		Ctx.Connect(ExtendedTexture, TEXT("A"), Custom, TEXT("ExtA"));
 
 		Ctx.Connect(VertexColor, TEXT("R"), Custom, TEXT("MaskR"));
 		Ctx.Connect(VertexColor, TEXT("G"), Custom, TEXT("MaskG"));

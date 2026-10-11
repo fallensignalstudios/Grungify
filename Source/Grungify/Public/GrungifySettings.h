@@ -64,6 +64,20 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Classification")
 	TArray<FString> VentKeywords;
 
+	/** Actors tagged with this are fire sources (soot and scorch). */
+	UPROPERTY(config, EditAnywhere, Category = "Tags")
+	FName FireTag = TEXT("Grungify.Fire");
+
+	/** Small meshes tagged with this are fasteners (rust bloom on metal). */
+	UPROPERTY(config, EditAnywhere, Category = "Tags")
+	FName FastenerTag = TEXT("Grungify.Fastener");
+
+	UPROPERTY(config, EditAnywhere, Category = "Classification")
+	TArray<FString> FireKeywords;
+
+	UPROPERTY(config, EditAnywhere, Category = "Classification")
+	TArray<FString> FastenerKeywords;
+
 	/** Physical surface types that map straight to a Grungify surface. Checked before name keywords. */
 	UPROPERTY(config, EditAnywhere, Category = "Classification")
 	TMap<TEnumAsByte<EPhysicalSurface>, EGrungifySurfaceType> PhysicalSurfaceMap;
@@ -87,6 +101,13 @@ public:
 	/** UV channel the mask texture is baked into and sampled from. Needs non-overlapping UVs (usually the lightmap channel). Changing it rebuilds the plugin content. */
 	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (ClampMin = "0", ClampMax = "7"))
 	int32 MaskUVChannel = 1;
+
+	/**
+	 * First per-instance custom data index used on instanced (ISM/HISM) meshes; Grungify uses four.
+	 * Instanced meshes that already use those indices are left untouched. Changing it rebuilds the plugin content.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (ClampMin = "0", ClampMax = "60"))
+	int32 InstanceCustomDataIndex = 0;
 
 	/** Material swapped onto meshes when previewing masks. */
 	UPROPERTY(config, EditAnywhere, Category = "Material")

@@ -1,12 +1,16 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/Ticker.h"
 #include "GameFramework/Actor.h"
 #include "GrungifyTypes.h"
 #include "GrungifyWeatheringZone.generated.h"
 
 class UArrowComponent;
+class UDataLayerAsset;
 class UGrungifyPreset;
+struct FGrungifyCacheEntry;
+struct FGrungifyGenerationJob;
 class UGrungifyZoneComponent;
 class UStaticMeshComponent;
 struct FGrungifyComponentContext;
@@ -63,6 +67,41 @@ public:
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Grungify|Preset")
 	void SaveToPreset();
 
+	/**
+	 * Bake this zone's result into standalone assets in Bake Folder: a mask texture (plus extended texture) and a material
+	 * instance per slot, exported as PNGs to Saved/Grungify/Bakes for touch-ups (Reimport picks the edited PNG up),
+	 * then apply them to the meshes like Apply does (Clear restores the originals; the assets stay).
+	 */
+	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Grungify|Bake")
+	void BakeToAssets();
+
+	/** Fill Seed Variants with three seeds (current, plus two new) to compare. */
+	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Grungify|Variants")
+	void MakeSeedVariants();
+
+	/** Preview the next seed in Seed Variants (cached, so flipping back is instant). */
+	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Grungify|Variants")
+	void PreviewNextVariant();
+
+	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Grungify|Variants")
+	void PreviewPreviousVariant();
+
+	/** Forget cached per-mesh results (they are also invalidated automatically when anything relevant changes). */
+	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Grungify|Performance")
+	void ClearGenerationCache();
+
+	UFUNCTION(BlueprintPure, Category = "Grungify")
+	int32 GetAppliedCount() const { return AppliedRecords.Num(); }
+
+	UFUNCTION(BlueprintPure, Category = "Grungify")
+	int32 GetPreviewCount() const { return PreviewRecords.Num(); }
+
+	UFUNCTION(BlueprintPure, Category = "Grungify")
+	bool IsGeneratingInBackground() const;
+
+	UFUNCTION(BlueprintPure, Category = "Grungify")
+	const FString& GetLastReportFile() const { return LastReportFile; }
+
 	UFUNCTION(BlueprintPure, Category = "Grungify")
 	const FGrungifyRunReport& GetLastReport() const { return LastReport; }
 
@@ -112,6 +151,10 @@ public:
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Grungify")
 	bool bPreviewActive = false;
+
+	/** Where the last report was written. */
+	UPROPERTY(VisibleInstanceOnly, Transient, Category = "Grungify")
+	FString LastReportFile;
 
 	UPROPERTY(VisibleInstanceOnly, Transient, BlueprintReadOnly, Category = "Grungify")
 	FGrungifyRunReport LastReport;
@@ -171,6 +214,16 @@ public:
 	/** Also treat actors tagged Grungify.Vent or named like a vent / drain / spout as sources. Turn off to use only Leaks and Runoff Sources. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Runoff Below Vents")
 	bool bAutoDetectVents = true;
+
+	/**
+	 * Trace how water actually travels from each source: down walls, along sloped ledges, over edges, and into pools
+	 * on flat ground (pools feed Moisture). Off = straight streaks below each source.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Runoff Below Vents")
+	bool bTraceWaterFlow = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Runoff Below Vents", meta = (ClampMin = "2", UIMax = "50", Units = "cm", EditCondition = "bTraceWaterFlow"))
+	float FlowStepCm = 10.f;
 
 	/** Actors whose footprint is a runoff source. */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Grungify|Runoff Below Vents")
@@ -236,6 +289,81 @@ public:
 
 	// ------------------------------------------------------------------ Preset
 
+	// -------------------------------------------------------- Extended layers
+
+	/** Moisture, moss, soot, scorch, traffic scuffs and rust bloom. All off by default. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Extended Layers", meta = (ShowOnlyInnerProperties))
+	FGrungifyExtendedLayers Extended;
+
+	// --------------------------------------------------------------- Exposure
+
+	/**
+	 * Measure how open each spot is to the sky (rays on a grid over the zone). Sheltered spots collect dust, damp and moss;
+	 * exposed ones weather harder (chips, ambient streaks). Off = facing-based exposure only.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Exposure")
+	bool bUseSkyExposure = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Exposure", meta = (ClampMin = "0", ClampMax = "1", EditCondition = "bUseSkyExposure"))
+	float SkyExposureInfluence = 0.6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Exposure", meta = (ClampMin = "20", UIMax = "400", Units = "cm", EditCondition = "bUseSkyExposure"))
+	float SkyProbeSpacingCm = 100.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Exposure", meta = (ClampMin = "4", ClampMax = "128", EditCondition = "bUseSkyExposure"))
+	int32 SkyRays = 24;
+
+	/** Rays longer than this count as open sky. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Exposure", meta = (ClampMin = "100", UIMax = "20000", Units = "cm", EditCondition = "bUseSkyExposure"))
+	float SkyRayLengthCm = 3000.f;
+
+	// ----------------------------------------------------------------- Stamps
+
+	/** Apply Grungify Wear Stamp actors that overlap the zone (hand-placed add/erase touch-ups). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Stamps")
+	bool bApplyWearStamps = true;
+
+	// ---------------------------------------------------------------- Scatter
+
+	/** Decals or small meshes placed where layers are strong, on Apply. Removed by Clear and replaced on the next Apply. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Scatter")
+	TArray<FGrungifyScatterEntry> Scatter;
+
+	/** Data Layers scattered actors are added to (World Partition levels). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Scatter")
+	TArray<TObjectPtr<const UDataLayerAsset>> ScatterDataLayers;
+
+	// ------------------------------------------------------------- Variants
+
+	/** Seeds to flip between with Preview Next / Previous Variant. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Variants")
+	TArray<int32> SeedVariants;
+
+	UPROPERTY(VisibleInstanceOnly, Transient, Category = "Grungify|Variants")
+	int32 VariantIndex = 0;
+
+	// ------------------------------------------------------------ Performance
+
+	/** Reuse per-mesh results when nothing affecting that mesh changed (makes live preview and variant flipping fast). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Performance")
+	bool bUseGenerationCache = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Performance", meta = (ClampMin = "16", UIMax = "4096", Units = "MB"))
+	int32 CacheBudgetMB = 512;
+
+	/** Live preview generates masks on a worker thread and shows them when ready, so the editor stays responsive. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Performance")
+	bool bBackgroundGeneration = true;
+
+	// ------------------------------------------------------------------- Bake
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Bake", meta = (ContentDir))
+	FDirectoryPath BakeFolder;
+
+	/** Also write PNGs to Saved/Grungify/Bakes and point the texture assets at them for reimport after touch-ups. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Bake")
+	bool bExportBakedPNGs = true;
+
 	/** Assigning a preset loads it into the zone. Use Save To Preset to store changes back. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Preset")
 	TObjectPtr<UGrungifyPreset> Preset;
@@ -261,9 +389,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Filtering")
 	bool bIncludeMovable = false;
 
+	/**
+	 * Weather instanced meshes (ISM/HISM, foliage) through per-instance custom data: one set of mask values per instance,
+	 * broken up by world-space noise in the shader. Cruder than per-vertex or texture masks, but each instance differs.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Filtering")
+	bool bWeatherInstancedMeshes = true;
+
 	/** Actors this zone never touches (the Grungify.Ignore tag does the same). */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Grungify|Filtering")
 	TArray<TSoftObjectPtr<AActor>> ExcludedActors;
+
+	/** If set, only actors in one of these Data Layers are weathered. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Targeting")
+	TArray<TObjectPtr<const UDataLayerAsset>> IncludeDataLayers;
 
 	/** If set, only these actors are weathered. */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Grungify|Targeting")
@@ -287,6 +426,7 @@ public:
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void Destroyed() override;
 	virtual void PostUnregisterAllComponents() override;
+	virtual void BeginDestroy() override;
 
 	/** The record this zone holds for a component it has applied to, or null. */
 	const FGrungifyComponentRecord* FindAppliedRecord(const UStaticMeshComponent* Component) const;
@@ -306,6 +446,9 @@ public:
 
 	/** Puts previewed meshes back without an undo entry. Used before saves and when the zone is unloaded or destroyed. */
 	void DiscardPreview(const TCHAR* Reason);
+
+	/** Live preview (on a worker thread if Background Generation is on; a new request cancels the running one). Used by stamps and other actors that affect this zone. */
+	void RequestLivePreview();
 
 	/** Restores then hands over the original record; failed restoration retains ownership. */
 	bool ReleaseAppliedRecord(const UStaticMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
@@ -328,8 +471,19 @@ protected:
 	UPROPERTY()
 	TArray<FGrungifyComponentRecord> AppliedRecords;
 
+	/** Decals and meshes this zone scattered on Apply. */
+	UPROPERTY()
+	TArray<TSoftObjectPtr<AActor>> ScatteredActors;
+
 private:
 	TArray<FGrungifyRunoffSource> CachedRunoffSources;
+
+	/** Per-component results keyed by component path (editor only, never saved). */
+	TMap<FString, TSharedPtr<FGrungifyCacheEntry>> GenerationCache;
+
+	/** Live preview running on a worker thread. */
+	TSharedPtr<FGrungifyGenerationJob> BackgroundJob;
+	FTSTicker::FDelegateHandle BackgroundTicker;
 
 	void UpdateWearArrow();
 
@@ -343,6 +497,29 @@ private:
 	void BuildContext(UStaticMeshComponent* Component, TMap<UTexture2D*, TUniquePtr<FGrungifyGateSampler>>& Samplers, FGrungifyComponentContext& OutContext, FGrungifyComponentReport& Report);
 	/** Returns false if the user cancelled; nothing has been written at that point. Shows a progress dialog for long runs. */
 	bool GenerateResults(const TCHAR* Operation, TArray<FGrungifyComponentResult>& OutResults, TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers);
+
+	/** Game-thread part of a run: floors, exposure, sources, flow, scan, contexts and cache lookups. False if cancelled. */
+	bool PrepareJob(FGrungifyGenerationJob& Job, const TCHAR* Operation, const TFunction<bool()>& ShouldCancel);
+	/** Turns finished job items into results and report entries (and fills the cache). */
+	void CollectJob(FGrungifyGenerationJob& Job, TArray<FGrungifyComponentResult>& OutResults, TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers);
+	void StartBackgroundPreview();
+	void CancelBackgroundJob();
+	bool TickBackgroundJob(float DeltaTime);
+	/** Shared write step of Preview (synchronous or background). */
+	void WritePreview(TArray<FGrungifyComponentResult>& Results, double StartSeconds);
+
+	void ScatterFromResults(const TArray<FGrungifyComponentResult>& Results);
+	void ClearScatteredActors();
+	void TrimCache();
+	/** Apply and Bake share everything except how texture results are stored. */
+	void ApplyInternal(const TCHAR* Operation);
+	/** Bake: standalone texture and material-instance assets instead of component-owned ones. */
+	bool WriteBakedAssets(const FGrungifyComponentResult& Result);
+	/** Lights, fires, fasteners, stamps, traffic paths and traced water for this run. */
+	void GatherScene(FGrungifyGenerationJob& Job, const FBox& ZoneBox);
+
+	bool bBakingToAssets = false;
+	TArray<UPackage*> BakedPackages;
 	/** OutReason is set when an actor inside the zone is filtered out by a zone setting or tag (for the report). */
 	bool ShouldConsiderActor(const AActor* Actor, const FBox& ZoneBox, FString* OutReason = nullptr) const;
 	void CopyFromPreset(const UGrungifyPreset& Source);

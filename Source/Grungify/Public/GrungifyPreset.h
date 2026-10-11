@@ -107,6 +107,18 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Palette")
 	FGrungifyPalette Palette;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Extended Layers", meta = (ShowOnlyInnerProperties))
+	FGrungifyExtendedLayers Extended;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Exposure")
+	bool bUseSkyExposure = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Exposure", meta = (ClampMin = "0", ClampMax = "1"))
+	float SkyExposureInfluence = 0.6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Runoff")
+	bool bTraceWaterFlow = false;
 };
 
 /** Every field shared by UGrungifyPreset and AGrungifyWeatheringZone (Seed is handled separately). */
@@ -116,4 +128,5 @@ public:
 	X(RunoffIntensity) X(RunoffLengthCm) X(RunoffSpread) X(AmbientStreaks) \
 	X(HandlingIntensity) X(HandHeightMinCm) X(HandHeightMaxCm) X(GeneralHandling) \
 	X(ChipIntensity) X(EdgeAngleDegrees) X(EdgeWearWidthCm) X(FloorKickHeightCm) \
-	X(StoneProfile) X(MetalProfile) X(TrimProfile) X(MaterialProfiles) X(Palette)
+	X(StoneProfile) X(MetalProfile) X(TrimProfile) X(MaterialProfiles) X(Palette) \
+	X(Extended) X(bUseSkyExposure) X(SkyExposureInfluence) X(bTraceWaterFlow)

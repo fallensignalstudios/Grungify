@@ -48,6 +48,16 @@ void FGrungifyZoneVisualizer::DrawVisualization(const UActorComponent* Component
 	for (const FGrungifyRunoffSource& Source : Zone->GetCachedRunoffSources())
 	{
 		const FLinearColor Color = Source.bManual ? LeakColor : RunoffColor;
+		if (Source.Path.Num() > 1)
+		{
+			// Traced water: show where it actually runs, and where it pools.
+			DrawCircle(PDI, Source.Origin, FVector::ForwardVector, FVector::RightVector, Color, Source.Radius, 16, SDPG_World, 1.5f);
+			for (int32 Index = 1; Index < Source.Path.Num(); ++Index)
+			{
+				PDI->DrawLine(Source.Path[Index - 1], Source.Path[Index], Color, SDPG_World, 2.f);
+			}
+			continue;
+		}
 		const float Length = FMath::Max(Source.Length > 0.f ? Source.Length : Zone->RunoffLengthCm, 10.f);
 		const FVector Bottom = Source.Origin - FVector(0.0, 0.0, Length);
 		const double BottomRadius = Source.Radius * (1.0 + Zone->RunoffSpread);

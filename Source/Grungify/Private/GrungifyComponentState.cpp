@@ -3,6 +3,7 @@
 #if WITH_EDITOR
 
 #include "ComponentReregisterContext.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "StaticMeshComponentLODInfo.h"
 #include "Engine/StaticMesh.h"
@@ -109,6 +110,13 @@ namespace Grungify
 		OutRecord.bHasLiveCustomData = true;
 		OutRecord.CustomDataBase = UGrungifySettings::Get()->CustomPrimitiveDataIndex;
 		OutRecord.OverrideMaterials = Component->OverrideMaterials;
+
+		if (const UInstancedStaticMeshComponent* Instanced = Cast<UInstancedStaticMeshComponent>(Component))
+		{
+			OutRecord.bHasInstanceData = true;
+			OutRecord.NumInstanceCustomDataFloats = Instanced->NumCustomDataFloats;
+			OutRecord.InstanceCustomData = Instanced->PerInstanceSMCustomData;
+		}
 	}
 
 	bool RestoreRecord(const FGrungifyComponentRecord& Record, bool bTransactional)
@@ -233,6 +241,28 @@ namespace Grungify
 			}
 		}
 
+		// Instanced meshes: put the per-instance custom data back exactly (count and values).
+		if (Record.bHasInstanceData)
+		{
+			if (UInstancedStaticMeshComponent* Instanced = Cast<UInstancedStaticMeshComponent>(Component))
+			{
+				const int32 NumFloats = Record.NumInstanceCustomDataFloats;
+				const int32 Instances = Instanced->GetInstanceCount();
+				Instanced->SetNumCustomDataFloats(NumFloats);
+				if (NumFloats > 0 && Record.InstanceCustomData.Num() == Instances * NumFloats)
+				{
+					for (int32 Index = 0; Index < Instances; ++Index)
+					{
+						Instanced->SetCustomData(Index, TArrayView<const float>(Record.InstanceCustomData.GetData() + Index * NumFloats, NumFloats));
+					}
+				}
+				else if (NumFloats > 0)
+				{
+					UE_LOG(LogGrungify, Warning, TEXT("%s: instance count changed since the backup; per-instance custom data reset to zero."), *Component->GetPathName());
+				}
+			}
+		}
+
 		Component->MarkRenderStateDirty();
 		return true;
 	}
@@ -315,6 +345,43 @@ namespace Grungify
 		// Lets the engine remap the colours if the mesh is reimported. The previous cache and key are in the record.
 		Component->StaticMeshDerivedDataKey = RenderData->DerivedDataKey;
 		Component->CachePaintedDataIfNecessary();
+		return true;
+	}
+
+	bool WriteInstanceMasks(UInstancedStaticMeshComponent* Component, const TArray<FVector4f>& Masks)
+	{
+		const int32 Base = UGrungifySettings::Get()->InstanceCustomDataIndex;
+		const int32 Instances = Component->GetInstanceCount();
+		if (Masks.Num() != Instances || Base < 0)
+		{
+			return false;
+		}
+
+		// Keep every value another system put there; only our four floats change.
+		const int32 OldFloats = Component->NumCustomDataFloats;
+		const TArray<float> OldData = Component->PerInstanceSMCustomData;
+		const int32 NewFloats = FMath::Max(OldFloats, Base + InstanceDataCount);
+		if (NewFloats != OldFloats)
+		{
+			Component->SetNumCustomDataFloats(NewFloats);
+		}
+
+		TArray<float> Values;
+		for (int32 Index = 0; Index < Instances; ++Index)
+		{
+			Values.Init(0.f, NewFloats);
+			for (int32 Float = 0; Float < OldFloats && OldData.IsValidIndex(Index * OldFloats + Float); ++Float)
+			{
+				Values[Float] = OldData[Index * OldFloats + Float];
+			}
+			const FVector4f& Mask = Masks[Index];
+			Values[Base + 0] = Mask.X;
+			Values[Base + 1] = Mask.Y;
+			Values[Base + 2] = Mask.Z;
+			Values[Base + 3] = Mask.W;
+			Component->SetCustomData(Index, Values);
+		}
+		Component->MarkRenderStateDirty();
 		return true;
 	}
 
@@ -408,11 +475,65 @@ namespace Grungify
 		Scalar(Palette.bOverrideRunoffStrength, TEXT("Grungify Runoff Strength"), Palette.RunoffStrength);
 		Scalar(Palette.bOverrideHandlingStrength, TEXT("Grungify Handling Strength"), Palette.HandlingStrength);
 		Scalar(Palette.bOverrideReliefStrength, TEXT("Grungify Relief Strength"), Palette.ReliefStrength);
+		Scalar(Palette.bOverrideCrackStrength, TEXT("Grungify Crack Strength"), Palette.CrackStrength);
+		Scalar(Palette.bOverrideMoistureStrength, TEXT("Grungify Moisture Strength"), Palette.MoistureStrength);
+		Scalar(Palette.bOverrideSootStrength, TEXT("Grungify Soot Strength"), Palette.SootStrength);
+		Scalar(Palette.bOverrideScorchStrength, TEXT("Grungify Scorch Strength"), Palette.ScorchStrength);
+		Scalar(Palette.bOverrideMossStrength, TEXT("Grungify Moss Strength"), Palette.MossStrength);
+		Vector(Palette.bOverrideMossColor, TEXT("Grungify Moss Color"), Palette.MossColor);
+		Vector(Palette.bOverrideSootColor, TEXT("Grungify Soot Color"), Palette.SootColor);
+		Vector(Palette.bOverrideEfflorescenceColor, TEXT("Grungify Efflorescence Color"), Palette.EfflorescenceColor);
+	}
+
+	void ConfigureOwnedInstance(UMaterialInstanceConstant* Instance, UMaterialInterface* Parent, UTexture2D* Texture, UTexture2D* ExtendedTexture,
+		EGrungifySurfaceType Surface, const FGrungifyPalette* Palette, float TexelSizeCm)
+	{
+		Instance->SetParentEditorOnly(Parent);
+		if (Texture)
+		{
+			Instance->SetTextureParameterValueEditorOnly(FMaterialParameterInfo(MaskTextureParameterName()), Texture);
+		}
+		if (ExtendedTexture)
+		{
+			Instance->SetTextureParameterValueEditorOnly(FMaterialParameterInfo(ExtendedMaskTextureParameterName()), ExtendedTexture);
+		}
+		Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(ActiveParameterName()), 1.f);
+		Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(SurfaceOverrideParameterName()), float(int32(Surface) - 1));
+		if (TexelSizeCm > 0.f)
+		{
+			Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(MaskTexelSizeParameterName()), TexelSizeCm);
+		}
+		if (Palette)
+		{
+			ApplyPalette(Instance, *Palette);
+		}
+		Instance->PostEditChange();
+	}
+
+	bool InstanceSlotsFree(const FGrungifyComponentRecord& OriginalState)
+	{
+		const int32 Base = UGrungifySettings::Get()->InstanceCustomDataIndex;
+		const int32 Floats = OriginalState.NumInstanceCustomDataFloats;
+		if (Base < 0 || !OriginalState.bHasInstanceData || Floats <= Base)
+		{
+			return Base >= 0;
+		}
+		for (int32 Start = 0; Start + Floats <= OriginalState.InstanceCustomData.Num(); Start += Floats)
+		{
+			for (int32 Offset = Base; Offset < FMath::Min(Floats, Base + InstanceDataCount); ++Offset)
+			{
+				if (OriginalState.InstanceCustomData[Start + Offset] != 0.f)
+				{
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 
 	bool BindOwnedMaterials(UStaticMeshComponent* Component, UTexture2D* Texture,
 		const TArray<EGrungifySurfaceType>& MaterialSurfaces, UMaterialInterface* ParentOverride,
-		const FGrungifyPalette* Palette)
+		const FGrungifyPalette* Palette, UTexture2D* ExtendedTexture, float TexelSizeCm)
 	{
 		if (MaterialSurfaces.Num() != Component->GetNumMaterials())
 		{
@@ -440,18 +561,7 @@ namespace Grungify
 
 			const FName Name = MakeUniqueObjectName(Component, UMaterialInstanceConstant::StaticClass(), *FString::Printf(TEXT("%s%d"), MaskInstancePrefix, Slot));
 			UMaterialInstanceConstant* Instance = NewObject<UMaterialInstanceConstant>(Component, Name, RF_Transactional);
-			Instance->SetParentEditorOnly(Parent);
-			if (Texture)
-			{
-				Instance->SetTextureParameterValueEditorOnly(FMaterialParameterInfo(MaskTextureParameterName()), Texture);
-			}
-			Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(ActiveParameterName()), 1.f);
-			Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(SurfaceOverrideParameterName()), float(int32(MaterialSurfaces[Slot]) - 1));
-			if (Palette)
-			{
-				ApplyPalette(Instance, *Palette);
-			}
-			Instance->PostEditChange();
+			ConfigureOwnedInstance(Instance, Parent, Texture, ExtendedTexture, MaterialSurfaces[Slot], Palette, TexelSizeCm);
 			Component->SetMaterial(Slot, Instance);
 		}
 		return true;

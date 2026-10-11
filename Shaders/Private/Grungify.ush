@@ -5,7 +5,8 @@
 // them up at the zone's physical feature scale so chips, dust and streaks stay crisp.
 //
 //   Masks.r = edge chips   Masks.g = dust   Masks.b = runoff   Masks.a = handling
-//   MaskMode: 501 = vertex colour, 502 = mask texture; every other value is inactive.
+//   MaskMode: 501 = vertex colour, 502 = mask texture, 503 = per-instance custom data; every other value is inactive.
+//   Extended mask texture (texture mode only): r = moisture, g = soot, b = scorch, a = moss.
 //   Generated graphs multiply this signed CPD value by Grungify Active, a non-CPD scalar
 //   that defaults to 0. Only material instances owned by a zone set it to 1.
 //   Surface:  0 = stone, 1 = metal, 2 = trim
@@ -85,7 +86,7 @@ struct FGrungifyLayers
 // the old 1/2 modes) must never activate wrapped materials, even when vertex colours are white.
 bool GrungifyHasValidMaskMode(float MaskMode)
 {
-	return MaskMode == 501.0 || MaskMode == 502.0;
+	return MaskMode == 501.0 || MaskMode == 502.0 || MaskMode == 503.0;
 }
 
 float4 GrungifySelectMasks(float MaskMode, float4 VertexMasks, float4 TextureMasks)
@@ -256,4 +257,154 @@ float3 GrungifyMaskDebug(float MaskMode, float4 VertexMasks, float4 TextureMasks
 	if (C == 4) return Masks.aaa;
 	// All: chips red, dust green, runoff blue, handling yellow.
 	return saturate(float3(Masks.r, Masks.g, Masks.b) + Masks.a * float3(0.6, 0.6, 0.0));
+}
+
+// ---------------------------------------------------------------- v5 additions
+
+float4 GrungifySelectMasks(float MaskMode, float4 VertexMasks, float4 TextureMasks, float4 InstanceMasks)
+{
+	if (MaskMode == 503.0)
+	{
+		return InstanceMasks;
+	}
+	return GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks);
+}
+
+// Distance to the nearest Voronoi cell border, in cell units (small near a crack).
+float GrungifyCellBorder(float3 P, uint Seed)
+{
+	const float3 Cell = floor(P);
+	float F1 = 8.0;
+	float F2 = 8.0;
+	for (int Z = -1; Z <= 1; ++Z)
+	{
+		for (int Y = -1; Y <= 1; ++Y)
+		{
+			for (int X = -1; X <= 1; ++X)
+			{
+				const int3 C = int3(Cell) + int3(X, Y, Z);
+				const float3 Feature = float3(C) + float3(GrungifyHash3(C, Seed), GrungifyHash3(C, Seed + 1u), GrungifyHash3(C, Seed + 2u));
+				const float D = length(P - Feature);
+				if (D < F1)
+				{
+					F2 = F1;
+					F1 = D;
+				}
+				else if (D < F2)
+				{
+					F2 = D;
+				}
+			}
+		}
+	}
+	return F2 - F1;
+}
+
+FGrungifyResult GrungifyEvaluateFull(
+	float3 BaseColor, float Roughness, float Metallic,
+	float MaskMode, float4 VertexMasks, float4 TextureMasks, float4 InstanceMasks, float4 ExtendedMasks,
+	float3 WorldPos, float3 WorldNormal,
+	float SurfaceFromZone, float SurfaceOverride,
+	float FeatureScaleCm, float SeedOffset,
+	float3 DustColor, float3 RunoffColor, float3 ChipColor,
+	float Strength, float4 ChannelStrength,
+	float3 MossColor, float3 SootColor, float3 SaltColor, float4 ExtendedStrength, float CrackStrength)
+{
+	if (!GrungifyHasValidMaskMode(MaskMode))
+	{
+		FGrungifyResult Untouched;
+		Untouched.BaseColor = BaseColor;
+		Untouched.Roughness = Roughness;
+		Untouched.Metallic = Metallic;
+		return Untouched;
+	}
+
+	// The primary layers go through the original path (mode 501 simply means "use these masks").
+	const float4 Raw = GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks, InstanceMasks);
+	FGrungifyResult R = GrungifyEvaluate(BaseColor, Roughness, Metallic, 501.0, Raw, Raw, WorldPos, WorldNormal,
+		SurfaceFromZone, SurfaceOverride, FeatureScaleCm, SeedOffset, DustColor, RunoffColor, ChipColor, Strength, ChannelStrength);
+
+	const float Surface = SurfaceOverride >= 0.0 ? SurfaceOverride : SurfaceFromZone;
+	const int SurfaceId = (int)round(Surface);
+	const float3 P = GrungifyNoisePos(WorldPos, FeatureScaleCm, SeedOffset);
+	const uint Seed = 2027u;
+
+	// Hairline cracks across stone where it is chipped or stained.
+	if (CrackStrength > 0.0 && SurfaceId == 0)
+	{
+		const float Where = saturate((Raw.r * 1.5 + Raw.b * 0.5) * Strength) * CrackStrength;
+		if (Where > 0.01)
+		{
+			const float Border = GrungifyCellBorder(P * 1.5, Seed);
+			const float Crack = (1.0 - smoothstep(0.0, 0.045, Border)) * smoothstep(0.3, 0.6, GrungifyFbm(P * 0.7, Seed + 3u) + Where * 0.5);
+			R.BaseColor *= lerp(1.0, 0.45, Crack * saturate(Where));
+			R.Roughness = lerp(R.Roughness, 1.0, Crack * saturate(Where));
+		}
+	}
+
+	// Extended layers exist only in the second mask texture.
+	if (MaskMode == 502.0)
+	{
+		const float4 E = saturate(ExtendedMasks * ExtendedStrength * Strength);
+
+		// Moisture: darker and glossier; on stone and trim a pale salt bloom forms where the damp edge dries.
+		const float Moisture = E.r * lerp(0.7, 1.0, GrungifyFbm(P * 0.6, Seed + 5u));
+		R.BaseColor *= lerp(1.0, 0.6, Moisture);
+		R.Roughness = lerp(R.Roughness, R.Roughness * 0.4, Moisture);
+		if (SurfaceId != 1)
+		{
+			const float Salt = smoothstep(0.12, 0.3, Moisture) * (1.0 - smoothstep(0.35, 0.55, Moisture)) * GrungifyFbm(P * 2.5, Seed + 7u);
+			R.BaseColor = lerp(R.BaseColor, SaltColor, saturate(Salt * 1.5));
+			R.Roughness = lerp(R.Roughness, 0.95, Salt);
+		}
+
+		// Soot: a matte black film that fades out at its edges.
+		const float Soot = E.g * lerp(0.6, 1.0, GrungifyFbm(P * 0.9, Seed + 11u));
+		R.BaseColor = lerp(R.BaseColor, SootColor, Soot * 0.9);
+		R.Roughness = lerp(R.Roughness, 0.95, Soot);
+		R.Metallic = lerp(R.Metallic, 0.0, Soot);
+
+		// Scorch: burnt through, darkest at the core.
+		const float Scorch = E.b * lerp(0.5, 1.0, GrungifyFbm(P * 1.4, Seed + 13u));
+		R.BaseColor = lerp(R.BaseColor, SootColor * 0.5, saturate(Scorch * Scorch * 1.5));
+		R.Roughness = lerp(R.Roughness, 0.98, Scorch);
+		R.Metallic = lerp(R.Metallic, 0.0, Scorch);
+
+		// Moss: patchy growth, thresholded by noise like chips so it has clean edges.
+		const float MossNoise = GrungifyFbm(P * 1.8, Seed + 17u);
+		const float Moss = E.a > 0.01 ? smoothstep(MossNoise - 0.05, MossNoise + 0.05, E.a * 0.9) : 0.0;
+		R.BaseColor = lerp(R.BaseColor, MossColor * lerp(0.7, 1.25, GrungifyFbm(P * 4.0, Seed + 19u)), Moss);
+		R.Roughness = lerp(R.Roughness, 0.9, Moss);
+		R.Metallic = lerp(R.Metallic, 0.0, Moss);
+	}
+
+	return R;
+}
+
+float3 GrungifyReliefNormalFull(
+	float3 NormalTS, float Relief,
+	float MaskMode, float4 VertexMasks, float4 TextureMasks, float4 InstanceMasks,
+	float3 WorldPos, float3 WorldNormal, float3 TangentWS, float3 BitangentWS,
+	float FeatureScaleCm, float SeedOffset, float Strength, float4 ChannelStrength)
+{
+	if (!GrungifyHasValidMaskMode(MaskMode))
+	{
+		return NormalTS;
+	}
+	const float4 Raw = GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks, InstanceMasks);
+	return GrungifyReliefNormal(NormalTS, Relief, 501.0, Raw, Raw, WorldPos, WorldNormal, TangentWS, BitangentWS,
+		FeatureScaleCm, SeedOffset, Strength, ChannelStrength);
+}
+
+// Channels: 0 all primary, 1-4 chips/dust/runoff/handling, 5-8 moisture/soot/scorch/moss, 9 all extended.
+float3 GrungifyMaskDebugFull(float MaskMode, float4 VertexMasks, float4 TextureMasks, float4 InstanceMasks, float4 ExtendedMasks, float Channel)
+{
+	const int C = (int)round(Channel);
+	const float4 E = MaskMode == 502.0 ? ExtendedMasks : float4(0.0, 0.0, 0.0, 0.0);
+	if (C == 5) return E.rrr;
+	if (C == 6) return E.ggg;
+	if (C == 7) return E.bbb;
+	if (C == 8) return E.aaa;
+	if (C == 9) return saturate(float3(0.2, 0.5, 1.0) * E.r + float3(0.5, 0.5, 0.5) * E.g + float3(1.0, 0.4, 0.0) * E.b + float3(0.2, 0.9, 0.1) * E.a);
+	return GrungifyMaskDebug(501.0, GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks, InstanceMasks), TextureMasks, Channel);
 }

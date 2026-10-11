@@ -472,6 +472,19 @@ bool FGrungifyFloorField::BuildTraced(UWorld* World, const FBox& InBounds, doubl
 	return true;
 }
 
+uint32 FGrungifyFloorField::Hash() const
+{
+	uint32 Hash = HashCombine(GetTypeHash(FlatZ), GetTypeHash(NumX * 131 + NumY));
+	for (const TArray<double, TInlineAllocator<4>>& Cell : Heights)
+	{
+		for (const double Height : Cell)
+		{
+			Hash = HashCombine(Hash, GetTypeHash(Height));
+		}
+	}
+	return Hash;
+}
+
 double FGrungifyFloorField::FloorBelow(const FVector& P) const
 {
 	if (NumX == 0 || NumY == 0)
@@ -649,6 +662,235 @@ float FGrungifyGateSampler::Sample(const FVector2f& UV, EGrungifyChannel Channel
 	case EGrungifyChannel::G: return Pixel[1] / 255.f;
 	case EGrungifyChannel::B: return Pixel[0] / 255.f;
 	default:                  return Pixel[3] / 255.f;
+	}
+}
+
+// ------------------------------------------------------------- Sky exposure
+
+bool FGrungifyExposureField::Build(UWorld* World, const FBox& InBounds, double Spacing, int32 NumRays, double RayLength, const AActor* IgnoreActor, const TFunction<bool()>& ShouldCancel)
+{
+	NumX = NumY = NumZ = 0;
+	Values.Reset();
+	if (!World || !InBounds.IsValid)
+	{
+		return true;
+	}
+
+	const double Step = FMath::Max(Spacing, 20.0);
+	Bounds = InBounds.ExpandBy(Step * 0.5);
+	const FVector Size = Bounds.GetSize();
+	auto Count = [Step](double Length) { return FMath::Clamp(FMath::CeilToInt(Length / Step) + 1, 2, 64); };
+	NumX = Count(Size.X);
+	NumY = Count(Size.Y);
+	NumZ = Count(Size.Z);
+	// Keep the ray count bounded on huge zones by coarsening the grid.
+	while (NumX * NumY * NumZ > 32768)
+	{
+		NumX = FMath::Max(2, NumX * 3 / 4);
+		NumY = FMath::Max(2, NumY * 3 / 4);
+		NumZ = FMath::Max(2, NumZ * 3 / 4);
+	}
+	Cell = FVector(Size.X / (NumX - 1), Size.Y / (NumY - 1), Size.Z / (NumZ - 1));
+
+	// Cosine-weighted directions over the upper hemisphere (Fibonacci spiral), so the result reads as sky visibility.
+	const int32 Rays = FMath::Clamp(NumRays, 4, 128);
+	TArray<FVector> Directions;
+	Directions.Reserve(Rays);
+	const double Golden = PI * (3.0 - FMath::Sqrt(5.0));
+	for (int32 Index = 0; Index < Rays; ++Index)
+	{
+		const double U = (Index + 0.5) / Rays;
+		const double Radius = FMath::Sqrt(U);
+		const double Phi = Index * Golden;
+		Directions.Add(FVector(Radius * FMath::Cos(Phi), Radius * FMath::Sin(Phi), FMath::Sqrt(1.0 - U)));
+	}
+
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(GrungifySkyTrace), /*bTraceComplex*/ false);
+	if (IgnoreActor)
+	{
+		QueryParams.AddIgnoredActor(IgnoreActor);
+	}
+
+	Values.SetNumUninitialized(NumX * NumY * NumZ);
+	for (int32 Z = 0; Z < NumZ; ++Z)
+	{
+		if (ShouldCancel && ShouldCancel())
+		{
+			NumX = NumY = NumZ = 0;
+			Values.Reset();
+			return false;
+		}
+		for (int32 Y = 0; Y < NumY; ++Y)
+		{
+			for (int32 X = 0; X < NumX; ++X)
+			{
+				const FVector P = Bounds.Min + FVector(X * Cell.X, Y * Cell.Y, Z * Cell.Z);
+				int32 Open = 0;
+				for (const FVector& Direction : Directions)
+				{
+					Open += World->LineTraceTestByChannel(P, P + Direction * RayLength, ECC_Visibility, QueryParams) ? 0 : 1;
+				}
+				Values[(Z * NumY + Y) * NumX + X] = float(Open) / float(Rays);
+			}
+		}
+	}
+	return true;
+}
+
+float FGrungifyExposureField::At(const FVector& P) const
+{
+	if (NumX == 0)
+	{
+		return 1.f;
+	}
+	const FVector L = (P - Bounds.Min) / Cell;
+	const double FX = FMath::Clamp(L.X, 0.0, double(NumX - 1));
+	const double FY = FMath::Clamp(L.Y, 0.0, double(NumY - 1));
+	const double FZ = FMath::Clamp(L.Z, 0.0, double(NumZ - 1));
+	const int32 X0 = FMath::Min(int32(FX), NumX - 2);
+	const int32 Y0 = FMath::Min(int32(FY), NumY - 2);
+	const int32 Z0 = FMath::Min(int32(FZ), NumZ - 2);
+	const float TX = float(FX - X0);
+	const float TY = float(FY - Y0);
+	const float TZ = float(FZ - Z0);
+	auto V = [this](int32 X, int32 Y, int32 Z) { return Values[(Z * NumY + Y) * NumX + X]; };
+	const float A = FMath::Lerp(FMath::Lerp(V(X0, Y0, Z0), V(X0 + 1, Y0, Z0), TX), FMath::Lerp(V(X0, Y0 + 1, Z0), V(X0 + 1, Y0 + 1, Z0), TX), TY);
+	const float B = FMath::Lerp(FMath::Lerp(V(X0, Y0, Z0 + 1), V(X0 + 1, Y0, Z0 + 1), TX), FMath::Lerp(V(X0, Y0 + 1, Z0 + 1), V(X0 + 1, Y0 + 1, Z0 + 1), TX), TY);
+	return FMath::Lerp(A, B, TZ);
+}
+
+uint32 FGrungifyExposureField::Hash() const
+{
+	uint32 Hash = FCrc::MemCrc32(Values.GetData(), Values.Num() * sizeof(float));
+	return HashCombine(Hash, GetTypeHash(Bounds.Min) ^ GetTypeHash(Bounds.Max));
+}
+
+// ------------------------------------------------------------ Segment field
+
+void FGrungifySegmentField::Reset(double InCellSize)
+{
+	Segments.Reset();
+	Cells.Reset();
+	CellSize = FMath::Max(InCellSize, 5.0);
+}
+
+void FGrungifySegmentField::Add(const FSegment& Segment)
+{
+	const int32 Index = Segments.Add(Segment);
+	const double Length = FVector::Dist(Segment.A, Segment.B);
+	const int32 Steps = FMath::Max(1, FMath::CeilToInt(Length / (CellSize * 0.5)));
+	const int32 Reach = FMath::Max(1, FMath::CeilToInt(Segment.Radius / CellSize));
+	TSet<FIntVector> Touched;
+	for (int32 Step = 0; Step <= Steps; ++Step)
+	{
+		const FIntVector Center = CellOf(FMath::Lerp(Segment.A, Segment.B, double(Step) / Steps));
+		for (int32 Z = -Reach; Z <= Reach; ++Z)
+		{
+			for (int32 Y = -Reach; Y <= Reach; ++Y)
+			{
+				for (int32 X = -Reach; X <= Reach; ++X)
+				{
+					const FIntVector Cell = Center + FIntVector(X, Y, Z);
+					if (!Touched.Contains(Cell))
+					{
+						Touched.Add(Cell);
+						Cells.FindOrAdd(Cell).Add(Index);
+					}
+				}
+			}
+		}
+	}
+}
+
+uint32 FGrungifySegmentField::Hash() const
+{
+	uint32 Hash = GetTypeHash(Segments.Num());
+	for (const FSegment& Seg : Segments)
+	{
+		Hash = HashCombine(Hash, GetTypeHash(Seg.A));
+		Hash = HashCombine(Hash, GetTypeHash(Seg.B));
+		Hash = HashCombine(Hash, GetTypeHash(Seg.Radius));
+		Hash = HashCombine(Hash, GetTypeHash(Seg.Value));
+	}
+	return Hash;
+}
+
+namespace Grungify
+{
+	// ------------------------------------------------------------ Water paths
+
+	void TraceWaterPath(UWorld* World, const FVector& Start, float StepCm, int32 MaxSteps, const AActor* IgnoreActor,
+		TArray<FVector>& OutPath, TArray<FGrungifyPool>& OutPools)
+	{
+		OutPath.Reset();
+		OutPath.Add(Start);
+		if (!World)
+		{
+			return;
+		}
+
+		FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(GrungifyWaterTrace), /*bTraceComplex*/ true);
+		if (IgnoreActor)
+		{
+			QueryParams.AddIgnoredActor(IgnoreActor);
+		}
+
+		const double Step = FMath::Max(StepCm, 2.f);
+		const FVector Gravity(0.0, 0.0, -1.0);
+		FVector P = Start;
+		for (int32 Index = 0; Index < MaxSteps; ++Index)
+		{
+			FHitResult Hit;
+			const FVector Next = P + Gravity * Step;
+			if (!World->LineTraceSingleByChannel(Hit, P, Next, ECC_Visibility, QueryParams))
+			{
+				// Falling, or running down a wall just beside it.
+				P = Next;
+				OutPath.Add(P);
+				continue;
+			}
+
+			const FVector N = Hit.ImpactNormal;
+			if (N.Z < 0.2)
+			{
+				// Overhang or steep face: cling to it and keep going down.
+				P = Hit.ImpactPoint + N * 1.0 + Gravity * (Step * 0.5);
+				OutPath.Add(P);
+				continue;
+			}
+
+			// On a ledge or slope: run downhill along it; on flat ground, pool.
+			FVector Downhill = Gravity - N * FVector::DotProduct(Gravity, N);
+			if (Downhill.Size() < 0.15)
+			{
+				OutPath.Add(Hit.ImpactPoint);
+				FGrungifyPool& Pool = OutPools.AddDefaulted_GetRef();
+				Pool.Center = Hit.ImpactPoint;
+				Pool.Radius = 30.f;
+				return;
+			}
+			Downhill.Normalize();
+			P = Hit.ImpactPoint + N * 1.0 + Downhill * Step;
+			OutPath.Add(P);
+		}
+	}
+
+	float StampWeight(const FGrungifyStampData& Stamp, const FVector& P, float FeatureScale)
+	{
+		// Distance in the stamp's own unit-sphere space, so scaling the actor stretches it into an ellipsoid.
+		const FVector Local = Stamp.Transform.InverseTransformPosition(P) / FMath::Max(Stamp.Radius, 1.f);
+		float Distance = float(Local.Size());
+		if (Stamp.EdgeNoise > 0.f)
+		{
+			const FVector NP = P / FMath::Max(FeatureScale, 1.f);
+			Distance += (Fbm(NP * 1.3, 4242u) - 0.5f) * Stamp.EdgeNoise;
+		}
+		if (Distance >= 1.f)
+		{
+			return 0.f;
+		}
+		const float Inner = 1.f - FMath::Clamp(Stamp.Falloff, 0.f, 1.f);
+		return Distance <= Inner ? 1.f : 1.f - FMath::SmoothStep(Inner, 1.f, Distance);
 	}
 }
 

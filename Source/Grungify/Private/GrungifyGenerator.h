@@ -1,16 +1,21 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Async/Future.h"
 #include "GrungifyTypes.h"
+#include <atomic>
 
 #if WITH_EDITOR
 
 class AActor;
+class AGrungifyWeatheringZone;
 class UActorComponent;
 class UMaterialInterface;
 class UPrimitiveComponent;
 class UStaticMeshComponent;
 class UTexture2D;
+class UMaterialInstanceConstant;
+class UInstancedStaticMeshComponent;
 class UWorld;
 struct FStaticMeshLODResources;
 
@@ -28,6 +33,8 @@ public:
 	/** Highest floor at or just below P. */
 	double FloorBelow(const FVector& P) const;
 
+	uint32 Hash() const;
+
 private:
 	FBox Bounds = FBox(ForceInit);
 	double FlatZ = 0.0;
@@ -40,6 +47,109 @@ private:
 };
 
 /** CPU copy of an 8-bit gate texture, sampled nearest with wrap. */
+/** How open each point is to the sky, from ray casts on a grid over the zone (1 = open sky, 0 = fully sheltered). */
+class FGrungifyExposureField
+{
+public:
+	/** Returns false if cancelled. */
+	bool Build(UWorld* World, const FBox& InBounds, double Spacing, int32 NumRays, double RayLength, const AActor* IgnoreActor,
+		const TFunction<bool()>& ShouldCancel = TFunction<bool()>());
+
+	/** Trilinear lookup. Callers offset surface points along their normal so they sample the air side. */
+	float At(const FVector& P) const;
+
+	bool IsValid() const { return NumX > 0; }
+	int32 NumNodes() const { return NumX * NumY * NumZ; }
+	uint32 Hash() const;
+
+private:
+	FBox Bounds = FBox(ForceInit);
+	FVector Cell = FVector::OneVector;
+	int32 NumX = 0;
+	int32 NumY = 0;
+	int32 NumZ = 0;
+	TArray<float> Values;
+};
+
+/** Capsules (segments with a radius) in a uniform grid, for fast "near a path" queries over many samples. */
+class FGrungifySegmentField
+{
+public:
+	struct FSegment
+	{
+		FVector A;
+		FVector B;
+		float Radius = 10.f;
+		/** Caller-defined strength (traffic weight, water amount...). */
+		float Value = 1.f;
+		/** 0 at the path start, 1 at its end. */
+		float AlongA = 0.f;
+		float AlongB = 1.f;
+	};
+
+	void Reset(double InCellSize);
+	void Add(const FSegment& Segment);
+	bool IsEmpty() const { return Segments.Num() == 0; }
+	uint32 Hash() const;
+
+	/** Calls Fn(Segment, Distance, AlongFraction) for every segment whose capsule contains P. */
+	template <typename FnType>
+	void ForEachNear(const FVector& P, FnType&& Fn) const
+	{
+		const TArray<int32>* List = Cells.Find(CellOf(P));
+		if (!List)
+		{
+			return;
+		}
+		for (const int32 Index : *List)
+		{
+			const FSegment& Seg = Segments[Index];
+			const FVector Closest = FMath::ClosestPointOnSegment(P, Seg.A, Seg.B);
+			const double Distance = FVector::Dist(P, Closest);
+			if (Distance < Seg.Radius)
+			{
+				const double Length = FVector::Dist(Seg.A, Seg.B);
+				const float T = Length > UE_KINDA_SMALL_NUMBER ? float(FVector::Dist(Seg.A, Closest) / Length) : 0.f;
+				Fn(Seg, float(Distance), FMath::Lerp(Seg.AlongA, Seg.AlongB, T));
+			}
+		}
+	}
+
+private:
+	TArray<FSegment> Segments;
+	TMap<FIntVector, TArray<int32>> Cells;
+	double CellSize = 50.0;
+
+	FIntVector CellOf(const FVector& P) const
+	{
+		return FIntVector(FMath::FloorToInt(P.X / CellSize), FMath::FloorToInt(P.Y / CellSize), FMath::FloorToInt(P.Z / CellSize));
+	}
+};
+
+/** A lamp or fire that leaves soot (and scorch, for fire). */
+struct FGrungifyHeatSource
+{
+	FVector Location = FVector::ZeroVector;
+	bool bFire = false;
+};
+
+/** Copy of a wear stamp, safe to read from worker threads. */
+struct FGrungifyStampData
+{
+	FTransform Transform;
+	float Radius = 50.f;
+	float Falloff = 0.6f;
+	float EdgeNoise = 0.35f;
+	FGrungifyStampLayers Layers;
+};
+
+/** Where pooled water collects (end of a traced water path on flat ground). */
+struct FGrungifyPool
+{
+	FVector Center = FVector::ZeroVector;
+	float Radius = 40.f;
+};
+
 class FGrungifyGateSampler
 {
 public:
@@ -98,6 +208,29 @@ struct FGrungifyGenerationParams
 	TFunction<bool()> ShouldCancel;
 
 	bool CancelRequested() const { return ShouldCancel && ShouldCancel(); }
+
+	// --- Optional inputs; everything below is off by default so the original layers are unchanged.
+
+	/** Sky openness; null = off. */
+	const FGrungifyExposureField* Exposure = nullptr;
+	float SkyInfluence = 0.f;
+
+	FGrungifyExtendedLayers Extended;
+	/** Produce the second (extended) mask texture. */
+	bool bExtended = false;
+
+	TArray<FGrungifyHeatSource> HeatSources;
+	TArray<FVector> Fasteners;
+	TArray<FGrungifyStampData> Stamps;
+	TArray<FGrungifyPool> Pools;
+
+	/** Traced water paths (replace straight streaks for their sources). */
+	const FGrungifySegmentField* Flow = nullptr;
+	/** Traffic paths (scuffs). */
+	const FGrungifySegmentField* Traffic = nullptr;
+
+	/** Candidate points per m² to collect for decal/mesh scatter (0 = none). */
+	float ScatterDensity = 0.f;
 	TArray<FGrungifyRunoffSource> Sources;
 };
 
@@ -150,6 +283,88 @@ struct FGrungifyComponentResult
 
 	/** Auto marks an excluded slot; admitted slots carry their resolved material family. */
 	TArray<EGrungifySurfaceType> MaterialSurfaces;
+
+	/** Second mask texture (moisture, soot, scorch, moss); same size as TexturePixels. Empty when unused. */
+	TArray<FColor> ExtendedPixels;
+
+	/** World centimetres per mask texel, for runtime wear. */
+	float TexelSizeCm = 0.f;
+
+	/** Instanced meshes: chips, dust, runoff, handling per instance. */
+	bool bInstanced = false;
+	TArray<FVector4f> InstanceMasks;
+
+	/** Surface points with their masks, for scatter. */
+	struct FScatterSample
+	{
+		FVector P;
+		FVector N;
+		FLinearColor Primary;
+		FLinearColor Extended;
+		EGrungifySurfaceType Surface = EGrungifySurfaceType::Stone;
+		/** Deterministic 0..1 value for thinning and random sizes. */
+		float Random = 0.f;
+		float Random2 = 0.f;
+	};
+	TArray<FScatterSample> ScatterSamples;
+};
+
+/** A cached per-component result and the inputs it was made from. */
+struct FGrungifyCacheEntry
+{
+	uint32 Key = 0;
+	TSharedPtr<FGrungifyComponentResult> Result;
+	FGrungifyComponentReport Report;
+	int64 Bytes = 0;
+	double LastUsed = 0.0;
+};
+
+/**
+ * One run's inputs and outputs. Prepared on the game thread; items are generated either there (with a progress
+ * dialog) or on a worker thread (background live preview), then collected on the game thread.
+ */
+struct FGrungifyGenerationJob
+{
+	FString Operation;
+	FGrungifyGenerationParams Params;
+	FGrungifyFloorField Floor;
+	FGrungifyExposureField Exposure;
+	FGrungifySegmentField Flow;
+	FGrungifySegmentField Traffic;
+	TMap<UTexture2D*, TUniquePtr<FGrungifyGateSampler>> Samplers;
+	/** Gate copies, so worker threads never read the zone's (editable) rule array. */
+	TArray<TUniquePtr<FGrungifyGate>> GateCopies;
+	uint32 EnvironmentHash = 0;
+
+	struct FItem
+	{
+		TWeakObjectPtr<UStaticMeshComponent> Component;
+		FString Path;
+		uint32 Key = 0;
+		bool bInstanced = false;
+		FGrungifyComponentContext Context;
+		FGrungifyComponentReport Report;
+		FGrungifyComponentResult Result;
+		bool bGenerated = false;
+		bool bFromCache = false;
+		/** Generation found nothing usable (reported as skipped). */
+		bool bFailed = false;
+		float Seconds = 0.f;
+		/** Apply with Take Over: the zone that owns this mesh now. */
+		TWeakObjectPtr<AGrungifyWeatheringZone> TakeOverFrom;
+	};
+	TArray<FItem> Items;
+
+	/** Set from the game thread to stop a background run. */
+	std::atomic<bool> bCancelRequested { false };
+	std::atomic<bool> bFinished { false };
+	bool bCancelled = false;
+	FString CancelledDuring;
+	double StartSeconds = 0.0;
+	TFuture<void> Future;
+
+	/** Generates one item (thread-safe given the GC guard the caller holds). */
+	void GenerateItem(FItem& Item);
 };
 
 namespace Grungify
@@ -181,6 +396,19 @@ namespace Grungify
 
 	bool GenerateComponent(UStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult);
 
+	/** Instanced meshes: one set of masks per instance (sampled around each instance's bounds). */
+	bool GenerateInstanced(UInstancedStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult);
+
+	/**
+	 * Follows water from Start: down walls, along sloped surfaces, over edges, until it pools on flat ground or runs out.
+	 * Game thread only (line traces).
+	 */
+	void TraceWaterPath(UWorld* World, const FVector& Start, float StepCm, int32 MaxSteps, const AActor* IgnoreActor,
+		TArray<FVector>& OutPath, TArray<FGrungifyPool>& OutPools);
+
+	/** Stamp weight (0..1) at P, matching AGrungifyWearStamp::WeightAt. */
+	float StampWeight(const FGrungifyStampData& Stamp, const FVector& P, float FeatureScale);
+
 	/** Snapshot of everything Grungify can change on a component. */
 	void CaptureRecord(UStaticMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
 	/** Puts the component back exactly as captured. Calls Modify() only when bTransactional. */
@@ -196,7 +424,17 @@ namespace Grungify
 	/** Owns only admitted slots; Texture is null for vertex masks. Excluded material identities are retained. */
 	bool BindOwnedMaterials(UStaticMeshComponent* Component, UTexture2D* Texture,
 		const TArray<EGrungifySurfaceType>& MaterialSurfaces, UMaterialInterface* ParentOverride,
-		const FGrungifyPalette* Palette = nullptr);
+		const FGrungifyPalette* Palette = nullptr, UTexture2D* ExtendedTexture = nullptr, float TexelSizeCm = 0.f);
+
+	/** Writes per-instance masks at UGrungifySettings::InstanceCustomDataIndex. False (nothing written) if those indices are in use. */
+	bool WriteInstanceMasks(UInstancedStaticMeshComponent* Component, const TArray<FVector4f>& Masks);
+
+	/** True if none of the per-instance custom data floats Grungify uses hold another system's values. */
+	bool InstanceSlotsFree(const FGrungifyComponentRecord& OriginalState);
+
+	/** Shared setup of an owned or baked instance: textures, activation, surface, texel size, palette. */
+	void ConfigureOwnedInstance(UMaterialInstanceConstant* Instance, UMaterialInterface* Parent, UTexture2D* Texture, UTexture2D* ExtendedTexture,
+		EGrungifySurfaceType Surface, const FGrungifyPalette* Palette, float TexelSizeCm);
 }
 
 #endif // WITH_EDITOR

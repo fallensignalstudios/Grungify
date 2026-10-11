@@ -9,11 +9,18 @@ Procedural damage and weathering for Unreal Engine 5. Drop a **BP_WeatheringZone
 | **Runoff below vents** | Streaks running down from vents, drains and spouts, fanning out as they fall. Faint streaks on all walls too. | B |
 | **Handling on rails** | Polish/grime on rails and handles, plus a lighter band on edges at hand height. | A |
 
+Optional **extended layers** add moisture and water lines, soot above lamps and fires, scorch, moss and lichen, rust bloom around fasteners, cracks and traffic scuffs (see [Extended layers](#extended-layers)).
+
 Each material slot is classified as **stone**, **metal** or **trim**, so the wear follows the construction. Trim chips most, metal rusts under runoff and gets polished by hands, and stone collects dust.
 
 Everything is driven by a **Seed**, so the same seed and settings always produce the same result.
 
-> **Status:** v0.3.0 targets UE 5.8. v0.2.x was natively verified (results below). v0.3.0 adds generation progress, phase timings and cancellation; saved presets and a palette; mask-UV validation; and per-slot decision reports. These v0.3.0 additions have not been compiled or run yet, and visual quality still needs review on the intended meshes and lighting.
+> **Status:** v0.4.0 targets UE 5.8. v0.2.x was natively verified (results below). v0.3.0 added progress, cancellation, presets, a palette, mask-UV validation and per-slot reports. v0.4.0 adds:
+> - **Workflow:** a zones panel, wear stamps, a background generation cache, seed variants, bake-to-assets with PNG round-tripping, and a material library.
+> - **Generation:** sky exposure, traced water flow, extended layers, decal and mesh scatter, and instanced meshes.
+> - **Pipeline:** Data Layer targeting, a commandlet, a Blueprint/Python API, runtime wear, and a reference scene with screenshot and cooked-build tests.
+>
+> **Neither v0.3.0 nor v0.4.0 has been compiled or run yet.** They were written without an engine install, so expect a round of compile fixes. Visual quality still needs review on the intended meshes and lighting. See [Verification checklist](#verification-checklist).
 
 ---
 
@@ -30,10 +37,13 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
    - `Materials/T_GrungifyNoMask`: the black default for the mask texture parameter
 
    Uasset files can't ship as text, so they're generated locally. Commit them once they exist.
+5. Optional, from *Tools → Grungify*:
+   - **Create Material Library**: starter presets and material instances in `/Game/Grungify/Library`.
+   - **Build Reference Scene**: the visual test level.
 
 ### Content versioning
 
-The generated material assets carry a marker of the form `[GrungifyContent v4 cpd=0 uv=1]` (content version, custom data index, mask UV channel). On editor start, and whenever the CPD index or mask UV channel changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
+The generated material assets carry a marker of the form `[GrungifyContent v5 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
 
 - **Tools → Grungify → Update Plugin Content** creates missing assets and rebuilds outdated ones.
 - **Rebuild Plugin Content** forces a rebuild of all the generated material assets.
@@ -56,9 +66,10 @@ The zone writes masks; the material function renders them. In each master materi
 - **SurfaceOverride**: leave unconnected to use the zone's per-slot `Grungify Surface Override` parameter. You can connect an explicit material value instead: `0` stone, `1` metal, `2` trim; `-1` uses the component's detected surface.
 - **Normal** is passed through unchanged unless `Grungify Relief Strength` is above 0. When it is, chips read as recessed and dust as slightly raised, layered on top of your normal rather than replacing it. Relief uses finite differences rather than ddx/ddy, so it also works with Nanite.
 - Parameters (group *Grungify*):
-  - colours: `Grungify Dust Color`, `Grungify Runoff Color`, `Grungify Trim Chip Color`
-  - strength: overall `Grungify Strength`, plus separate `Grungify Chip / Dust / Runoff / Handling Strength`
-  - relief: `Grungify Relief Strength`
+  - colours: `Grungify Dust Color`, `Grungify Runoff Color`, `Grungify Trim Chip Color`, `Grungify Moss Color`, `Grungify Soot Color`, `Grungify Salt Color` (efflorescence)
+  - strength: overall `Grungify Strength`, plus separate `Grungify Chip / Dust / Runoff / Handling / Moisture / Soot / Scorch / Moss / Crack Strength`
+  - relief: `Grungify Relief Strength` (cracks also cut into the normal)
+  - textures: `Grungify Mask Texture` and `Grungify Extended Mask Texture`, both set by the zone
 - The shading code lives in `Shaders/Private/Grungify.ush`, so you can tune the look there without rebuilding the graph.
 
 You don't need materials hooked up to start: set **Preview Display** to *All Masks* and the preview swaps in the debug material.
@@ -67,7 +78,7 @@ You don't need materials hooked up to start: set **Preview Display** to *All Mas
 
 1. Drag `BP_WeatheringZone` into the level and scale or size its box over the area.
 2. Adjust settings. With **Live Preview** on, the result regenerates whenever you release a slider or finish moving the zone.
-3. Review it. Switch **Preview Display** between *Final Material* and the individual masks (*Edge Chips*, *Dust*, *Runoff*, *Handling*) to check each layer.
+3. Review it. Switch **Preview Display** between *Final Material* and the individual masks to check each layer: *Edge Chips*, *Dust*, *Runoff*, *Handling*, plus *Moisture*, *Soot*, *Scorch*, *Moss* and *All Extended* for the extended layers.
 4. Press **Apply** to commit, or **Cancel Preview** to drop the preview.
 5. Press **Clear** to put every mesh the zone touched back the way it was.
 
@@ -77,7 +88,7 @@ Apply and Clear are single undo steps (Ctrl+Z). **New Seed** rolls a new random 
 
 Any Dry Run, Preview or Apply that takes longer than about 0.3 s opens a progress dialog with a **Cancel** button. The dialog names the current phase and, during generation, each mesh in turn (`Actor / Component (3 of 40)`).
 
-Generation runs in four phases: floor traces, runoff sources, scan, and mask generation. Cancel is checked between phases, every row of floor-trace cells, and every LOD and every 32 texture rows inside each mesh. Nothing is written until generation has finished. So Cancel never leaves a half-weathered level:
+Generation runs in these phases: floor traces, sky exposure (when enabled), scene sources, scan, and mask generation. Scene sources covers vents, lights, fires, fasteners, stamps, traffic paths and traced water. Cancel is checked between phases, every row of floor-trace cells and exposure probes, and every LOD and every 32 texture rows inside each mesh. Nothing is written until generation has finished. So Cancel never leaves a half-weathered level:
 
 - **Preview:** nothing new is written; the previous preview was already removed before generation started.
 - **Apply:** no mesh is weathered and already-applied meshes are unchanged; an active preview is removed.
@@ -136,6 +147,180 @@ Example: rail wear without touching a joined bridge deck. Add a rule matching `*
 
 Add entries to **Leaks** and drag their diamond widgets to the actual leak points. Each leak has its own radius, length and strength. Turn off **Auto Detect Vents** to use only hand-placed leaks and the explicit **Runoff Sources** actors.
 
+### Zones panel
+
+*Tools → Grungify → Weathering Zones Panel* opens a dockable tab with every zone in the level:
+
+- **Zones:** status, preview and applied counts, last run, warnings and preset. A filter box narrows the list, and a running background preview is marked.
+- **Actions:** Preview, Apply, Clear, Cancel Preview and Dry Run on the selected zone. Dry Run All, Preview All, Apply All, Cancel All Previews and Clear All for every zone.
+- **Selected zone:** its last report, one row per component with the result, notes, texture size, time and whether it came from the cache.
+- **Selected component:** its slot decisions and mask UV checks.
+
+### Faster iteration: cache and background preview
+
+- **Use Generation Cache** (*Performance*, on by default) keeps each mesh's last result in memory. The cache key is a hash of everything that affects that mesh: settings, seed, zone transform, traced floors, sky exposure, water paths, traffic, stamps, lights and fires, and the mesh itself (transform, mesh asset and build, materials, slot decisions, instance transforms). Changing one setting only regenerates the meshes it actually affects. **Cache Budget** (default 512 MB) evicts least-recently-used entries. **Clear Generation Cache** empties it. The cache is editor-only and never saved.
+- **Background Generation** (on by default) runs live previews on a worker thread, so the editor stays responsive while you drag sliders or move stamps. The quick game-thread work happens first: restoring the previous preview, traces and the scan. Any new change cancels the running job and starts another. A ticker writes the result when the worker finishes. Explicit **Preview**, **Apply**, **Bake**, **Dry Run** and the commandlet always run synchronously, with the progress dialog.
+- The report shows cache hits per mesh (`bFromCache`) and per run (`CacheHits`), and whether the run was a background one.
+
+### Seed variants (A/B comparison)
+
+**Make Seed Variants** fills *Seed Variants* with the current seed plus two new ones. **Preview Next Variant** and **Preview Previous Variant** flip between them. Each variant stays in the generation cache, so flipping back is instant. Add or type seeds into the list by hand to compare specific ones. When you've chosen, Apply as usual; the zone's Seed is the variant shown.
+
+### Wear stamps (paint-over)
+
+Drop a **Grungify Wear Stamp** actor (*Place Actors → All Classes*) wherever the procedural result needs a hand-placed correction: an extra-dusty corner, a scorched patch, a clean spot.
+
+- A stamp is a soft sphere (**Radius**, **Falloff**, **Edge Noise**, plus scale and rotation for ellipsoids).
+- It has a per-layer amount for edge chips, dust, runoff, handling, moisture, soot, scorch and moss. Positive values add wear and negative values remove it.
+- Stamps are actors, so they're saved with the level, undoable, deterministic, and kept when the zone regenerates with a new seed. A brush stroke would be lost on regeneration.
+- Moving or editing a stamp refreshes every overlapping zone that has Live Preview on.
+- Turn **Apply Wear Stamps** off on a zone to ignore stamps.
+
+### Light- and sky-aware exposure
+
+Tick **Use Sky Exposure** (*Exposure*) to probe how open each point is to the sky, using cosine-weighted rays (**Sky Rays**, default 24) on a grid (**Sky Probe Spacing**). **Sky Exposure Influence** scales the effect:
+
+- Dust settles more in sheltered spots, under overhangs and in alcoves.
+- Ambient streaks and chips concentrate where weather reaches.
+
+### Water flow
+
+Tick **Trace Water Flow** (*Runoff Below Vents*) and each runoff source is followed down the real geometry, one **Flow Step** at a time:
+
+- Water falls until it hits something and clings to steep faces.
+- It runs downhill over slopes, drops off edges, and pools on flat ground.
+
+Runoff then follows those paths instead of a straight vertical cone. The pools feed the moisture layer. With the zone selected, the viewport draws each traced path.
+
+### Extended layers
+
+These are under *Extended Layers*, and are all off (0) by default. Anything that needs the extended mask texture switches that mesh to texture output.
+
+| Layer | Driven by | Stored in |
+|---|---|---|
+| **Moisture** | Traced pools (**Pool Damp Radius**), traced water paths, a flood/**Water Line Height** above the floor, and shelter | extended R |
+| **Soot** | Plumes rising above lamps (**Soot From Lights**, any visible local light) and fires (`Grungify.Fire` tag or *Fire Keywords*: fire, torch, brazier...), **Soot Radius**, **Plume Height** | extended G |
+| **Scorch** | Within **Scorch Radius** of fires | extended B |
+| **Moss / lichen** | Damp, sheltered, upward- and north-facing stone (**North Yaw**, **Moss North Bias**) | extended A |
+| **Rust bloom** | Around fasteners (`Grungify.Fastener` tag, *Fastener Keywords* such as bolt, rivet, screw, or small meshes; instanced fasteners count each instance), **Rust Bloom Radius** | runoff (B) and chips (R) on metal |
+| **Traffic scuffs** | **Grungify Traffic Path** spline actors (**Width**, **Traffic**): scuffs on floors along the path and on walls beside it up to **Scuff Wall Height** | dust (G) and chips (R) |
+| **Cracks** | Shader-side cell borders on stone, scaled by chips and moisture; `Grungify Crack Strength` (palette or material) | material only |
+
+Salt bloom (efflorescence) appears on damp stone, coloured by `Grungify Salt Color`.
+
+Traffic is spline-driven on purpose: designers draw the routes people actually take, which is more predictable than inferring it from the NavMesh.
+
+The extended texture is a second per-component mask texture at the same resolution. Vertex-colour output carries only the four primary masks, so meshes whose extended layers are non-zero use texture output.
+
+### Decal and mesh scatter
+
+**Scatter** entries place real decals or small meshes where a mask is high: cobwebs in sheltered dusty corners, puddle decals on pools, debris along floors, leaf litter. Each entry has:
+
+- **Layer** and **Threshold**: which mask, and how high it must be
+- **Density** per m²
+- a **Decal Material** or a **Mesh**
+- **Size Range**, and **Decal Depth** for decals
+- **Surfaces**: optionally restrict to stone, metal or trim
+
+Placement is deterministic per seed and capped at 2000 pieces per zone:
+
+- Decals project into the surface and meshes align to its normal.
+- Pieces go into a `Grungify/<Zone>/Scatter` outliner folder, optionally into **Scatter Data Layers**, and are tagged `Grungify.Scatter` and `Grungify.Ignore` so no zone weathers them.
+- Scatter happens on **Apply** and **Bake** only. It's replaced on every Apply and removed by **Clear**.
+
+### Instanced meshes (ISM / HISM)
+
+With **Weather Instanced Meshes** on (default), every instance of an instanced or hierarchical instanced static mesh gets its own four mask values in **per-instance custom data**. These start at *Project Settings → Grungify → Instance Custom Data Index* (default 0). Values are sampled at 7 points on each instance.
+
+The material function reads them when the component's mask mode is `503`. Detail is per instance, not per texel: a chipped crate versus a clean crate, a dusty floor tile versus a swept one. That's the right granularity for foliage-scale scatter.
+
+- Existing per-instance custom data at our four slots is a conflict, so the component is skipped and reported.
+- Other per-instance data is preserved, and Clear restores the exact original float count and values.
+
+### Bake to assets (non-destructive)
+
+**Bake To Assets** (*Bake*) does what Apply does, but stores the result as standalone project assets in **Bake Folder** (default `/Game/Grungify/Baked`):
+
+- `T_Grungify_<Zone>_<Actor>_<Component>`: the mask texture
+- `..._Ext`: the extended texture
+- `MI_Grungify_<...>_<Slot>`: material instances parented to the original materials
+
+Bake always asks for texture output. Meshes without the mask UV channel fall back to vertex colours, and the report says so. Instanced meshes keep per-instance data.
+
+- **Touch-ups:** with **Export Baked PNGs** on, each texture is also written to `Saved/Grungify/Bakes/<Zone>/<Name>.png` and set as its import source. Paint over the PNG in any image editor, keeping it linear: the channels are masks, not colours. Then right-click the texture and choose **Reimport**.
+- **Re-baking** updates the same assets in place, so references stay valid. It overwrites the PNGs, so keep your edited copies.
+- **Clear** restores the meshes' original materials, but the baked assets stay. Delete them from the Content Browser if you no longer need them.
+- **Sharing:** baked assets can be used by other levels, referenced by hand-authored materials, and reviewed in source control as normal textures.
+
+### Material library
+
+*Tools → Grungify → Create Material Library* creates starter looks in `/Game/Grungify/Library`. Each has a preset (`GP_<Look>`) and stone, metal and trim material instances of `M_GrungifyExample` (`MI_Grungify_<Look>_<Stone|Metal|Trim>`).
+
+| Look | What it sets up |
+|---|---|
+| **Abandoned Industrial** | Heavy dust, long rust runoff, rust bloom on fasteners, light soot, cracked concrete |
+| **Old Temple** | Crisp chipped stone, ledge dust, polished hand-height edges, cracks, sky exposure, moss |
+| **Wet Sewer** | Traced water flow, moisture and a 40 cm water line, moss everywhere damp, dark streaks, salt bloom |
+
+The library is project content, so plugin-content rebuilds never touch it. Existing assets are kept; **Reset Material Library** overwrites them with the defaults. Library presets don't include a seed, so each zone keeps its own.
+
+### Data Layers and World Partition
+
+- **Include Data Layers** (*Targeting*) limits a zone to actors in any of the listed Data Layer assets, and the report names actors skipped for this reason. Example: weather only the "Ruins" layer.
+- **Scatter Data Layers** puts scattered actors into data layers.
+- Zones work on whatever is currently loaded. Applied records for actors in unloaded cells are kept and restored by a later Clear once they're loaded. To process a whole World Partition map, use the commandlet below, which loads the region around each zone first.
+
+### Commandlet (build machines and CI)
+
+```
+UnrealEditor-Cmd.exe Project.uproject -run=Grungify -Map=/Game/Maps/MyMap[,/Game/Maps/Other]
+    -Operation=Apply|Clear|DryRun|Bake [-Zones=LabelA,LabelB] [-Save] [-Report=Path/To/Dir]
+    [-LoadPadding=200] [-unattended -nullrhi]
+```
+
+- Runs every zone (or just the named ones) in each map, synchronously.
+- On World Partition maps, it loads each zone's bounds plus **LoadPadding** (cm) first.
+- Writes each zone's JSON report to `-Report` (default `Saved/Grungify/Reports`).
+- Nothing is saved without `-Save`.
+- Exit codes:
+  - `0`: OK
+  - `1`: warnings, conflicts or failed meshes
+  - `2`: usage error or a missing map
+
+### Blueprint and Python API
+
+Every zone action is a `BlueprintCallable` UFUNCTION. That includes Preview, Apply, Clear, Cancel Preview, Dry Run, New Seed, Load/Save Preset, Bake To Assets, the seed variants and Clear Generation Cache. The getters are `GetLastReport`, `GetLastReportFile`, `GetAppliedCount`, `GetPreviewCount` and `IsGeneratingInBackground`. All of them are reachable from Editor Utility Blueprints and Python.
+
+`UGrungifyBlueprintLibrary` (*Grungify* category) adds level-wide helpers:
+
+| Function | What it does |
+|---|---|
+| `GetZones`, `FindZoneByLabel`, `GetZonesAffecting(Component)` | Find zones |
+| `RunZone(Zone, Operation)`, `RunAllZones(World, Operation)` | Run Preview / Apply / Clear / Cancel Preview / Dry Run / Bake and return the reports |
+| `SpawnZone(World, Transform, HalfExtent, Preset)` | Create a zone in the editor world, optionally with a preset |
+| `SetZoneSeed(Zone, Seed, bPreview)` | Set a seed and optionally preview it |
+| `ReportToJson`, `SaveReport` | Serialise reports |
+
+```python
+import unreal
+world = unreal.EditorLevelLibrary.get_editor_world()
+for report in unreal.GrungifyBlueprintLibrary.run_all_zones(world, unreal.GrungifyOperation.DRY_RUN):
+    print(report.zone, report.weathered, report.skipped, report.seconds)
+```
+
+### Runtime wear (gameplay)
+
+`UGrungifyRuntimeWearSubsystem` (a world subsystem) paints extra wear into **texture-output** meshes during play: impacts, footsteps, scorch marks.
+
+- **Functions:**
+  - `AddWearAtHit(Hit, Layer, Radius, Amount)`
+  - `AddWearAtLocation(Location, Direction, Layer, Radius, Amount)`
+  - `ResetRuntimeWear(Component)`
+- **Component:** `UGrungifyRuntimeWearComponent` paints under its owner with `EmitWear`, for example from footstep notifies.
+- **How it works:** on a component's first hit, its baked mask textures are copied into render targets, and its slots switch to dynamic material instances that read them. Reset switches back to the baked result.
+- **Setup:** enable *Project Settings → Physics → Support UV From Hit Results*, and trace against complex collision so hits carry a face index. Meshes weathered with vertex-colour or instanced output can't be painted at runtime.
+
+
 ### Reports
 
 Every Dry Run, Preview and Apply fills **Last Report** on the zone. It's also readable from Blueprint or Python via `GetLastReport`, and written to `Saved/Grungify/Reports/<Zone>_<Operation>.json`.
@@ -145,12 +330,15 @@ The run as a whole records:
 - phase timings
 - whether it was cancelled, and during which phase
 - the preset in use
+- cache hits, whether it ran in the background, scattered pieces and baked asset paths
 - warnings
+
+The path of the last JSON file is on the zone as **Last Report File**.
 
 Each mesh records:
 
-- the result (vertex, texture or skipped) and why, including meshes and whole actors inside the zone that a setting or tag filtered out
-- vertex count, texture size and generation time
+- the result (vertex, texture, instanced or skipped) and why, including meshes and whole actors inside the zone that a setting or tag filtered out
+- vertex count, texture size (and extended texture size), instance count, generation time and whether it came from the cache
 - the mean and max of each mask
 - whether the mesh is Nanite
 - custom data conflicts
@@ -165,9 +353,9 @@ Each mesh records:
   - active **Gates**
   - per-slot **Warnings**: a gate UV channel the mesh doesn't have, a Profile Name that doesn't exist, or a slot with no material
 
-*Tools → Grungify* also has **Preview / Apply / Clear / Cancel All** for every zone in the level.
+*Tools → Grungify* also has **Preview / Apply / Clear / Cancel All** for every zone in the level, and the zones panel.
 
-When a zone is selected, the viewport shows the dust height (tan), the hand-height band (green) and each detected runoff source with its spread cone (blue). The blue arrow is the wear direction. The tan and green lines are drawn from the bottom of the box; the actual generation measures from the traced floors.
+When a zone is selected, the viewport shows the dust height (tan), the hand-height band (green) and each detected runoff source with its spread cone (blue), or its traced path when Trace Water Flow is on. The blue arrow is the wear direction. The tan and green lines are drawn from the bottom of the box; the actual generation measures from the traced floors.
 
 ### Controls
 
@@ -184,13 +372,16 @@ When a zone is selected, the viewport shows the dust height (tan), the hand-heig
 | **Handling On Rails** | Intensity, Hand Height Min/Max, General Handling | The hand band, and how much non-rail edges inside it get handled. |
 | **Edge Chips** | Intensity, Edge Angle, Floor Kick Height | Lower *Edge Angle* to catch bevelled edges. |
 | **Surfaces** | Stone / Metal / Trim profiles | Per-surface multipliers for each layer. |
-| **Filtering** | Zone Falloff, Floor Mode, Floor Probe Spacing, Include Movable, Excluded Actors | Soft edge of the zone, how floors are found, and what gets skipped. |
+| **Filtering** | Zone Falloff, Floor Mode, Floor Probe Spacing, Include Movable, Weather Instanced Meshes, Excluded Actors | Soft edge of the zone, how floors are found, and what gets skipped. |
+| **Extended Layers** | Moisture, Water Line, Moss, Soot, Scorch, Scuffs, Rust Bloom | See [Extended layers](#extended-layers). |
+| **Exposure** | Use Sky Exposure, Influence, Probe Spacing, Rays, Ray Length | Sheltered vs exposed. |
+| **Stamps / Scatter / Variants / Performance / Bake** | | See the sections above. |
 
 ## How surfaces, rails and vents are recognised
 
 Checked in this order (*Project Settings → Plugins → Grungify*):
 
-1. **Tags** on the component or actor: `Grungify.Stone`, `Grungify.Metal`, `Grungify.Trim`, `Grungify.Rail`, `Grungify.Vent`, `Grungify.Floor`, `Grungify.Ignore`.
+1. **Tags** on the component or actor: `Grungify.Stone`, `Grungify.Metal`, `Grungify.Trim`, `Grungify.Rail`, `Grungify.Vent`, `Grungify.Floor`, `Grungify.Ignore`, plus `Grungify.Fire` (soot and scorch source) and `Grungify.Fastener` (rust bloom source).
 2. **Physical material**: map physical surface types to stone/metal/trim in *Physical Surface Map*.
 3. **Name keywords** in the material (and its parents), the material slot, the mesh, and the actor label. Names are split into words (`SM_HVACVent_02` becomes *sm, hvac, vent, 02*), so `Railing` matches *rail* but `BP_EventTrigger` doesn't match *vent*. Trim is checked before metal and stone, so `M_MetalTrim` counts as trim.
 4. Otherwise the **Fallback Surface Type** (stone).
@@ -201,7 +392,7 @@ Traced floors only count if the mesh is at least *Min Floor Size* (150 cm) acros
 
 - Masks are computed per vertex. Edge convexity comes from the welded mesh topology: how sharply faces bend at a vertex, and whether the neighbouring vertices fall away (convex) or rise up (concave). Floors come from a grid of downward multi-hit traces. Runoff is projected down from each source's footprint.
 - Results go into per-instance **override vertex colours** on each `StaticMeshComponent` (every LOD), the same storage Mesh Paint uses. They're saved with the level and the meshes' own assets aren't modified.
-- **Custom primitive data** holds 5 floats starting at the configured index (default 0): mask mode (`501` vertex or `502` texture), surface type, feature scale, seed offset and debug channel. If either the saved defaults or live data already has non-zero values at those indices, the zone leaves that mesh untouched and reports a conflict. Writes preserve unrelated live values outside the five owned indices.
+- **Custom primitive data** holds 5 floats starting at the configured index (default 0): mask mode (`501` vertex, `502` texture or `503` instanced), surface type, feature scale, seed offset and debug channel. If either the saved defaults or live data already has non-zero values at those indices, the zone leaves that mesh untouched and reports a conflict. Writes preserve unrelated live values outside the five owned indices.
 - Before touching a mesh, the zone records everything it might change, and Clear and Cancel Preview put back exactly that:
   - override vertex colours per LOD
   - the mesh-paint cache (painted vertices)
@@ -210,6 +401,7 @@ Traced floors only count if the mesh is at least *Min Floor Size* (150 cm) acros
   - complete default and live custom primitive data arrays, including their distinct lengths (originally empty arrays come back empty)
   - the capture-time custom data index, so changing settings does not lose the original snapshot
   - the complete override material array, including its length
+  - for instanced meshes, the per-instance custom data float count and every value
 
 Backups made before v0.2.1 have no separate live-data snapshot. Restoring one uses its saved defaults for live data and logs this limitation; values absent from that old backup cannot be recovered.
 
@@ -217,7 +409,12 @@ Backups made before v0.2.1 have no separate live-data snapshot. Restoring one us
 
 - **Vertex Color output** follows vertex density, and Nanite may not render it. Use Texture output (the Auto default picks it) for Nanite and sparse meshes.
 - **Texture output** needs a non-overlapping UV channel and adds a texture per mesh: about 1 byte per texel compressed (DXT5), plus mips.
-- **Instanced / HISM** components are skipped, since all instances share one set of vertex colours and materials.
+- **Instanced / HISM** components get one set of four mask values per instance, not per-texel detail. Extended layers aren't stored per instance.
+- **Background generation** reads mesh data on a worker thread while the editor runs. Garbage collection is blocked per mesh, but editing a mesh's geometry while its preview is generating could race; the next change regenerates it.
+- **Wear stamps** are actors rather than a free-hand brush. Use **Bake To Assets** and paint over the PNGs for pixel-level touch-ups.
+- **Traffic** comes from hand-placed splines, not the NavMesh.
+- **Scatter** is capped at 2000 pieces per zone and only placed on Apply and Bake.
+- **Runtime wear** needs texture output and complex-collision hits with UVs.
 - **Existing vertex colours are replaced** on meshes weathered with Vertex Color output. Clear restores them.
 - **Movable** meshes are skipped unless *Include Movable* is on.
 - Weathered meshes must stay put: moving a mesh after Apply doesn't move its wear. Re-apply the zone.
@@ -230,7 +427,7 @@ Backups made before v0.2.1 have no separate live-data snapshot. Restoring one us
 
 Run the tests in the isolated `HostProject` retained by `BuildPlugin -NoDeleteHostProject`, using `UnrealEditor-Cmd.exe <Package>/HostProject/HostProject.uproject -unattended -RenderOffscreen -ExecCmds="Automation RunTests Grungify" -TestExit="Automation Test Queue Empty"`. The content test refuses to rebuild assets in a production project.
 
-These checks do not establish final environment art quality. Full undo/redo, save/reload, World Partition cell streaming and cooked game execution still need separate verification.
+These checks covered v0.2.x only. They do not establish final environment art quality. Full undo/redo, save/reload, World Partition cell streaming and cooked game execution still need separate verification.
 
 ## Texture bake cost
 
@@ -242,7 +439,7 @@ Texture generation skips edge-distance queries and weathering evaluation when a 
 
 These cases should be checked in-editor on a test level, never on production rooms:
 
-1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v4 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
+1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v5 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
 2. **Channel masks:** in MF_GrungifyWeathering, the Roughness mask is R only and the Metallic mask is G only.
 3. **Exact restore:** on a mesh whose default custom primitive data is `[]`, run Preview → Cancel Preview, and separately Apply → Clear. The data is `[]` again. Repeat on a mesh with painted vertex colours, a mesh with only some material slots overridden, and a mesh whose CPD indices 0–4 are already in use (it should be reported as a conflict and left untouched).
 4. **Undo:** run Apply → Ctrl+Z and Clear → Ctrl+Z. Delete a zone while previewing, then Ctrl+Z.
@@ -260,6 +457,35 @@ These cases should be checked in-editor on a test level, never on production roo
     - A mesh with stacked UV1 islands shows Mask UV `failed` with an overlap percentage, and Auto output falls back to vertex colours.
     - Slot Details explain an excluded deck slot, a keyword-classified slot and a fallback slot.
     - Run `Automation RunTests Grungify.Generation`, which includes the new `MaskUVValidation` and `TextureBakeCancellation` tests.
+13. **v0.4.0, compile first:**
+    - The new code uses several engine APIs that were never compiled against 5.8. Expect small fixes:
+      - World Partition loading in the commandlet
+      - data layer asset accessors
+      - `FImageUtils::PNGCompressImageArray`
+      - per-instance custom data material expressions
+      - the screenshot functional test options
+      - render-target drawing in runtime wear
+    - Then run `Automation RunTests Grungify` and check that the existing `Grungify.State`, `Grungify.Content` and `Grungify.Generation` tests still pass. The texture-bake conservation test should be unchanged, since every new feature defaults to off.
+14. **Reference scene and screenshots:**
+    - Run *Tools → Grungify → Build Reference Scene*, then `Automation RunTests Project.Functional Tests` with the map open.
+    - Approve the first images in *Window → Test Automation → Screenshot Comparison*. Later runs flag visual differences.
+15. **Cooked build:**
+    - Cook and package a game with `/Game/Grungify/Reference/L_GrungifyReference` in the maps to cook.
+    - Run the packaged build with `-ExecCmds="Automation RunTests Grungify.Runtime" -unattended`.
+    - `Grungify.Runtime.ReferenceSceneCooked` loads the map and checks that weathered meshes kept their owned material instances, CPD and masks after cooking.
+16. **Cache and background:**
+    - With Live Preview, drag a slider on a large zone. The editor stays responsive, and the Status line shows `(background)` and cache hits.
+    - Move one mesh: only it regenerates.
+    - Flip seed variants back and forth: the second visit is instant.
+    - Delete the zone mid-generation: there's no crash and no leftover preview.
+17. **Bake:**
+    - Bake To Assets creates textures and MIs under `/Game/Grungify/Baked` and PNGs under `Saved/Grungify/Bakes`.
+    - Edit a PNG, Reimport, and the change shows.
+    - Clear restores the original materials, and the assets remain.
+18. **Instanced meshes:** an HISM of crates gets different wear per instance. An ISM that already uses per-instance custom data 0–3 is reported as a conflict and left alone. Clear restores the original float count.
+19. **Extended layers:** with the Wet Sewer preset, check pools at the bottom of traced paths, the water line, and moss. A lamp gets soot above it. A tagged fire gets scorch. Bolts get rust bloom. A traffic path scuffs the floor and the bottom of the walls.
+20. **Scatter and Data Layers:** scatter entries place pieces only where the mask passes the threshold, in the outliner folder and data layers. Clear removes them. A zone restricted to a Data Layer skips other actors and reports why.
+21. **Commandlet:** run `-run=Grungify -Operation=DryRun` on a World Partition map; it reports every zone and exits 0. Then run `-Operation=Apply -Save`.
 
 ## Layout
 
@@ -267,6 +493,8 @@ These cases should be checked in-editor on a test level, never on production roo
 Grungify.uplugin
 Shaders/Private/Grungify.ush          Material-side noise and shading
 Source/GrungifyShaders/               Maps /Plugin/Grungify for the shader include (PostConfigInit)
-Source/Grungify/                      Runtime: zone actor, settings, mask generation
-Source/GrungifyEditor/                Asset builder, viewport visualizer, Tools menu
+Source/Grungify/                      Runtime: zone actor, settings, mask generation, wear stamps, traffic paths,
+                                      Blueprint library, runtime wear subsystem, cooked-build test
+Source/GrungifyEditor/                Asset builder, material library, reference scene, zones panel, commandlet,
+                                      viewport visualizer, Tools menu
 ```

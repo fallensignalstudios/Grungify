@@ -3,6 +3,7 @@
 #if WITH_EDITOR
 
 #include "Async/ParallelFor.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "StaticMeshResources.h"
@@ -126,10 +127,32 @@ namespace Grungify
 			FVector2f GateUV = FVector2f::ZeroVector;
 		};
 
-		/** Chips, dust, runoff, handling in 0..1 (R, G, B, A). */
-		FLinearColor EvaluatePoint(const FPointSample& S, const FGrungifyGenerationParams& Params)
+		void ApplyStamp(FLinearColor& Primary, FLinearColor* Extended, const FGrungifyStampLayers& Layers, float Weight)
+		{
+			Primary.R = FMath::Clamp(Primary.R + Weight * Layers.EdgeChips, 0.f, 1.f);
+			Primary.G = FMath::Clamp(Primary.G + Weight * Layers.Dust, 0.f, 1.f);
+			Primary.B = FMath::Clamp(Primary.B + Weight * Layers.Runoff, 0.f, 1.f);
+			Primary.A = FMath::Clamp(Primary.A + Weight * Layers.Handling, 0.f, 1.f);
+			if (Extended)
+			{
+				Extended->R = FMath::Clamp(Extended->R + Weight * Layers.Moisture, 0.f, 1.f);
+				Extended->G = FMath::Clamp(Extended->G + Weight * Layers.Soot, 0.f, 1.f);
+				Extended->B = FMath::Clamp(Extended->B + Weight * Layers.Scorch, 0.f, 1.f);
+				Extended->A = FMath::Clamp(Extended->A + Weight * Layers.Moss, 0.f, 1.f);
+			}
+		}
+
+		/**
+		 * Chips, dust, runoff, handling in 0..1 (R, G, B, A). With OutExtended, also moisture, soot, scorch, moss.
+		 * Every optional input is guarded, so with them off the primary result is exactly the original one.
+		 */
+		FLinearColor EvaluatePoint(const FPointSample& S, const FGrungifyGenerationParams& Params, FLinearColor* OutExtended = nullptr)
 		{
 			const FLinearColor None(0.f, 0.f, 0.f, 0.f);
+			if (OutExtended)
+			{
+				*OutExtended = None;
+			}
 			if (!S.Slot || S.Slot->bExcluded)
 			{
 				return None;
@@ -153,6 +176,11 @@ namespace Grungify
 			}
 
 			const FVector NP = S.P / FMath::Max<double>(Params.FeatureScale, 1.0);
+			const FGrungifyExtendedLayers& Ext = Params.Extended;
+
+			// Sky openness, sampled a little off the surface so it reads the air side.
+			const bool bSky = Params.Exposure && Params.Exposure->IsValid() && Params.SkyInfluence > 0.f;
+			const float Sky = bSky ? Params.Exposure->At(S.P + N * 40.0) : 1.f;
 
 			// Handling: hands polish rails and, more lightly, edges at hand height.
 			const float HandSoft = FMath::Max((Params.HandMax - Params.HandMin) * 0.25f, 5.f);
@@ -183,33 +211,200 @@ namespace Grungify
 			Dust *= FMath::Clamp(1.2f + NZ, 0.f, 1.f); // little on undersides
 			Dust *= 1.f - Handling * 0.8f;              // hands keep it clean
 			Dust *= Params.DustIntensity * Profile.Dust;
+			if (bSky)
+			{
+				// Sheltered corners collect more, wind-swept surfaces less.
+				Dust *= FMath::Lerp(1.f, 1.3f - 0.6f * Sky, Params.SkyInfluence);
+			}
 
 			// Runoff: streaks down from vents and leaks, plus faint general streaking on walls.
 			float Runoff = 0.f;
 			for (const FGrungifyRunoffSource& Source : Params.Sources)
 			{
+				// Sources with a traced water path are handled by the flow field below.
+				if (Params.Flow && Source.Path.Num() > 1)
+				{
+					continue;
+				}
 				Runoff = FMath::Max(Runoff, RunoffFromSource(Source, S.P, N, Params));
+			}
+			float FlowNear = 0.f;
+			if (Params.Flow)
+			{
+				const double StreakScale = FMath::Max(Params.FeatureScale * 0.35, 1.0);
+				const float Streak = Fbm(FVector(S.P.X / StreakScale, S.P.Y / StreakScale, S.P.Z / 120.0), Params.Seed + 71u);
+				Params.Flow->ForEachNear(S.P, [&](const FGrungifySegmentField::FSegment& Seg, float Distance, float Along)
+				{
+					const float Edge = 1.f - FMath::SmoothStep(Seg.Radius * 0.5f, Seg.Radius, Distance);
+					FlowNear = FMath::Max(FlowNear, Edge * Seg.Value);
+					Runoff = FMath::Max(Runoff, Edge * Seg.Value * FMath::Lerp(1.f, 0.45f, Along) * FMath::Lerp(0.35f, 1.f, Streak));
+				});
 			}
 			if (Params.AmbientStreaks > 0.f)
 			{
+				float Ambient = Params.AmbientStreaks;
+				if (bSky)
+				{
+					Ambient *= FMath::Lerp(1.f, Sky, Params.SkyInfluence);
+				}
 				const float Vertical = 1.f - FMath::Abs(NZ);
 				const FVector StreakP(NP.X * 3.0, NP.Y * 3.0, NP.Z * 0.2);
-				Runoff = FMath::Max(Runoff, Vertical * Params.AmbientStreaks * FMath::SmoothStep(0.45f, 0.8f, Fbm(StreakP, Params.Seed + 37u)));
+				Runoff = FMath::Max(Runoff, Vertical * Ambient * FMath::SmoothStep(0.45f, 0.8f, Fbm(StreakP, Params.Seed + 37u)));
 			}
 			Runoff *= FMath::Clamp(1.f + NZ * 1.5f, 0.f, 1.f) * Params.RunoffIntensity * Profile.Runoff;
 
+			// Rust bloom: stains around fasteners on metal, with a short streak below each.
+			if (Ext.RustBloomIntensity > 0.f && S.Slot->Surface == EGrungifySurfaceType::Metal)
+			{
+				const float R = FMath::Max(Ext.RustBloomRadiusCm, 1.f);
+				for (const FVector& Fastener : Params.Fasteners)
+				{
+					const FVector Rel = S.P - Fastener;
+					if (Rel.SizeSquared() > FMath::Square(R * 6.f))
+					{
+						continue;
+					}
+					const float Bloom = 1.f - FMath::SmoothStep(R * 0.3f, R, float(Rel.Size()));
+					float Streak = 0.f;
+					if (Rel.Z < 0.0 && -Rel.Z < R * 5.0)
+					{
+						const float Lateral = float(FVector(Rel.X, Rel.Y, 0.0).Size());
+						Streak = (1.f - FMath::SmoothStep(R * 0.2f, R * 0.6f, Lateral)) * float(1.0 + Rel.Z / (R * 5.0)) * 0.7f;
+					}
+					Runoff = FMath::Max(Runoff, FMath::Max(Bloom, Streak) * Ext.RustBloomIntensity);
+				}
+			}
+
 			// Edge chips: convex edges, more where they face into the wear direction or get kicked.
-			const float Exposure = FMath::Lerp(1.f, FMath::Clamp(0.25f + 0.75f * float(FVector::DotProduct(N, -Params.WearDir)), 0.f, 1.f), Params.WearInfluence);
+			float Exposure = FMath::Lerp(1.f, FMath::Clamp(0.25f + 0.75f * float(FVector::DotProduct(N, -Params.WearDir)), 0.f, 1.f), Params.WearInfluence);
+			if (bSky)
+			{
+				Exposure *= FMath::Lerp(1.f, 0.4f + 0.6f * Sky, Params.SkyInfluence);
+			}
 			const float Kick = (1.f - FMath::SmoothStep(0.f, FMath::Max(Params.FloorKickHeight, 1.f), Height)) * 0.5f;
 			float Chips = S.Convex * FMath::Min(Exposure + Kick, 1.f);
 			Chips *= FMath::Lerp(0.35f, 1.f, Fbm(NP * 1.5, Params.Seed + 51u)) * Params.ChipIntensity * Profile.EdgeChips;
 
+			// Traffic scuffs: floors along paths get polished (and swept of dust), wall bottoms beside them get kicked.
+			if (Params.Traffic && Ext.ScuffIntensity > 0.f)
+			{
+				float FloorScuff = 0.f;
+				float WallScuff = 0.f;
+				const bool bWall = FMath::Abs(NZ) < 0.5f && Height < Ext.ScuffWallHeightCm;
+				Params.Traffic->ForEachNear(S.P, [&](const FGrungifySegmentField::FSegment& Seg, float Distance, float /*Along*/)
+				{
+					// Segment radius is half the path width plus a 40 cm margin for the walls beside it.
+					const float Half = FMath::Max(Seg.Radius - 40.f, 5.f);
+					if (bOnFloor)
+					{
+						FloorScuff = FMath::Max(FloorScuff, (1.f - FMath::SmoothStep(Half * 0.5f, Half, Distance)) * Seg.Value);
+					}
+					else if (bWall)
+					{
+						WallScuff = FMath::Max(WallScuff, (1.f - FMath::SmoothStep(Half, Seg.Radius, Distance)) * Seg.Value);
+					}
+				});
+				if (FloorScuff > 0.f)
+				{
+					const float Scuff = FloorScuff * Ext.ScuffIntensity * FMath::Lerp(0.5f, 1.f, Fbm(NP * 2.0, Params.Seed + 97u));
+					Handling = FMath::Clamp(FMath::Max(Handling, Scuff), 0.f, 1.f);
+					Dust *= 1.f - 0.7f * FMath::Clamp(Scuff, 0.f, 1.f);
+				}
+				if (WallScuff > 0.f)
+				{
+					const float Low = 1.f - Height / FMath::Max(Ext.ScuffWallHeightCm, 1.f);
+					Chips = FMath::Max(Chips, WallScuff * Low * Ext.ScuffIntensity * FMath::Lerp(0.3f, 1.f, Fbm(NP * 1.7, Params.Seed + 101u)));
+				}
+			}
+
 			const float K = Params.Intensity * ZoneW * Gate;
-			return FLinearColor(
+			FLinearColor Primary(
 				FMath::Clamp(Chips * K, 0.f, 1.f),
 				FMath::Clamp(Dust * K, 0.f, 1.f),
 				FMath::Clamp(Runoff * K, 0.f, 1.f),
 				FMath::Clamp(Handling * K, 0.f, 1.f));
+
+			if (OutExtended && Params.bExtended)
+			{
+				// Moisture: pools, water paths, an old flood line, and damp sheltered ground.
+				float Moisture = 0.f;
+				for (const FGrungifyPool& Pool : Params.Pools)
+				{
+					const float Reach = Pool.Radius + Ext.PoolDampRadiusCm;
+					const float Lateral = float(FVector(S.P.X - Pool.Center.X, S.P.Y - Pool.Center.Y, 0.0).Size());
+					const float Above = float(S.P.Z - Pool.Center.Z);
+					if (Lateral > Reach || Above < -20.f || Above > 60.f)
+					{
+						continue;
+					}
+					const float Spread = 1.f - FMath::SmoothStep(Pool.Radius, Reach, Lateral);
+					Moisture = FMath::Max(Moisture, Above < 10.f ? Spread : Spread * (1.f - (Above - 10.f) / 50.f) * 0.8f);
+				}
+				Moisture = FMath::Max(Moisture, FlowNear * 0.5f);
+				if (Ext.WaterLineHeightCm > 0.f)
+				{
+					const float Below = 1.f - FMath::SmoothStep(Ext.WaterLineHeightCm - 2.f, Ext.WaterLineHeightCm + 2.f, Height);
+					const float Tide = 1.f - FMath::SmoothStep(0.f, 6.f, FMath::Abs(Height - Ext.WaterLineHeightCm));
+					Moisture = FMath::Max(Moisture, FMath::Max(Below * 0.7f, Tide));
+				}
+				if (bSky)
+				{
+					Moisture = FMath::Max(Moisture, (1.f - Sky) * 0.25f * (1.f - FMath::SmoothStep(0.f, 100.f, Height)));
+				}
+				const float RawMoisture = Moisture;
+				Moisture *= Ext.MoistureIntensity * FMath::Lerp(0.6f, 1.f, Fbm(NP * 0.7, Params.Seed + 83u));
+
+				// Soot plumes rise and widen above lamps and fires; scorch hugs fires.
+				float Soot = 0.f;
+				float Scorch = 0.f;
+				for (const FGrungifyHeatSource& Heat : Params.HeatSources)
+				{
+					const FVector Rel = S.P - Heat.Location;
+					const float Facing = FVector::DotProduct(N, -Rel.GetSafeNormal()) > -0.2f ? 1.f : 0.3f;
+					if (Ext.SootIntensity > 0.f && Rel.Z > -Ext.SootRadiusCm * 0.3f && Rel.Z < Ext.SootPlumeHeightCm)
+					{
+						const float Up = float(FMath::Max(Rel.Z, 0.0)) / Ext.SootPlumeHeightCm;
+						const float Radius = Ext.SootRadiusCm * (0.6f + 0.8f * Up);
+						const float Lateral = float(FVector(Rel.X, Rel.Y, 0.0).Size());
+						Soot = FMath::Max(Soot, (1.f - FMath::SmoothStep(Radius * 0.4f, Radius, Lateral)) * (1.f - Up) * Facing);
+					}
+					if (Heat.bFire && Ext.ScorchIntensity > 0.f)
+					{
+						Scorch = FMath::Max(Scorch, (1.f - FMath::SmoothStep(Ext.ScorchRadiusCm * 0.3f, Ext.ScorchRadiusCm, float(Rel.Size()))) * Facing);
+					}
+				}
+				Soot *= Ext.SootIntensity * FMath::Lerp(0.6f, 1.f, Fbm(NP * 0.9, Params.Seed + 87u));
+				Scorch *= Ext.ScorchIntensity * FMath::Lerp(0.5f, 1.f, Fbm(NP * 1.4, Params.Seed + 89u));
+
+				// Moss: damp, sheltered, north-facing stone and trim; never on metal or where hands keep it clean.
+				float Moss = 0.f;
+				if (Ext.MossIntensity > 0.f && S.Slot->Surface != EGrungifySurfaceType::Metal && NZ > -0.3f)
+				{
+					const float Yaw = FMath::DegreesToRadians(Ext.NorthYawDegrees);
+					const FVector North(FMath::Cos(Yaw), FMath::Sin(Yaw), 0.0);
+					const float Northness = UpFacing > 0.5f ? 0.7f : FMath::Clamp(float(FVector::DotProduct(N, North)) * 0.5f + 0.5f, 0.f, 1.f);
+					const float Facing = FMath::Lerp(1.f, Northness, Ext.MossNorthBias);
+					const float Damp = FMath::Clamp(0.25f + RawMoisture + (bSky ? (1.f - Sky) * 0.5f : 0.2f), 0.f, 1.f);
+					Moss = Ext.MossIntensity * Facing * Damp * FMath::SmoothStep(0.35f, 0.7f, Fbm(NP * 0.6, Params.Seed + 91u)) * (1.f - Handling);
+				}
+
+				*OutExtended = FLinearColor(
+					FMath::Clamp(Moisture * K, 0.f, 1.f),
+					FMath::Clamp(Soot * K, 0.f, 1.f),
+					FMath::Clamp(Scorch * K, 0.f, 1.f),
+					FMath::Clamp(Moss * K, 0.f, 1.f));
+			}
+
+			// Hand-placed stamps add or erase on top of the procedural result.
+			for (const FGrungifyStampData& Stamp : Params.Stamps)
+			{
+				const float Weight = StampWeight(Stamp, S.P, Params.FeatureScale);
+				if (Weight > 0.f)
+				{
+					ApplyStamp(Primary, (OutExtended && Params.bExtended) ? OutExtended : nullptr, Stamp.Layers, Weight * ZoneW * Gate);
+				}
+			}
+			return Primary;
 		}
 
 		FColor ToColor(const FLinearColor& M)
@@ -566,6 +761,76 @@ namespace Grungify
 			return Context.Slots.Num() > 0 ? &Context.Slots[0] : nullptr;
 		}
 
+		/** Area-uniform random points on LOD0 (deterministic per mesh and seed), evaluated with every layer. */
+		void CollectScatterSamples(const FTopology& Topo, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params,
+			FGrungifyComponentResult& Out, uint32 MeshSeed)
+		{
+			constexpr int32 MaxSamples = 4000;
+			const int32 NumTris = Topo.FaceN.Num();
+			for (int32 T = 0; T < NumTris && Out.ScatterSamples.Num() < MaxSamples; ++T)
+			{
+				if (Topo.FaceN[T].IsZero())
+				{
+					continue;
+				}
+				if ((T & 1023) == 0 && Params.CancelRequested())
+				{
+					Out.bCancelled = true;
+					return;
+				}
+				const uint32 I0 = Topo.Indices[T * 3 + 0];
+				const uint32 I1 = Topo.Indices[T * 3 + 1];
+				const uint32 I2 = Topo.Indices[T * 3 + 2];
+				const double AreaM2 = FVector::CrossProduct(Topo.Pos[I1] - Topo.Pos[I0], Topo.Pos[I2] - Topo.Pos[I0]).Size() * 0.5 / 10000.0;
+				const double Expected = AreaM2 * Params.ScatterDensity;
+				int32 Count = FMath::FloorToInt(Expected);
+				if (Hash3(T, 0, 1, MeshSeed) < Expected - Count)
+				{
+					++Count;
+				}
+
+				for (int32 K = 0; K < Count && Out.ScatterSamples.Num() < MaxSamples; ++K)
+				{
+					float U = Hash3(T, K, 2, MeshSeed);
+					float V = Hash3(T, K, 3, MeshSeed);
+					if (U + V > 1.f)
+					{
+						U = 1.f - U;
+						V = 1.f - V;
+					}
+					const float W = 1.f - U - V;
+
+					FPointSample S;
+					S.P = Topo.Pos[I0] * W + Topo.Pos[I1] * U + Topo.Pos[I2] * V;
+					S.N = Topo.FaceN[T];
+					S.Convex = Topo.Convex[Topo.Weld[I0]] * W + Topo.Convex[Topo.Weld[I1]] * U + Topo.Convex[Topo.Weld[I2]] * V;
+					S.Concave = Topo.Concave[Topo.Weld[I0]] * W + Topo.Concave[Topo.Weld[I1]] * U + Topo.Concave[Topo.Weld[I2]] * V;
+					S.Slot = SlotFor(Context, Topo.TriSlot[T]);
+					if (!S.Slot || S.Slot->bExcluded)
+					{
+						continue;
+					}
+
+					FGrungifyComponentResult::FScatterSample Sample;
+					Sample.Primary = EvaluatePoint(S, Params, &Sample.Extended);
+					if (!Params.bExtended)
+					{
+						Sample.Extended = FLinearColor(0.f, 0.f, 0.f, 0.f);
+					}
+					if (FMath::Max(Sample.Primary.GetMax(), Sample.Extended.GetMax()) < 0.05f)
+					{
+						continue;
+					}
+					Sample.P = S.P;
+					Sample.N = S.N;
+					Sample.Surface = S.Slot->Surface;
+					Sample.Random = Hash3(T, K, 4, MeshSeed);
+					Sample.Random2 = Hash3(T, K, 5, MeshSeed);
+					Out.ScatterSamples.Add(Sample);
+				}
+			}
+		}
+
 		void BakeVertexColors(const FStaticMeshRenderData& RenderData, const FTransform& Transform, const FGrungifyComponentContext& Context,
 			const FGrungifyGenerationParams& Params, float SharpRef, FGrungifyComponentResult& Out, int32 (&SurfaceVotes)[3])
 		{
@@ -721,6 +986,11 @@ namespace Grungify
 
 			// Pass 2 (parallel over rows): retain ownership of inactive texels, but avoid their edge queries.
 			Out.TexturePixels.Init(FColor(0, 0, 0, 0), NumPixels);
+			const bool bExtended = Params.bExtended;
+			if (bExtended)
+			{
+				Out.ExtendedPixels.Init(FColor(0, 0, 0, 0), NumPixels);
+			}
 #if WITH_DEV_AUTOMATION_TESTS
 			if (OutEdgeQueriesPerRow)
 			{
@@ -785,7 +1055,12 @@ namespace Grungify
 						++(*OutEdgeQueriesPerRow)[Y];
 					}
 #endif
-					Out.TexturePixels[Pixel] = ToColor(EvaluatePoint(S, Params));
+					FLinearColor Extended;
+					Out.TexturePixels[Pixel] = ToColor(EvaluatePoint(S, Params, bExtended ? &Extended : nullptr));
+					if (bExtended)
+					{
+						Out.ExtendedPixels[Pixel] = ToColor(Extended);
+					}
 				}
 			};
 			constexpr int32 RowsPerBatch = 32;
@@ -825,6 +1100,7 @@ namespace Grungify
 			{
 				TArray<bool> NextCovered = Covered;
 				TArray<FColor> NextPixels = Out.TexturePixels;
+				TArray<FColor> NextExtended = Out.ExtendedPixels;
 				for (int32 Y = 0; Y < Size; ++Y)
 				{
 					for (int32 X = 0; X < Size; ++X)
@@ -835,6 +1111,7 @@ namespace Grungify
 							continue;
 						}
 						int32 Sum[4] = { 0, 0, 0, 0 };
+						int32 ExtSum[4] = { 0, 0, 0, 0 };
 						int32 Count = 0;
 						const FIntPoint Neighbours[4] = { { X - 1, Y }, { X + 1, Y }, { X, Y - 1 }, { X, Y + 1 } };
 						for (const FIntPoint& Nb : Neighbours)
@@ -845,20 +1122,31 @@ namespace Grungify
 							}
 							const FColor& C = Out.TexturePixels[Nb.Y * Size + Nb.X];
 							Sum[0] += C.R; Sum[1] += C.G; Sum[2] += C.B; Sum[3] += C.A;
+							if (bExtended)
+							{
+								const FColor& E = Out.ExtendedPixels[Nb.Y * Size + Nb.X];
+								ExtSum[0] += E.R; ExtSum[1] += E.G; ExtSum[2] += E.B; ExtSum[3] += E.A;
+							}
 							++Count;
 						}
 						if (Count > 0)
 						{
 							NextPixels[Pixel] = FColor(uint8(Sum[0] / Count), uint8(Sum[1] / Count), uint8(Sum[2] / Count), uint8(Sum[3] / Count));
+							if (bExtended)
+							{
+								NextExtended[Pixel] = FColor(uint8(ExtSum[0] / Count), uint8(ExtSum[1] / Count), uint8(ExtSum[2] / Count), uint8(ExtSum[3] / Count));
+							}
 							NextCovered[Pixel] = true;
 						}
 					}
 				}
 				Covered = MoveTemp(NextCovered);
 				Out.TexturePixels = MoveTemp(NextPixels);
+				Out.ExtendedPixels = MoveTemp(NextExtended);
 			}
 
 			Out.TextureSize = Size;
+			Out.TexelSizeCm = float(FMath::Sqrt(FMath::Max(Topo.Area, 1.0) / 0.6) / Size);
 			Out.Vertices = Topo.NumVerts;
 			return true;
 		}
@@ -1187,6 +1475,80 @@ namespace Grungify
 		return Report;
 	}
 
+	bool GenerateInstanced(UInstancedStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult)
+	{
+		UStaticMesh* Mesh = Component ? Component->GetStaticMesh() : nullptr;
+		if (!Mesh || !Params.Floor)
+		{
+			return false;
+		}
+		const FGrungifySlotInfo* Slot = Context.Slots.FindByPredicate([](const FGrungifySlotInfo& Info) { return !Info.bExcluded; });
+		if (!Slot)
+		{
+			return false;
+		}
+
+		OutResult.Component = Component;
+		OutResult.bInstanced = true;
+		OutResult.bNanite = Mesh->HasValidNaniteData();
+		OutResult.DominantSurface = Slot->Surface;
+
+		// One mask set per instance, from a handful of points around its bounds: the top, the four sides at mid
+		// height and near the base. Generic edge and crease values stand in for real convexity.
+		const FBox Local = Mesh->GetBoundingBox();
+		const FVector Center = Local.GetCenter();
+		const FVector Extent = Local.GetExtent();
+		struct FProbe { FVector Local; FVector Normal; };
+		const FProbe Probes[] = {
+			{ FVector(Center.X, Center.Y, Local.Max.Z), FVector::UpVector },
+			{ FVector(Local.Max.X, Center.Y, Center.Z), FVector::ForwardVector },
+			{ FVector(Local.Min.X, Center.Y, Center.Z), -FVector::ForwardVector },
+			{ FVector(Center.X, Local.Max.Y, Center.Z), FVector::RightVector },
+			{ FVector(Center.X, Local.Min.Y, Center.Z), -FVector::RightVector },
+			{ FVector(Local.Max.X, Center.Y, Local.Min.Z + Extent.Z * 0.2), FVector::ForwardVector },
+			{ FVector(Local.Min.X, Center.Y, Local.Min.Z + Extent.Z * 0.2), -FVector::ForwardVector } };
+
+		const int32 Count = Component->GetInstanceCount();
+		OutResult.InstanceMasks.SetNumZeroed(Count);
+		FMaskStats Stats;
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			if ((Index & 255) == 0 && Params.CancelRequested())
+			{
+				OutResult.bCancelled = true;
+				return false;
+			}
+			FTransform Instance;
+			if (!Component->GetInstanceTransform(Index, Instance, /*bWorldSpace*/ true))
+			{
+				continue;
+			}
+
+			FLinearColor Sum(0.f, 0.f, 0.f, 0.f);
+			FLinearColor Peak(0.f, 0.f, 0.f, 0.f);
+			for (const FProbe& Probe : Probes)
+			{
+				FPointSample S;
+				S.P = Instance.TransformPosition(Probe.Local);
+				S.N = Instance.TransformVectorNoScale(Probe.Normal).GetSafeNormal();
+				S.Convex = 0.35f;
+				S.Concave = 0.1f;
+				S.Slot = Slot;
+				const FLinearColor M = EvaluatePoint(S, Params);
+				Sum += M;
+				Peak = FLinearColor(FMath::Max(Peak.R, M.R), FMath::Max(Peak.G, M.G), FMath::Max(Peak.B, M.B), FMath::Max(Peak.A, M.A));
+			}
+			const FLinearColor Mean = Sum / float(UE_ARRAY_COUNT(Probes));
+			const FLinearColor Mask = Mean * 0.5f + Peak * 0.5f;
+			OutResult.InstanceMasks[Index] = FVector4f(Mask.R, Mask.G, Mask.B, Mask.A);
+			Stats.Add(ToColor(Mask));
+		}
+		Stats.WriteTo(OutResult);
+		OutResult.Vertices = Count;
+		OutResult.Notes += TEXT("Instanced: one mask set per instance (per-instance custom data). ");
+		return true;
+	}
+
 	bool GenerateComponent(UStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult)
 	{
 		UStaticMesh* Mesh = Component ? Component->GetStaticMesh() : nullptr;
@@ -1217,8 +1579,9 @@ namespace Grungify
 		const bool bSparse = Topo0.NumVerts / AreaM2 < CellsPerM2;
 
 		// Validate the mask UV channel whenever a texture is a candidate, so the report says why it was or wasn't used.
+		// Extended layers only exist in the second mask texture, so they also make Auto prefer a texture.
 		const bool bWantsTexture = Params.MaskOutput == EGrungifyMaskOutput::Texture
-			|| (Params.MaskOutput == EGrungifyMaskOutput::Auto && (OutResult.bNanite || bSparse));
+			|| (Params.MaskOutput == EGrungifyMaskOutput::Auto && (OutResult.bNanite || bSparse || Params.bExtended));
 		if (bWantsTexture)
 		{
 			OutResult.MaskUV = ValidateMaskUVs(LOD0, Transform, Params.MaskUVChannel);
@@ -1241,11 +1604,11 @@ namespace Grungify
 			}
 			break;
 		case EGrungifyMaskOutput::Auto:
-			bTexture = bUVsUsable && (OutResult.bNanite || bSparse);
-			if (!bTexture && (OutResult.bNanite || bSparse))
+			bTexture = bUVsUsable && (OutResult.bNanite || bSparse || Params.bExtended);
+			if (!bTexture && (OutResult.bNanite || bSparse || Params.bExtended))
 			{
-				OutResult.Notes += FString::Printf(TEXT("%s mesh but UV channel %d is %s; used vertex colours. "),
-					OutResult.bNanite ? TEXT("Nanite") : TEXT("Sparse"), Params.MaskUVChannel,
+				OutResult.Notes += FString::Printf(TEXT("%s but UV channel %d is %s; used vertex colours. "),
+					OutResult.bNanite ? TEXT("Nanite mesh") : bSparse ? TEXT("Sparse mesh") : TEXT("Extended layers need a mask texture"), Params.MaskUVChannel,
 					bHasMaskUV ? TEXT("unsuitable (see Mask UV)") : TEXT("missing"));
 			}
 			break;
@@ -1276,6 +1639,19 @@ namespace Grungify
 			if (OutResult.bNanite)
 			{
 				OutResult.Notes += TEXT("Nanite mesh with vertex-colour masks: may not render. ");
+			}
+			if (Params.bExtended)
+			{
+				OutResult.Notes += TEXT("Extended layers (moisture, soot, scorch, moss) need texture output; not baked for this mesh. ");
+			}
+		}
+
+		if (Params.ScatterDensity > 0.f)
+		{
+			CollectScatterSamples(Topo0, Context, Params, OutResult, Params.Seed ^ GetTypeHash(Component->GetPathName()));
+			if (OutResult.bCancelled)
+			{
+				return false;
 			}
 		}
 

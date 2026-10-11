@@ -19,5 +19,10 @@ UGrungifySettings::UGrungifySettings()
 	VentKeywords = { TEXT("vent"), TEXT("drain"), TEXT("spout"), TEXT("outlet"), TEXT("gutter"), TEXT("downpipe"),
 		TEXT("louver"), TEXT("louvre"), TEXT("exhaust"), TEXT("grate"), TEXT("scupper") };
 
+	FireKeywords = { TEXT("fire"), TEXT("torch"), TEXT("brazier"), TEXT("candle"), TEXT("lantern"), TEXT("furnace"), TEXT("forge"),
+		TEXT("hearth"), TEXT("fireplace"), TEXT("stove"), TEXT("campfire") };
+
+	FastenerKeywords = { TEXT("bolt"), TEXT("rivet"), TEXT("screw"), TEXT("nut"), TEXT("fastener"), TEXT("bracket"), TEXT("clamp") };
+
 	MaskDebugMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Grungify/Materials/M_GrungifyMaskDebug.M_GrungifyMaskDebug")));
 }
