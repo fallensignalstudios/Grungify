@@ -1096,6 +1096,17 @@ bool AGrungifyWeatheringZone::GenerateResults(const TCHAR* Operation, TArray<FGr
 	{
 		LastReport.bCancelled = true;
 		LastReport.CancelledDuring = Phase;
+		// These rows describe generated CPU masks, not writes. A later mesh can
+		// cancel the whole run before the write phase, so retain their diagnostics
+		// without reporting them as weathered in either the rows or aggregate.
+		for (FGrungifyComponentReport& Entry : LastReport.Components)
+		{
+			if (Entry.Result == TEXT("texture") || Entry.Result == TEXT("vertex"))
+			{
+				Entry.Notes += FString::Printf(TEXT(" Generated %s masks were discarded before writing."), *Entry.Result);
+				Entry.Result = TEXT("cancelled_before_write");
+			}
+		}
 		return false;
 	};
 

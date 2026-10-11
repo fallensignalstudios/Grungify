@@ -13,7 +13,7 @@ Each material slot is classified as **stone**, **metal** or **trim**, so the wea
 
 Everything is driven by a **Seed**, so the same seed and settings always produce the same result.
 
-> **Status:** v0.3.0 targets UE 5.8. v0.2.x was natively verified (results below). v0.3.0 adds generation progress, phase timings and cancellation; saved presets and a palette; mask-UV validation; and per-slot decision reports. These v0.3.0 additions have not been compiled or run yet, and visual quality still needs review on the intended meshes and lighting.
+> **Status:** v0.3.1 targets UE 5.8. It includes v0.3.0's generation progress, phase timings and cancellation; saved presets and palette; mask-UV validation; and per-slot reports. Editor, Development and Shipping builds and all nine native automation tests passed. Preset round trips, public-action cancellation and final visual quality still need review on the intended meshes and lighting.
 
 ---
 
@@ -83,6 +83,8 @@ Generation runs in four phases: floor traces, runoff sources, scan, and mask gen
 - **Apply:** no mesh is weathered and already-applied meshes are unchanged; an active preview is removed.
 - **Dry Run:** nothing changes.
 
+If a later mesh cancels generation, completed CPU mask rows are marked `cancelled_before_write`; their mask and UV diagnostics remain available, while the report counts zero newly weathered meshes.
+
 The final write phase is short and can't be cancelled, so its dialog has no Cancel button. Every run records how long each phase took, and how many items it handled, in **Last Report → Phases**; the zone's Status line shows them too.
 
 ### Presets and palette
@@ -116,6 +118,8 @@ The mask UV channel must be non-overlapping, which lightmap UVs usually are. For
 | Zero-area UV triangles | | > 1% |
 | Texel-density spread (world area per UV area, most vs least stretched triangle) | | > 8× |
 | Coverage of the 0..1 square | none | < 20% |
+
+Out-of-range UV area is measured by clipping each triangle against the unit square. A triangle crossing a boundary contributes only its actual outside portion; a small atlas overflow produces a warning without falsely failing the two-percent threshold.
 
 With **Auto** output, a mesh whose UVs fail falls back to vertex colours and the report says why. With **Texture** output the bake still runs, since it was asked for, but the report notes the failure.
 
@@ -225,6 +229,7 @@ Backups made before v0.2.1 have no separate live-data snapshot. Restoring one us
 ## Native verification (UE 5.8.3, 2026-10-11)
 
 - A clean Win64 `BuildPlugin` passed for UnrealEditor Development, UnrealGame Development and UnrealGame Shipping.
+- v0.3.1 passed all nine native automation tests (eight plain successes, one expected occupied-data warning): the six original cases plus `TextureGateOutputConservation`, `MaskUVValidation` and `TextureBakeCancellation`. UV fixtures cover slight boundary overflow, genuinely excessive overflow and all four sides. The texture cancellation test exercises CPU generation cancellation; it does not establish public Preview/Apply cancellation, UI latency or the new report-row behavior.
 - All six native automation tests passed: five `Grungify.State` cases covering CPD, paint/material restoration, ownership and level removal, plus `Grungify.Content.InPlaceRegeneration`. The regeneration test rebuilds at CPD indices 0 → 12 → 0 and checks exact node counts, connections, parameter indices, compilation, saves and readiness.
 - A disposable native level produced eight reviewed 1280 × 720 captures with fixed exposure. A Nanite-enabled coffer used UV1 texture masks: Preview and Apply visibly weathered its edges/panels, while legacy modes 1/2, Cancel and Clear visually returned the baseline. Raw readable material/CPD state restored exactly; the images are not claimed to be pixel-identical. Ownership transfer, occupied saved/live CPD and five real settings-regeneration checks also passed. The editor exited normally with code 0, and all 3,545 protected production files remained unchanged.
 
