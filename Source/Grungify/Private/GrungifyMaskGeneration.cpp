@@ -7,6 +7,11 @@
 #include "Engine/StaticMesh.h"
 #include "StaticMeshResources.h"
 
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Engine/Texture2D.h"
+#include "Misc/AutomationTest.h"
+#endif
+
 namespace Grungify
 {
 	namespace
@@ -624,8 +629,14 @@ namespace Grungify
 			Stats.WriteTo(Out);
 		}
 
+		// The false specialization is used only by the conservation regression test.
+		template<bool bSkipInactiveTexels = true>
 		bool BakeTexture(const FStaticMeshLODResources& LOD, const FTopology& Topo, const FGrungifyComponentContext& Context,
-			const FGrungifyGenerationParams& Params, FGrungifyComponentResult& Out, int32 (&SurfaceVotes)[3])
+			const FGrungifyGenerationParams& Params, FGrungifyComponentResult& Out, int32 (&SurfaceVotes)[3]
+#if WITH_DEV_AUTOMATION_TESTS
+			, TArray<int32>* OutEdgeQueriesPerRow = nullptr
+#endif
+		)
 		{
 			const FStaticMeshVertexBuffer& Attributes = LOD.VertexBuffers.StaticMeshVertexBuffer;
 			const uint32 MaskUV = uint32(Params.MaskUVChannel);
@@ -697,8 +708,14 @@ namespace Grungify
 			FEdgeField Edges;
 			Edges.Build(Topo, Params.EdgeAngleDeg, Params.EdgeWearWidth);
 
-			// Pass 2 (parallel over rows): evaluate every covered texel.
+			// Pass 2 (parallel over rows): retain ownership of inactive texels, but avoid their edge queries.
 			Out.TexturePixels.Init(FColor(0, 0, 0, 0), NumPixels);
+#if WITH_DEV_AUTOMATION_TESTS
+			if (OutEdgeQueriesPerRow)
+			{
+				OutEdgeQueriesPerRow->Init(0, Size);
+			}
+#endif
 			ParallelFor(Size, [&](int32 Y)
 			{
 				for (int32 X = 0; X < Size; ++X)
@@ -715,18 +732,46 @@ namespace Grungify
 					const FVector3f& W = Bary[Pixel];
 
 					FPointSample S;
+					S.Slot = SlotFor(Context, Topo.TriSlot[T]);
+					if constexpr (bSkipInactiveTexels)
+					{
+						if (!S.Slot || S.Slot->bExcluded)
+						{
+							continue;
+						}
+					}
 					S.P = Topo.Pos[I0] * W.X + Topo.Pos[I1] * W.Y + Topo.Pos[I2] * W.Z;
 					S.N = (Topo.Nrm[I0] * W.X + Topo.Nrm[I1] * W.Y + Topo.Nrm[I2] * W.Z).GetSafeNormal();
 					if (S.N.IsZero())
 					{
 						S.N = Topo.FaceN[T];
 					}
-					Edges.Query(S.P, S.Convex, S.Concave);
-					S.Slot = SlotFor(Context, Topo.TriSlot[T]);
 					if (S.Slot && S.Slot->GateSampler)
 					{
 						S.GateUV = GateUVOf(*S.Slot, Attributes, I0) * W.X + GateUVOf(*S.Slot, Attributes, I1) * W.Y + GateUVOf(*S.Slot, Attributes, I2) * W.Z;
 					}
+					if constexpr (bSkipInactiveTexels)
+					{
+						// These are the same early-outs as EvaluatePoint, independent of convexity/concavity.
+						// Do not change Owner: black first-owner texels must still block overlapping triangles,
+						// contribute to statistics/votes, and remain covered during the four dilation passes.
+						if (ZoneWeight(Params, S.P) <= 0.f)
+						{
+							continue;
+						}
+						const float Height = float(FMath::Max(0.0, S.P.Z - Params.Floor->FloorBelow(S.P)));
+						if (GateWeight(*S.Slot, float(S.N.Z), Height, S.GateUV) <= 0.f)
+						{
+							continue;
+						}
+					}
+					Edges.Query(S.P, S.Convex, S.Concave);
+#if WITH_DEV_AUTOMATION_TESTS
+					if (OutEdgeQueriesPerRow)
+					{
+						++(*OutEdgeQueriesPerRow)[Y];
+					}
+#endif
 					Out.TexturePixels[Pixel] = ToColor(EvaluatePoint(S, Params));
 				}
 			});
@@ -794,6 +839,176 @@ namespace Grungify
 			return true;
 		}
 	}
+
+#if WITH_DEV_AUTOMATION_TESTS
+	IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGrungifyTextureGateConservationTest, "Grungify.Generation.TextureGateOutputConservation",
+		EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+	bool FGrungifyTextureGateConservationTest::RunTest(const FString& Parameters)
+	{
+		// CPU-only fixture: two creased faces and a later triangle overlapping the excluded first face.
+		// No assets, editor world, GPU resources or production mesh data are changed.
+		FStaticMeshLODResources LOD(false); // Stack-owned: no intrusive reference for its destructor to release.
+		FStaticMeshVertexBuffer& Attributes = LOD.VertexBuffers.StaticMeshVertexBuffer;
+		Attributes.SetUseFullPrecisionUVs(true);
+		Attributes.Init(9, 2);
+		const FVector2f UVs[9] = {
+			{ .05f, .05f }, { .95f, .05f }, { .05f, .95f },
+			{ .95f, .05f }, { .95f, .95f }, { .05f, .95f },
+			{ .05f, .05f }, { .95f, .05f }, { .05f, .95f }
+		};
+		for (uint32 V = 0; V < 9; ++V)
+		{
+			Attributes.SetVertexUV(V, 0, UVs[V]);
+			Attributes.SetVertexUV(V, 1, UVs[V]);
+		}
+
+		FTopology Topo;
+		Topo.NumVerts = 9;
+		Topo.Pos = {
+			{ 0., 0., 100. }, { 100., 0., 100. }, { 0., 100., 100. },
+			{ 100., 0., 100. }, { 100., 0., 0. }, { 0., 0., 100. },
+			{ 300., 0., 100. }, { 400., 0., 100. }, { 300., 100., 100. }
+		};
+		Topo.Nrm = {
+			FVector::UpVector, FVector::UpVector, FVector::UpVector,
+			FVector(0., -1., 0.), FVector(0., -1., 0.), FVector(0., -1., 0.),
+			FVector::UpVector, FVector::UpVector, FVector::UpVector
+		};
+		Topo.Indices = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+		Topo.FaceN = { FVector::UpVector, FVector(0., -1., 0.), FVector::UpVector };
+		Topo.TriSlot = { 0, 1, 1 };
+		Topo.Weld = { 0, 1, 2, 1, 3, 0, 4, 5, 6 };
+		Topo.WeldFirst = { 0, 1, 2, 4, 6, 7, 8 };
+		Topo.Area = 15000.;
+
+		FGrungifyFloorField Floor;
+		Floor.BuildFlat(-100.);
+		FGrungifyGenerationParams Params;
+		Params.Floor = &Floor;
+		Params.Seed = 1337;
+		Params.ZoneTransform = FTransform::Identity;
+		Params.ZoneExtent = FVector(500.);
+		Params.ZoneFalloff = 20.f;
+		Params.DustHeight = 600.f;
+		Params.CreviceDust = .8f;
+		Params.GeneralHandling = .5f;
+		Params.MaskUVChannel = 1;
+		Params.MaskTexelSize = .5f;
+		Params.MaxMaskResolution = 64;
+
+		FGrungifyComponentContext Context;
+		Context.Slots.SetNum(2);
+		Context.Slots[0].bExcluded = true;
+		Context.Slots[1].Surface = EGrungifySurfaceType::Metal;
+		FGrungifyGate Gate;
+		Gate.GateUVChannel = 0;
+		FGrungifyGateSampler Sampler;
+		UTexture2D* Permission = NewObject<UTexture2D>();
+		TArray<uint8> PermissionPixels;
+		PermissionPixels.Init(0, 16 * 16);
+		for (int32 Y = 10; Y < 16; ++Y)
+		{
+			for (int32 X = 10; X < 16; ++X)
+			{
+				PermissionPixels[Y * 16 + X] = 255;
+			}
+		}
+		// Positive sub-byte output is still eligible; do not introduce a threshold or quantized skip.
+		PermissionPixels[14 * 16 + 8] = 1;
+		PermissionPixels[14 * 16 + 9] = 128;
+		auto LoadPermission = [&]()
+		{
+			Permission->Source.Init(16, 16, 1, 1, TSF_G8, PermissionPixels.GetData());
+			FString Error;
+			return TestTrue(TEXT("Permission source readable"), Sampler.Init(Permission, Error));
+		};
+
+		auto Compare = [&](const TCHAR* Name, bool bExpectNoQueries, bool bExpectSomeQueries, bool bCheckDilation = false)
+		{
+			FGrungifyComponentResult Legacy, Optimized;
+			int32 LegacyVotes[3] = { 0, 0, 0 };
+			int32 OptimizedVotes[3] = { 0, 0, 0 };
+			TArray<int32> LegacyQueries, OptimizedQueries;
+			BakeTexture<false>(LOD, Topo, Context, Params, Legacy, LegacyVotes, &LegacyQueries);
+			BakeTexture<true>(LOD, Topo, Context, Params, Optimized, OptimizedVotes, &OptimizedQueries);
+			const FString Prefix(Name);
+			TestTrue(Prefix + TEXT(": exact final RGBA including all four dilation passes"), Legacy.TexturePixels == Optimized.TexturePixels);
+			TestTrue(Prefix + TEXT(": exact covered-texel mean"), Legacy.MeanMasks == Optimized.MeanMasks);
+			TestTrue(Prefix + TEXT(": exact maxima"), Legacy.MaxMasks == Optimized.MaxMasks);
+			TestEqual(Prefix + TEXT(": exact resolution"), Legacy.TextureSize, Optimized.TextureSize);
+			TestEqual(Prefix + TEXT(": exact vertex count"), Legacy.Vertices, Optimized.Vertices);
+			int32 LegacyCount = 0, OptimizedCount = 0;
+			for (int32 Y = 0; Y < LegacyQueries.Num(); ++Y)
+			{
+				LegacyCount += LegacyQueries[Y];
+				OptimizedCount += OptimizedQueries[Y];
+			}
+			for (int32 Surface = 0; Surface < 3; ++Surface)
+			{
+				TestEqual(Prefix + TEXT(": exact surface votes"), LegacyVotes[Surface], OptimizedVotes[Surface]);
+			}
+			TestTrue(Prefix + TEXT(": edge queries reduced"), OptimizedCount < LegacyCount);
+			if (bExpectNoQueries)
+			{
+				TestEqual(Prefix + TEXT(": no inactive edge queries"), OptimizedCount, 0);
+			}
+			if (bExpectSomeQueries)
+			{
+				TestTrue(Prefix + TEXT(": permitted texels still evaluated"), OptimizedCount > 0);
+				TestTrue(Prefix + TEXT(": fixture exercises nonzero wear"), Optimized.MaxMasks.GetMax() > 0.f);
+			}
+			if (bCheckDilation)
+			{
+				const int32 Gutter = (Optimized.TextureSize * 13 / 16) * Optimized.TextureSize + Optimized.TextureSize - 1;
+				TestTrue(Prefix + TEXT(": test exercises nonzero dilation outside the UV island"), Optimized.TexturePixels[Gutter] != FColor(0, 0, 0, 0));
+			}
+			const int32 BlackOwner = (Optimized.TextureSize / 4) * Optimized.TextureSize + Optimized.TextureSize / 4;
+			TestTrue(Prefix + TEXT(": excluded first owner blocks overlapping admitted triangle"), Optimized.TexturePixels[BlackOwner] == FColor(0, 0, 0, 0));
+		};
+
+		Compare(TEXT("Excluded slot without a permission texture"), false, true, true);
+		if (!LoadPermission())
+		{
+			return false;
+		}
+		Context.Slots[1].Gate = &Gate;
+		Context.Slots[1].GateSampler = &Sampler;
+		Compare(TEXT("Narrow permission with fractional boundary values"), false, true, true);
+		Gate.bInvertGate = true;
+		Compare(TEXT("Inverted permission"), false, true);
+		Gate.bInvertGate = false;
+		PermissionPixels.Init(0, 16 * 16);
+		if (!LoadPermission())
+		{
+			return false;
+		}
+		Compare(TEXT("All-zero permission"), true, false);
+		PermissionPixels.Init(255, 16 * 16);
+		if (!LoadPermission())
+		{
+			return false;
+		}
+		Gate.bInvertGate = true;
+		Compare(TEXT("Inverted all-one permission"), true, false);
+		Gate.bInvertGate = false;
+		Context.Slots[1].GateSampler = nullptr;
+		Gate.bUseFacingGate = true;
+		Gate.MinUpFacing = .5f;
+		Compare(TEXT("Facing permission"), true, false);
+		Gate.bUseFacingGate = false;
+		Gate.bUseHeightGate = true;
+		Gate.MinHeightCm = 500.f;
+		Compare(TEXT("Height permission"), true, false);
+		Gate.bUseHeightGate = false;
+		Params.ZoneExtent = FVector(1.);
+		Compare(TEXT("Outside zone"), true, false);
+		Params.ZoneExtent = FVector(500.);
+		Context.Slots.Reset();
+		Compare(TEXT("Missing slot"), true, false);
+		return true;
+	}
+#endif // WITH_DEV_AUTOMATION_TESTS
 
 	bool GenerateComponent(UStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult)
 	{

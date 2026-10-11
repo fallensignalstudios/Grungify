@@ -181,6 +181,12 @@ Run the tests in the isolated `HostProject` retained by `BuildPlugin -NoDeleteHo
 
 These checks do not establish final environment art quality. Full undo/redo, save/reload, World Partition cell streaming and cooked game execution still need separate verification.
 
+## Texture bake cost
+
+Texture generation skips edge-distance queries and weathering evaluation when a texel's material slot is excluded, its zone weight is zero, or its facing, height or texture permission is zero. Positive permission values still receive the full calculation. Atlas ownership, covered-sample statistics, surface votes and the four dilation passes stay unchanged, including when an excluded triangle overlaps an admitted one.
+
+`Grungify.Generation.TextureGateOutputConservation` compares final RGBA pixels, means, maxima and surface votes against the original evaluation path for narrow, inverted, zero, facing and height gates, overlapping excluded slots, missing slots and points outside the zone. It also checks that inactive texels avoid edge queries. Texture resolution and the requested physical texel size are unchanged.
+
 ## Verification checklist
 
 These cases should be checked in-editor on a test level, never on production rooms:
