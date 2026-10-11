@@ -127,8 +127,8 @@ namespace Grungify::Compat
 
 	/**
 	 * Encodes 8-bit BGRA pixels as PNG bytes without any gamma conversion (the masks are linear data).
-	 * PNGCompressImageArray(int32, int32, TArrayView64<const FColor>, TArray64<uint8>&) exists from 4.26 to at
-	 * least 5.8; deprecation warnings are suppressed in case a version marks it deprecated.
+	 * PNGCompressImageArray(int32, int32, TArrayView64<const FColor>, TArray64<uint8>&) has existed since 4.26 and is what
+	 * the 5.8 code already calls (not compiled here); deprecation warnings are suppressed in case a version marks it deprecated.
 	 * Call as CompressPNG<FImageUtils>(...) from a file that includes "ImageUtils.h". (FImageUtils is a template
 	 * argument so this header needs neither that include nor a forward declaration whose class/struct key could
 	 * mismatch and warn.)

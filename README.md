@@ -15,15 +15,16 @@ Each material slot is classified as **stone**, **metal** or **trim**, so the wea
 
 Everything is driven by a **Seed**, so the same seed and settings always produce the same result.
 
-> **Status:** v0.5.0 targets UE 5.8. v0.3.1 was natively verified: Editor, Development and Shipping builds, and all nine native automation tests (results below). v0.4.0 adds:
-> - **Workflow:** a zones panel, wear stamps, a background generation cache, seed variants, bake-to-assets with PNG round-tripping, and a material library.
-> - **Generation:** sky exposure, traced water flow, extended layers, decal and mesh scatter, and instanced meshes.
-> - **Pipeline:** Data Layer targeting, a commandlet, a Blueprint/Python API, runtime wear, and a reference scene with screenshot and cooked-build tests.
+> **Status:** v0.5.1 was natively verified on UE 5.8.3 (Editor, Development and Shipping builds; 18 automation tests; see [Native verification](#native-verification-ue-583-2026-10-11)). It includes:
+> - **v0.4:** zones panel, wear stamps, cache and background preview, seed variants, Bake To Assets, sky exposure, water flow, extended layers, scatter, instanced meshes, Data Layers, a commandlet, a Blueprint/Python API, runtime wear and a reference scene.
+> - **v0.5:** automatic material hookup and Substrate.
 >
+> **v0.6.0 has not been compiled or run yet.** It was written without an engine install, so expect a round of compile fixes. It adds:
+> - **A stronger default look**, with a **Grungify Contrast** control (see [Look strength](#look-strength)).
+> - **Skeletal meshes, landscape, height blending and Nanite displacement.**
+> - **Fab packaging:** a showcase map, build scripts and a readiness check, read-only installed content, engine-compatibility wrappers for 5.5–5.8, and copyright headers.
 >
-> v0.5.0 adds **automatic material hookup** (no hand-editing material graphs) and **Substrate support**.
->
-> **v0.4.0 and v0.5.0 have not been compiled or run yet.** It was written without an engine install, so expect a round of compile fixes. Preset round trips, public-action cancellation and final visual quality still need review on the intended meshes and lighting. See [Verification checklist](#verification-checklist).
+> See the [Verification checklist](#verification-checklist).
 
 ---
 
@@ -49,7 +50,7 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 
 ### Content versioning
 
-The generated material assets carry a marker of the form `[GrungifyContent v7 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
+The generated material assets carry a marker of the form `[GrungifyContent v8 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
 
 - **Tools → Grungify → Update Plugin Content** creates missing assets and rebuilds outdated ones.
 - **Rebuild Plugin Content** forces a rebuild of all the generated material assets.
@@ -102,7 +103,7 @@ If you'd rather place the function yourself, in each master material you want we
 - **Normal** is passed through unchanged unless `Grungify Relief Strength` is above 0. When it is, chips read as recessed and dust as slightly raised, layered on top of your normal rather than replacing it. Relief uses finite differences rather than ddx/ddy, so it also works with Nanite.
 - Parameters (group *Grungify*):
   - colours: `Grungify Dust Color`, `Grungify Runoff Color`, `Grungify Trim Chip Color`, `Grungify Moss Color`, `Grungify Soot Color`, `Grungify Salt Color` (efflorescence)
-  - strength: overall `Grungify Strength`, plus separate `Grungify Chip / Dust / Runoff / Handling / Moisture / Soot / Scorch / Moss / Crack Strength`
+  - strength: overall `Grungify Strength` and `Grungify Contrast`, plus separate `Grungify Chip / Dust / Runoff / Handling / Moisture / Soot / Scorch / Moss / Crack Strength`
   - relief: `Grungify Relief Strength` (cracks also cut into the normal)
   - textures: `Grungify Mask Texture` and `Grungify Extended Mask Texture`, both set by the zone
 - The shading code lives in `Shaders/Private/Grungify.ush`, so you can tune the look there without rebuilding the graph.
@@ -139,6 +140,35 @@ The content build always creates `MF_GrungifySubstrate`. In a project with Subst
 5. Press **Clear** to put every mesh the zone touched back the way it was.
 
 Apply and Clear are single undo steps (Ctrl+Z). **New Seed** rolls a new random seed; type a seed in by hand to get back a previous look. **Dry Run** generates and reports without touching anything.
+
+### Look strength
+
+The default look in v0.6 is deliberately stronger than v0.5's, which testers found too subtle on broad surfaces and runoff:
+
+- **Single noise pass:** variation now comes only from the shader's noise. The bake carries the wear structure at full strength.
+- **Lower thresholds:** chips start showing from a mask of about 0.25, and runoff streaks from about 0.05.
+- **Stronger blends:** dust reaches 95% of its colour, handling darkens stone by up to 30%, and runoff reaches 90%.
+- **Raised profiles:** the default surface profiles are higher (stone runoff and chips 1.0).
+
+**Grungify Contrast** (material parameter, or *Palette → Contrast* on a zone or preset) reshapes how boldly faint wear reads, without changing fully worn or untouched areas:
+
+| Contrast | Look |
+|---|---|
+| 0.6 | Close to v0.5's subtle look |
+| 1 | Standard (default) |
+| 1.5–2 | Heavy |
+
+The library looks set 1.25 (Abandoned Industrial), 1.15 (Wet Sewer) and 1.0 (Old Temple).
+
+**Contrast vs Strength:**
+
+- **Strength** scales everything, including the most worn areas.
+- **Contrast** lifts or sinks the in-between areas.
+
+If wear still looks faint, switch **Preview Display** to *All Masks*:
+
+- If the masks are faint too, raise the zone's layer intensities or profiles.
+- If the masks are strong but the final material isn't, raise Contrast or check the material is hooked up. The zone report warns when it isn't.
 
 ### Progress and cancelling
 
@@ -565,7 +595,7 @@ Texture generation skips edge-distance queries and weathering evaluation when a 
 
 These cases should be checked in-editor on a test level, never on production rooms:
 
-1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v7 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
+1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v8 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
 2. **Channel masks:** in MF_GrungifyWeathering, the Roughness mask is R only and the Metallic mask is G only.
 3. **Exact restore:** on a mesh whose default custom primitive data is `[]`, run Preview → Cancel Preview, and separately Apply → Clear. The data is `[]` again. Repeat on a mesh with painted vertex colours, a mesh with only some material slots overridden, and a mesh whose CPD indices 0–4 are already in use (it should be reported as a conflict and left untouched).
 4. **Undo:** run Apply → Ctrl+Z and Clear → Ctrl+Z. Delete a zone while previewing, then Ctrl+Z.
@@ -625,6 +655,35 @@ These cases should be checked in-editor on a test level, never on production roo
     - In a Substrate project, the content build reports no compile-check note or errors for `MF_GrungifySubstrate`.
     - A hooked-up Substrate material shows chips, dust, runoff and the extended layers, with a look close to the legacy function on the reference scene.
     - *Substrate Material Complexity* view shows one extra closure.
+24. **Look strength (v0.6):** on the reference scene, compare v0.5.1 captures against v0.6 at Contrast 0.6, 1 and 2. Check that broad surfaces and runoff read clearly at 1, and that untouched meshes are unchanged.
+25. **Skeletal meshes:**
+    - A skeletal prop with UV1 and one with only UV0 both report `texture`, and the UV0 one notes the fallback.
+    - Both show wear that follows the mesh when it's moved or animated.
+    - Clear restores their materials and custom data.
+26. **Landscape:**
+    - A zone over a landscape reports a `landscape` row, binds its components and shows dust and contact wear at wall bases once the landscape material is hooked up.
+    - Clear and Cancel Preview restore the original overrides.
+    - A second overlapping zone leaves those components alone.
+27. **Height and displacement:**
+    - With a height map in Height and `Grungify Height Blend` at 1, chips move to brick faces and dust into the joints.
+    - On a Nanite-tessellated material routed through `MF_GrungifyDisplacement`, `Grungify Displacement Depth` cuts the chips in.
+28. **Installed copy:** install the packaged plugin into an engine. The content build validates instead of rebuilding, and changing the CPD index explains how to get a writable copy.
+29. **Engine range:** build with `Scripts/BuildPlugin.ps1` for 5.5, 5.6, 5.7 and 5.8. Each must have no warnings, then run the automation tests in each.
+
+## Packaging for Fab (5.5–5.8)
+
+See `Docs/Fab.md` for the full checklist, listing draft and media shot list, and `Docs/EngineCompatibility.md` for the per-version API audit.
+
+1. **Generate content with the oldest supported engine (5.5).** Content saved by 5.8 won't open in 5.5–5.7.
+   - Run *Tools → Grungify → Update Plugin Content*, then *Build Showcase Map*.
+   - Commit everything in `Content/`.
+2. **Build and package every engine version** with `Scripts/BuildPlugin.ps1` (Windows: Win64, plus Linux with a cross toolchain) or `Scripts/BuildPlugin.sh` (Mac/Linux).
+   - The scripts run `BuildPlugin -StrictIncludes` for each version, fail on any compiler warning, and produce a source-only zip per version with `EngineVersion` set.
+3. **Run `python3 Scripts/CheckFabReadiness.py`.** It checks copyright headers, descriptor URLs, prebuilt assets and the engine version they were saved with, the icon, and source hygiene. It currently reports that the URLs, the prebuilt content and the showcase map are still to do.
+4. **Fill in the descriptor URLs.** `DocsURL`, `SupportURL`, `FabURL` and `CreatedByURL` in `Grungify.uplugin` are empty on purpose. Then set `IsBetaVersion` to false for release.
+5. **Replace the icon.** `Resources/Icon128.png` is a generated placeholder; swap in real art.
+
+**Installed copies are read-only.** When Grungify is installed in the engine (from Fab), it validates its shipped content instead of rebuilding it. That content was built for CPD index 0, UV channel 1 and instance data index 0. A project that changes those settings is told to copy the plugin into its own `Plugins` folder, where the content can be rebuilt.
 
 ## Layout
 

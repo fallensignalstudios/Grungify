@@ -8,6 +8,7 @@
 #include "Engine/Texture2D.h"
 #include "FileHelpers.h"
 #include "GrungifySettings.h"
+#include "GrungifyCompat.h"
 #include "GrungifyTypes.h"
 #include "GrungifyWeatheringZone.h"
 #include "HAL/FileManager.h"
@@ -271,15 +272,16 @@ namespace
 		TEXT("ExtR"), TEXT("ExtG"), TEXT("ExtB"), TEXT("ExtA"),
 		TEXT("MossColor"), TEXT("SootColor"), TEXT("SaltColor"),
 		TEXT("MoistureStrength"), TEXT("SootStrength"), TEXT("ScorchStrength"), TEXT("MossStrength"), TEXT("CrackStrength"),
-		TEXT("Height"), TEXT("HeightBlend") };
+		TEXT("Height"), TEXT("HeightBlend"), TEXT("Contrast") };
 
 	const TCHAR* CommonCode =
 		// Height blending reshapes the stored masks before anything reads them (exactly unchanged at blend 0).
-		TEXT("const float4 VM = GrungifyHeightMasks(float4(MaskR, MaskG, MaskB, MaskA), Height, HeightBlend);\n")
-		TEXT("const float4 TM = GrungifyHeightMasks(float4(TexR, TexG, TexB, TexA), Height, HeightBlend);\n")
+		// Contrast then reshapes how boldly faint wear reads (also exactly unchanged at 1).
+		TEXT("const float4 VM = GrungifyContrast(GrungifyHeightMasks(float4(MaskR, MaskG, MaskB, MaskA), Height, HeightBlend), Contrast);\n")
+		TEXT("const float4 TM = GrungifyContrast(GrungifyHeightMasks(float4(TexR, TexG, TexB, TexA), Height, HeightBlend), Contrast);\n")
 		TEXT("const float4 CS = float4(ChipStrength, DustStrength, RunoffStrength, HandlingStrength);\n")
-		TEXT("const float4 IM = GrungifyHeightMasks(float4(InstR, InstG, InstB, InstA), Height, HeightBlend);\n")
-		TEXT("const float4 EM = GrungifyHeightExtended(float4(ExtR, ExtG, ExtB, ExtA), Height, HeightBlend);\n")
+		TEXT("const float4 IM = GrungifyContrast(GrungifyHeightMasks(float4(InstR, InstG, InstB, InstA), Height, HeightBlend), Contrast);\n")
+		TEXT("const float4 EM = GrungifyContrast(GrungifyHeightExtended(float4(ExtR, ExtG, ExtB, ExtA), Height, HeightBlend), Contrast);\n")
 		TEXT("const float4 ES = float4(MoistureStrength, SootStrength, ScorchStrength, MossStrength);\n");
 
 	const TCHAR* EvaluateCode =
@@ -494,6 +496,7 @@ namespace
 		// Not read by the shader; runtime wear uses it to size brushes in texels.
 		AddScalar(Function, TEXT("Grungify Mask Texel Size"), 4.f, 4700);
 		S.Add(TEXT("HeightBlend"), AddScalar(Function, TEXT("Grungify Height Blend"), 0.f, 4900));
+		S.Add(TEXT("Contrast"), AddScalar(Function, TEXT("Grungify Contrast"), 1.f, 5100));
 	}
 
 	UMaterialExpressionFunctionInput* AddHeightInput(UMaterialFunction* Function, int32 Sort)
@@ -667,7 +670,7 @@ namespace
 	void CompileAndCheck(UMaterial* Material, FGrungifyContentReport& Report)
 	{
 		UMaterialEditingLibrary::RecompileMaterial(Material);
-		if (FMaterialResource* Resource = Material->GetMaterialResource(GMaxRHIShaderPlatform))
+		if (FMaterialResource* Resource = GRUNGIFY_GET_MAX_RHI_MATERIAL_RESOURCE(Material))
 		{
 			Resource->FinishCompilation();
 			for (const FString& Error : Resource->GetCompileErrors())

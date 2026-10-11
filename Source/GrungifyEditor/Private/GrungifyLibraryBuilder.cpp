@@ -70,6 +70,8 @@ namespace
 				P.Palette.RunoffColor = FLinearColor(0.22f, 0.10f, 0.04f);
 				P.Palette.bOverrideCrackStrength = true;
 				P.Palette.CrackStrength = 0.35f;
+				P.Palette.bOverrideContrast = true;
+				P.Palette.Contrast = 1.25f;
 			},
 			FLinearColor(0.42f, 0.41f, 0.39f), FLinearColor(0.16f, 0.22f, 0.20f), 0.2f, FLinearColor(0.55f, 0.47f, 0.18f) });
 
@@ -117,6 +119,8 @@ namespace
 				P.Extended.RustBloomIntensity = 0.6f;
 				P.Palette.bOverrideRunoffColor = true;
 				P.Palette.RunoffColor = FLinearColor(0.08f, 0.07f, 0.05f);
+				P.Palette.bOverrideContrast = true;
+				P.Palette.Contrast = 1.15f;
 				P.Palette.bOverrideEfflorescenceColor = true;
 				P.Palette.EfflorescenceColor = FLinearColor(0.82f, 0.80f, 0.74f);
 			},

@@ -270,15 +270,15 @@ public:
 
 	/** Stone weathers to dust and chips; handling darkens it. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Surfaces")
-	FGrungifySurfaceProfile StoneProfile = FGrungifySurfaceProfile(1.0f, 0.8f, 0.5f, 0.8f);
+	FGrungifySurfaceProfile StoneProfile = FGrungifySurfaceProfile(1.0f, 1.0f, 0.7f, 1.0f);
 
 	/** Metal takes runoff (rust) and handling polish; paint chips reveal bare metal. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Surfaces")
-	FGrungifySurfaceProfile MetalProfile = FGrungifySurfaceProfile(0.6f, 1.0f, 1.0f, 0.6f);
+	FGrungifySurfaceProfile MetalProfile = FGrungifySurfaceProfile(0.85f, 1.0f, 1.0f, 0.85f);
 
 	/** Trim sits on exposed edges, so it chips the most. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Surfaces")
-	FGrungifySurfaceProfile TrimProfile = FGrungifySurfaceProfile(0.8f, 0.7f, 0.8f, 1.3f);
+	FGrungifySurfaceProfile TrimProfile = FGrungifySurfaceProfile(0.9f, 0.85f, 0.9f, 1.3f);
 
 	/** Named profiles slot rules can use via Profile Name (e.g. Ceramic, Steel, Bronze). Saved in presets. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Surfaces")

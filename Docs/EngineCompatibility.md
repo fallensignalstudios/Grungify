@@ -20,8 +20,8 @@ Rows marked **verify on first compile** are the ones to watch in the first build
 | # | Risk | Versions | Confidence | What to do |
 |---|---|---|---|---|
 | 1 | **Content saved by 5.8 cannot be opened by 5.5, 5.6 or 5.7.** Unreal packages are not backward compatible, so a `.uasset`/`.umap` saved by a newer editor fails to load in an older one. This is not an API question; it is how package versioning works. | 5.5 to 5.7 | **high** | Generate and save `Content/` with **UE 5.5** (the oldest target) and ship that copy in all four zips. The other option is to generate per version and pass `-ContentRoot`/`--content-root` (layout `<root>/<ver>/...`). `CheckFabReadiness.py --max-content-engine <ver>` reads each asset's SavedByEngineVersion and fails if it is newer. The build scripts already run it per version. |
-| 2 | `AActor::AddDataLayer(const UDataLayerAsset*)` may not be public on any of these versions. My recollection is that it is private and called through `UDataLayerInstance::AddActor`. | all, 5.8 included | **low** | Verify on first compile. If it fails (C2248 / "is a private member") or warns (C4996), apply edit E5 below. |
-| 3 | `UStaticMesh::NaniteSettings` direct member access may be deprecated in favour of accessors in some versions. | 5.5 to 5.8 | **medium** | Use `Grungify::Compat::SetNaniteEnabled` (edit E1). It suppresses the deprecation, and one switch moves it to the accessors. |
+| 2 | Scatter Data Layer assignment. The code now calls `AActor::AddDataLayer(const UDataLayerInstance*)`, which may be deprecated in favour of `UDataLayerInstance::AddActor` on some or all of these versions. (The earlier `AddDataLayer(const UDataLayerAsset*)` overload was probably private.) | all, 5.8 included | medium-low | Verify on first compile. If it warns (C4996), apply edit E5. |
+| 3 | Nanite toggle on the reference cube. The current `Mesh->GetNaniteSettings().bEnabled = true` is most likely wrong: it either fails to compile (const ref) or silently does nothing (copy). Direct `NaniteSettings` access may be deprecated in some versions. | 5.5 to 5.8 | **medium** | Use `Grungify::Compat::SetNaniteEnabled` (edit E1). It suppresses the deprecation, and one switch moves it to the accessors. |
 | 4 | `UMaterial::GetMaterialResource(EShaderPlatform)`. I believe this overload exists on 5.5, with the `ERHIFeatureLevel` one as the older form, but I am not sure in which version the switch happened. | 5.5 (5.6 less likely) | **medium** | Use `GRUNGIFY_GET_MAX_RHI_MATERIAL_RESOURCE` (edits E2/E3). If 5.5 reports "cannot convert EShaderPlatform", add `PublicDefinitions.Add("GRUNGIFY_MATERIAL_RESOURCE_BY_SHADER_PLATFORM=0")` for that engine. |
 | 5 | Strict includes, unity off and IWYU differ per version. Engine headers stop including each other transitively between versions, so a file can compile on 5.8 but not on 5.5, or the other way round. | all | **medium** | The build scripts pass `-StrictIncludes`. Add the missing `#include` the compiler names. Likely candidates: `GMaxRHIShaderPlatform` (`RHIGlobals.h`, otherwise `RHI.h`), `FDrawToRenderTargetContext` (`Kismet/KismetRenderingLibrary.h`, already included). |
 | 6 | Clang (Mac, Linux) warns about things MSVC accepts: shadowed variables (`-Wshadow`, an error under UE's default `ShadowVariableWarningLevel`), unused-but-set variables, `-Wrange-loop-construct`, implicit float/double conversions in `FMath` calls, and the order of `override`/`final`. | Mac, Linux | **medium** | Build Linux from Windows with the cross-compile toolchain (`LINUX_MULTIARCH_ROOT[_5_x]`), and build Mac on a Mac with `Scripts/BuildPlugin.sh`. Fix whatever the scripts report; any warning fails the run. |
@@ -43,19 +43,34 @@ wrapper; ? means verify on first compile.
 | `FWorldPartitionActorDescInstance::GetActorLabel()` / `GetGuid()` / `GetEditorBounds()` | OK | OK | OK | OK | medium | `GetEditorBounds` replaced `GetBounds` in 5.2. The instance forwards these from the desc. Verify on first compile. |
 | `FLoaderAdapterShape(UWorld*, const FBox&, const FString&)` + `Load()` (`GrungifyCommandlet.cpp` ~l.292) | OK | OK | OK | OK | medium-high | Constructor signature unchanged since 5.0, as far as I know. |
 | `AActor::GetDataLayerAssets()` (`GrungifyWeatheringZone.cpp` `ShouldConsiderActor`, ~l.1207; in `WITH_EDITOR`) | OK | OK | OK | OK | medium | Editor-only. A `bool bIncludeExternalDataLayerAsset = true` parameter came with External Data Layers, but it has a default, so the call compiles unchanged. |
-| `AActor::AddDataLayer(const UDataLayerAsset*)` (`GrungifyWeatheringZone.cpp` `ScatterFromResults`, ~l.2250) | ? | ? | ? | ? | **low** | See risk 2 and edit E5. |
+| `UDataLayerManager::GetDataLayerManager(World)`, `GetDataLayerInstanceFromAsset`, `AActor::AddDataLayer(const UDataLayerInstance*)` (`GrungifyWeatheringZone.cpp` `ScatterFromResults`, ~l.2285) | ? | ? | ? | ? | medium-low | The code changed during the audit from the asset overload (likely private) to the instance overload, which is better. The instance overload may be deprecated; see risk 2 and edit E5. |
 | `UDataLayerAsset`, `TArray<TObjectPtr<const UDataLayerAsset>>` UPROPERTYs (`GrungifyWeatheringZone.h`) | OK | OK | OK | OK | high | The engine itself uses the same property type on `AActor` since 5.1. |
 
 ### Static meshes, Nanite, render data
 
 | API | 5.5 | 5.6 | 5.7 | 5.8 | Conf. | Notes / recommendation |
 |---|---|---|---|---|---|---|
-| `UStaticMesh::NaniteSettings.bEnabled = true` (`GrungifyReferenceScene.cpp` `MakeNaniteCube`, l.126) | Guard | Guard | Guard | Guard | medium | Use `Grungify::Compat::SetNaniteEnabled(Mesh, true)` (edit E1). The member has been public since 5.0. Whether it is deprecated in favour of `Get/SetNaniteSettings()` in 5.6+ I don't know for certain, so the wrapper suppresses the deprecation, and `GRUNGIFY_STATICMESH_NANITE_ACCESSORS=1` moves it to the accessors if the member ever goes private. |
+| `UStaticMesh::NaniteSettings.bEnabled = true` / `GetNaniteSettings().bEnabled = true` (`GrungifyReferenceScene.cpp` `MakeNaniteCube`, l.~128) | Guard | Guard | Guard | Guard | medium | Use `Grungify::Compat::SetNaniteEnabled(Mesh, true)` (edit E1). The member has been public since 5.0. Whether it is deprecated in favour of `Get/SetNaniteSettings()` in 5.6+ I don't know for certain, so the wrapper suppresses the deprecation, and `GRUNGIFY_STATICMESH_NANITE_ACCESSORS=1` moves it to the accessors if the member ever goes private. |
 | `UStaticMesh::HasValidNaniteData()` (`GrungifyMaskGeneration.cpp`) | OK | OK | OK | OK | high | |
 | `GetRenderData()->LODResources`, `FStaticMeshLODResources(bool bAddRef)`, `VertexBuffers.*`, `IndexBuffer.GetCopy/SetIndices(…, EIndexBufferStride::Force32Bit)` | OK | OK | OK | OK | medium-high | `FStaticMeshLODResources(false)` is used for stack-owned test fixtures. Its constructor parameter has been there since the intrusive refcount arrived (4.26/5.0). |
 | `FStaticMeshComponentLODInfo::OverrideVertexColors`, `ReleaseOverrideVertexColorsAndBlock`, `PaintedVertices`, `UStaticMeshComponent::SetLODDataCount` (`GrungifyComponentState.cpp`) | OK | OK | OK | OK | high | Editor-only paths, all inside `WITH_EDITOR`. |
 | `BeginInitResource(FRenderResource*)` | OK | OK | OK | OK | high | 5.3 added an optional `FRenderCommandPipe*` parameter with a default. |
 | `UStaticMesh::GetStaticMaterials()`, `UMeshComponent::GetMaterialSlotNames()` | OK | OK | OK | OK | high | |
+
+### Skeletal meshes (added during the audit: `GrungifyMaskGeneration.cpp`, `GrungifyComponentState.cpp`, `GrungifyGenerator.cpp`)
+
+| API | 5.5 | 5.6 | 5.7 | 5.8 | Conf. | Notes |
+|---|---|---|---|---|---|---|
+| `USkinnedMeshComponent::GetSkinnedAsset()`, `USkinnedAsset` (`Engine/SkinnedAsset.h`) | OK | OK | OK | OK | high | 5.1+. It replaced direct `SkeletalMesh` member access. |
+| `USkinnedAsset::GetResourceForRendering()` → `FSkeletalMeshRenderData::LODRenderData` | OK | OK | OK | OK | medium-high | |
+| `USkinnedAsset::GetLODInfo(int32)` → `FSkeletalMeshLODInfo` (`Engine/SkinnedAssetCommon.h`) | OK | OK | OK | OK | medium-high | |
+| `FSkeletalMeshLODRenderData` vertex and index buffers (`StaticVertexBuffers`, `MultiSizeIndexContainer`) copied into an `FStaticMeshLODResources` (`CopySkinnedLOD`) | ? | ? | ? | ? | medium | CPU-side buffer accessors in render data are not a stable public API. Verify on first compile. In the editor, CPU data is available, so this works for editor-time baking only (the call sites are in `WITH_EDITOR`). |
+
+### Displacement (added during the audit: `GrungifyContentBuilder.cpp` `PopulateDisplacementFunction`, `GrungifyMaterialHookup.cpp` `InsertDisplacement`)
+
+| API | 5.5 | 5.6 | 5.7 | 5.8 | Conf. | Notes |
+|---|---|---|---|---|---|---|
+| `MP_Displacement`, `UMaterialEditorOnlyData::Displacement` | OK | OK | OK | OK | medium | Added with Nanite Tessellation (experimental) in 5.4. The input only has an effect when the project enables Nanite tessellation (`r.Nanite.AllowTessellation=1` and the material's displacement settings), which changed between 5.4 and 5.8. Treat it as an advanced, experimental feature in the listing. |
 
 ### Materials (editor module)
 
@@ -63,7 +78,7 @@ wrapper; ? means verify on first compile.
 |---|---|---|---|---|---|---|
 | `UMaterial::GetEditorOnlyData()` → `UMaterialEditorOnlyData` (`FrontMaterial`, `MaterialAttributes`, …) | OK | OK | OK | OK | high | Added in 5.1. |
 | `UMaterial::GetExpressions()` / `UMaterialFunction::GetExpressions()` | OK | OK | OK | OK | high | 5.1+, returns `TConstArrayView<TObjectPtr<UMaterialExpression>>`. The snapshot-then-delete pattern in `ClearFunctionExpressions` is correct on every version. |
-| `UMaterial::GetMaterialResource(GMaxRHIShaderPlatform)` (`GrungifyContentBuilder.cpp` `CompileAndCheck` ~l.668; `GrungifyMaterialHookup.cpp` `CompileErrors` ~l.210) | ? | OK | OK | OK | medium | Risk 4. Use the `GRUNGIFY_GET_MAX_RHI_MATERIAL_RESOURCE` macro (edits E2, E3). |
+| `UMaterial::GetMaterialResource(GMaxRHIShaderPlatform)` (`GrungifyContentBuilder.cpp` `CompileAndCheck` ~l.670; `GrungifyMaterialHookup.cpp` `CompileErrors` ~l.227) | ? | OK | OK | OK | medium | Risk 4. Use the `GRUNGIFY_GET_MAX_RHI_MATERIAL_RESOURCE` macro (edits E2, E3). |
 | `FMaterialResource::FinishCompilation()`, `GetCompileErrors()` | OK | OK | OK | OK | high | |
 | `GMaxRHIShaderPlatform` via `RHIGlobals.h` | OK | OK | OK | OK | medium | `RHIGlobals.h` exists since 5.2. If a strict-includes build cannot see the symbol, include `RHI.h`. |
 | `UMaterialEditingLibrary::CreateMaterialExpression`, `CreateMaterialExpressionInFunction`, `DeleteMaterialExpression`, `DeleteMaterialExpressionInFunction`, `ConnectMaterialExpressions`, `ConnectMaterialProperty`, `RecompileMaterial`, `UpdateMaterialFunction` | OK | OK | OK | OK | high | Stable Editor Scripting API. |
@@ -84,7 +99,7 @@ wrapper; ? means verify on first compile.
 
 | API | 5.5 | 5.6 | 5.7 | 5.8 | Conf. | Notes / recommendation |
 |---|---|---|---|---|---|---|
-| `FImageUtils::PNGCompressImageArray(int32, int32, TArrayView64<const FColor>, TArray64<uint8>&)` (`GrungifyWeatheringZone.cpp` `WriteBakedAssets`/`BakeTexture`, ~l.2439) | Guard | Guard | Guard | Guard | medium | Present since 4.26. The `TArray<uint8>` output overload was deprecated in 5.x; the `TArray64` one may follow. Use `Grungify::Compat::CompressPNG<FImageUtils>` (edit E4), which suppresses deprecation and returns success. I did **not** switch to `FImageUtils::CompressImage(…, FImageView)`, because I am not sure how it treats `EGammaSpace::Linear` BGRA8 data (it could convert to sRGB and change the masks). |
+| `FImageUtils::PNGCompressImageArray(int32, int32, TArrayView64<const FColor>, TArray64<uint8>&)` (`GrungifyWeatheringZone.cpp` `WriteBakedAssets`/`BakeTexture`, ~l.2477) | Guard | Guard | Guard | Guard | medium | Present since 4.26. The `TArray<uint8>` output overload was deprecated in 5.x; the `TArray64` one may follow. Use `Grungify::Compat::CompressPNG<FImageUtils>` (edit E4), which suppresses deprecation and returns success. I did **not** switch to `FImageUtils::CompressImage(…, FImageView)`, because I am not sure how it treats `EGammaSpace::Linear` BGRA8 data (it could convert to sRGB and change the masks). |
 | `UTexture::Source.Init(…, TSF_BGRA8, const uint8*)`, `SRGB`, `CompressionSettings`, `MipGenSettings`, `LODGroup` | OK | OK | OK | OK | high | |
 | `UTexture2D::CreateTransient`, `GetPlatformData()->Mips[0].BulkData.Lock/Unlock`, `UpdateResource` (`GrungifyRuntimeWear.cpp`) | OK | OK | OK | OK | medium-high | Runtime path. Writing mip bulk data on a transient texture is supported. |
 | `UTextureRenderTarget2D` (`RenderTargetFormat`, `bForceLinearGamma`, `InitAutoFormat`, `UpdateResourceImmediate`) | OK | OK | OK | OK | medium-high | |
@@ -172,20 +187,26 @@ if (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion <= 5)
 Line numbers are from the working tree at the time of writing and will drift, so use the function names to find each
 spot. Apply E1 to E4 now. Apply E5 only if the first compile shows it is needed.
 
-### E1. `Source/GrungifyEditor/Private/GrungifyReferenceScene.cpp`, `MakeNaniteCube()`, line 126
+### E1. `Source/GrungifyEditor/Private/GrungifyReferenceScene.cpp`, `MakeNaniteCube()`, line ~128
+
+The line changed while I was writing this audit, from `Mesh->NaniteSettings.bEnabled = true;` to
+`Mesh->GetNaniteSettings().bEnabled = true;`. **The new form is likely a bug.** If `GetNaniteSettings()` returns a const
+reference, the line does not compile. If it returns a copy, the line compiles and does nothing, so the reference cube is
+silently not Nanite, and the Nanite screenshot test proves nothing. Only a non-const reference overload would make it
+work, and I don't know that one exists on any version.
 
 Add `#include "GrungifyCompat.h"` with the other includes. Then:
 
 ```cpp
-// before
-Mesh->NaniteSettings.bEnabled = true;
+// before (either form)
+Mesh->GetNaniteSettings().bEnabled = true;
 // after
 Grungify::Compat::SetNaniteEnabled(Mesh, true);
 ```
 
 (The GrungifyEditor module already depends on Grungify, and `GrungifyCompat.h` is in Grungify's `Public/`.)
 
-### E2. `Source/GrungifyEditor/Private/GrungifyContentBuilder.cpp`, `CompileAndCheck()`, line ~668
+### E2. `Source/GrungifyEditor/Private/GrungifyContentBuilder.cpp`, `CompileAndCheck()`, line ~670
 
 Add `#include "GrungifyCompat.h"`. Then:
 
@@ -196,7 +217,7 @@ if (FMaterialResource* Resource = Material->GetMaterialResource(GMaxRHIShaderPla
 if (FMaterialResource* Resource = GRUNGIFY_GET_MAX_RHI_MATERIAL_RESOURCE(Material))
 ```
 
-### E3. `Source/GrungifyEditor/Private/GrungifyMaterialHookup.cpp`, `CompileErrors()`, line ~210
+### E3. `Source/GrungifyEditor/Private/GrungifyMaterialHookup.cpp`, `CompileErrors()`, line ~227
 
 Add `#include "GrungifyCompat.h"`. Then:
 
@@ -207,7 +228,7 @@ FMaterialResource* Resource = Material->GetMaterialResource(GMaxRHIShaderPlatfor
 FMaterialResource* Resource = GRUNGIFY_GET_MAX_RHI_MATERIAL_RESOURCE(Material);
 ```
 
-### E4. `Source/Grungify/Private/GrungifyWeatheringZone.cpp`, `WriteBakedAssets()` (the `BakeTexture` lambda), line ~2439
+### E4. `Source/Grungify/Private/GrungifyWeatheringZone.cpp`, `WriteBakedAssets()` (the `BakeTexture` lambda), line ~2477
 
 Add `#include "GrungifyCompat.h"` inside the existing `#if WITH_EDITOR` include block (`ImageUtils.h` is already included at l.18). Then:
 
@@ -225,26 +246,19 @@ const FString File = ...;
 if (bEncoded && IFileManager::Get().MakeDirectory(*PngDirectory, true) && FFileHelper::SaveArrayToFile(Png, *File))
 ```
 
-### E5 (conditional). `Source/Grungify/Private/GrungifyWeatheringZone.cpp`, `ScatterFromResults()`, line ~2250
+### E5 (conditional). `Source/Grungify/Private/GrungifyWeatheringZone.cpp`, `ScatterFromResults()`, line ~2285
 
-Apply this only if `Spawned->AddDataLayer(DataLayer)` fails to compile (private) or warns (deprecated). Confidence in
-the replacement API is **medium-low**, so verify it on first compile.
+While this audit ran, the code changed from `Spawned->AddDataLayer(const UDataLayerAsset*)` to resolving the instance
+first: `UDataLayerManager::GetDataLayerManager(World)->GetDataLayerInstanceFromAsset(DataLayer)`, then
+`Spawned->AddDataLayer(LayerInstance)`. That fixes the most likely problem, the private asset overload. One risk
+remains: `AActor::AddDataLayer(const UDataLayerInstance*)` may be deprecated in favour of
+`UDataLayerInstance::AddActor`. Confidence **medium-low**. If the build log shows C4996 or "deprecated" on that line:
 
 ```cpp
-// includes (inside #if WITH_EDITOR)
-#include "WorldPartition/DataLayer/DataLayerInstance.h"
-#include "WorldPartition/DataLayer/DataLayerManager.h"
-
 // before
-Spawned->AddDataLayer(DataLayer);
+if (!LayerInstance || !Spawned->AddDataLayer(LayerInstance))
 // after
-if (const UDataLayerManager* Manager = UDataLayerManager::GetDataLayerManager(Spawned))
-{
-	if (const UDataLayerInstance* Instance = Manager->GetDataLayerInstanceFromAsset(DataLayer))
-	{
-		Instance->AddActor(Spawned);
-	}
-}
+if (!LayerInstance || !LayerInstance->AddActor(Spawned))
 ```
 
 `UDataLayerManager` arrived in 5.3 and `UDataLayerInstance::AddActor` is editor-only. Both live in the Engine module,

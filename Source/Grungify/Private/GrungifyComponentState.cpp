@@ -547,6 +547,7 @@ namespace Grungify
 		Vector(Palette.bOverrideRunoffColor, TEXT("Grungify Runoff Color"), Palette.RunoffColor);
 		Vector(Palette.bOverrideTrimChipColor, TEXT("Grungify Trim Chip Color"), Palette.TrimChipColor);
 		Scalar(Palette.bOverrideStrength, TEXT("Grungify Strength"), Palette.Strength);
+		Scalar(Palette.bOverrideContrast, TEXT("Grungify Contrast"), Palette.Contrast);
 		Scalar(Palette.bOverrideChipStrength, TEXT("Grungify Chip Strength"), Palette.ChipStrength);
 		Scalar(Palette.bOverrideDustStrength, TEXT("Grungify Dust Strength"), Palette.DustStrength);
 		Scalar(Palette.bOverrideRunoffStrength, TEXT("Grungify Runoff Strength"), Palette.RunoffStrength);

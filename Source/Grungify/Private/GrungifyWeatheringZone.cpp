@@ -18,6 +18,7 @@
 #include "GrungifyTrafficPath.h"
 #include "GrungifyWearStamp.h"
 #include "ImageUtils.h"
+#include "GrungifyCompat.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "UObject/GarbageCollection.h"
 #include "WorldPartition/DataLayer/DataLayerAsset.h"
@@ -2474,9 +2475,9 @@ bool AGrungifyWeatheringZone::WriteBakedAssets(const FGrungifyComponentResult& R
 		{
 			// Linear data: paint over it in any editor and Reimport the texture to pick the changes up.
 			TArray64<uint8> Png;
-			FImageUtils::PNGCompressImageArray(Result.TextureSize, Result.TextureSize, TArrayView64<const FColor>(Pixels.GetData(), Pixels.Num()), Png);
+			const bool bEncoded = Grungify::Compat::CompressPNG<FImageUtils>(Result.TextureSize, Result.TextureSize, TArrayView64<const FColor>(Pixels.GetData(), Pixels.Num()), Png);
 			const FString File = FPaths::ConvertRelativePathToFull(FPaths::Combine(PngDirectory, Name + TEXT(".png")));
-			if (IFileManager::Get().MakeDirectory(*PngDirectory, true) && FFileHelper::SaveArrayToFile(Png, *File))
+			if (bEncoded && IFileManager::Get().MakeDirectory(*PngDirectory, true) && FFileHelper::SaveArrayToFile(Png, *File))
 			{
 				if (!Texture->AssetImportData)
 				{

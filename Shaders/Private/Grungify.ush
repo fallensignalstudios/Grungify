@@ -115,17 +115,19 @@ FGrungifyLayers GrungifyLayers(float4 Masks, float3 P, float WorldNormalZ)
 	const uint Seed = 1013u;
 	FGrungifyLayers L;
 
-	L.Handling = Masks.a * lerp(0.7, 1.0, GrungifyFbm(P * 0.5, Seed));
+	L.Handling = saturate(Masks.a * lerp(0.85, 1.15, GrungifyFbm(P * 0.5, Seed)));
 
 	const float Streak = GrungifyFbm(float3(P.x * 3.0, P.y * 3.0, P.z * 0.25), Seed + 7u);
-	L.Runoff = Masks.b > 0.0 ? smoothstep(0.15, 0.85, Masks.b * (0.5 + Streak)) : 0.0;
+	L.Runoff = Masks.b > 0.0 ? smoothstep(0.05, 0.6, Masks.b * (0.6 + 0.8 * Streak)) : 0.0;
 
 	const float ChipNoise = GrungifyFbm(P * 2.0, Seed + 13u);
-	L.Chip = Masks.r > 0.01 ? smoothstep(ChipNoise - 0.04, ChipNoise + 0.04, Masks.r * 0.9) : 0.0;
+	// Chips start showing from a mask of about 0.25 (where the noise is low) and cover most of a fully worn edge.
+	const float ChipThreshold = 0.1 + ChipNoise * 0.7;
+	L.Chip = Masks.r > 0.01 ? smoothstep(ChipThreshold - 0.05, ChipThreshold + 0.05, Masks.r * 1.2) : 0.0;
 
 	const float DustNoise = GrungifyFbm(P * 0.8, Seed + 29u);
-	L.Dust = saturate(Masks.g * lerp(0.55, 1.25, DustNoise));
-	L.Dust = saturate(L.Dust + Masks.g * saturate(WorldNormalZ) * 0.25);
+	L.Dust = saturate(Masks.g * lerp(0.8, 1.3, DustNoise));
+	L.Dust = saturate(L.Dust + Masks.g * saturate(WorldNormalZ) * 0.35);
 
 	return L;
 }
@@ -164,7 +166,7 @@ FGrungifyResult GrungifyEvaluate(
 	}
 	else
 	{
-		R.BaseColor *= lerp(1.0, 0.82, L.Handling);
+		R.BaseColor *= lerp(1.0, 0.7, L.Handling);
 		R.Roughness = lerp(R.Roughness, R.Roughness * 0.7, L.Handling);
 	}
 
@@ -172,13 +174,13 @@ FGrungifyResult GrungifyEvaluate(
 	if (SurfaceId == 1)
 	{
 		const float3 Rust = RunoffColor * float3(1.6, 1.1, 0.8);
-		R.BaseColor = lerp(R.BaseColor, Rust + R.BaseColor * 0.2, L.Runoff * 0.85);
+		R.BaseColor = lerp(R.BaseColor, Rust + R.BaseColor * 0.2, L.Runoff * 0.9);
 		R.Metallic = lerp(R.Metallic, 0.0, L.Runoff);
 		R.Roughness = lerp(R.Roughness, 0.85, L.Runoff);
 	}
 	else
 	{
-		R.BaseColor = lerp(R.BaseColor, RunoffColor + R.BaseColor * 0.35, L.Runoff * 0.8);
+		R.BaseColor = lerp(R.BaseColor, RunoffColor + R.BaseColor * 0.35, L.Runoff * 0.9);
 		R.Roughness = lerp(R.Roughness, R.Roughness * 0.85, L.Runoff);
 	}
 
@@ -205,7 +207,7 @@ FGrungifyResult GrungifyEvaluate(
 	}
 
 	// Dust sits on top of everything.
-	R.BaseColor = lerp(R.BaseColor, DustColor, L.Dust * 0.85);
+	R.BaseColor = lerp(R.BaseColor, DustColor, L.Dust * 0.95);
 	R.Roughness = lerp(R.Roughness, 0.92, L.Dust);
 	R.Metallic = lerp(R.Metallic, 0.0, L.Dust);
 
@@ -473,13 +475,13 @@ FGrungifyGrime GrungifyEvaluateGrime(
 	if (SurfaceId == 1)
 	{
 		GrungifyGrimeOver(G, L.Handling * 0.5, Black, float3(0.7, 0.7, 0.7), 0.15);
-		GrungifyGrimeOver(G, L.Runoff * 0.85, RunoffColor * float3(1.6, 1.1, 0.8), Dielectric, 0.85);
+		GrungifyGrimeOver(G, L.Runoff * 0.9, RunoffColor * float3(1.6, 1.1, 0.8), Dielectric, 0.85);
 		GrungifyGrimeOver(G, L.Chip, Black, float3(0.62, 0.62, 0.64), 0.35);
 	}
 	else
 	{
-		GrungifyGrimeOver(G, L.Handling * 0.18, Black, Dielectric, 0.3);
-		GrungifyGrimeOver(G, L.Runoff * 0.8, RunoffColor, Dielectric, 0.7);
+		GrungifyGrimeOver(G, L.Handling * 0.3, Black, Dielectric, 0.3);
+		GrungifyGrimeOver(G, L.Runoff * 0.9, RunoffColor, Dielectric, 0.7);
 		if (SurfaceId == 2)
 		{
 			GrungifyGrimeOver(G, L.Chip, ChipColor, Dielectric, 0.8);
@@ -489,7 +491,7 @@ FGrungifyGrime GrungifyEvaluateGrime(
 			GrungifyGrimeOver(G, L.Chip * 0.6, StoneChipColor, Dielectric, 0.85);
 		}
 	}
-	GrungifyGrimeOver(G, L.Dust * 0.85, DustColor, Dielectric, 0.92);
+	GrungifyGrimeOver(G, L.Dust * 0.95, DustColor, Dielectric, 0.92);
 
 	const uint Seed = 2027u;
 	if (CrackStrength > 0.0 && SurfaceId == 0)
@@ -590,4 +592,16 @@ float GrungifyDisplacementOffset(
 		}
 	}
 	return Offset * Depth;
+}
+
+// ---------------------------------------------------------------- Contrast
+
+// Lifts (Contrast > 1) or sinks (< 1) faint wear without changing fully worn or untouched areas. Exactly unchanged at 1.
+float4 GrungifyContrast(float4 Masks, float Contrast)
+{
+	if (Contrast == 1.0 || Contrast <= 0.0)
+	{
+		return Masks;
+	}
+	return pow(saturate(Masks), 1.0 / Contrast);
 }

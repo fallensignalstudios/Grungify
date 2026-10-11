@@ -197,14 +197,16 @@ namespace Grungify
 			float Handling = S.Slot->bRail
 				? Top * (0.6f + 0.4f * Band)
 				: Band * S.Convex * Params.GeneralHandling;
-			Handling *= FMath::Lerp(0.7f, 1.f, Fbm(NP * 0.5, Params.Seed + 11u)) * Params.HandlingIntensity * Profile.Handling;
+			// Variation lives in the shader; the bake carries the structure at full strength.
+			Handling *= Params.HandlingIntensity * Profile.Handling;
 			Handling = FMath::Clamp(Handling, 0.f, 1.f);
 
 			// Dust: thick at the base of walls, on ledges and packed into creases.
 			const float UpFacing = FMath::Clamp((NZ - 0.6f) / 0.4f, 0.f, 1.f);
 			const bool bOnFloor = UpFacing > 0.5f && Height < 5.f;
+			// Falls off with height, but holds up longer than a plain square so it reads above the skirting.
 			float Dust = 1.f - FMath::SmoothStep(0.f, FMath::Max(Params.DustHeight, 1.f), Height);
-			Dust *= Dust;
+			Dust = FMath::Pow(Dust, 1.4f);
 			if (bOnFloor)
 			{
 				Dust *= Params.FloorDust;
@@ -214,7 +216,6 @@ namespace Grungify
 				Dust = FMath::Max(Dust, UpFacing * Params.LedgeDust);
 			}
 			Dust = FMath::Max(Dust, S.Concave * Params.CreviceDust);
-			Dust *= FMath::Lerp(0.6f, 1.f, Fbm(NP * 0.8, Params.Seed + 23u));
 			Dust *= FMath::Clamp(1.2f + NZ, 0.f, 1.f); // little on undersides
 			Dust *= 1.f - Handling * 0.8f;              // hands keep it clean
 			Dust *= Params.DustIntensity * Profile.Dust;

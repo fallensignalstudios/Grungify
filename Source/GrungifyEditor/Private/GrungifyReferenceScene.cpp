@@ -23,6 +23,7 @@
 #include "FileHelpers.h" // FEditorFileUtils, UEditorLoadingAndSavingUtils
 #include "GameFramework/WorldSettings.h"
 #include "GrungifySettings.h"
+#include "GrungifyCompat.h"
 #include "GrungifyTypes.h"
 #include "GrungifyWeatheringZone.h"
 #include "GrungifyZoneComponent.h"
@@ -125,7 +126,7 @@ namespace
 			FAssetRegistryModule::AssetCreated(Mesh);
 		}
 		Mesh->Modify();
-		Mesh->GetNaniteSettings().bEnabled = true;
+		Grungify::Compat::SetNaniteEnabled(Mesh, true);
 		// PostEditChange rebuilds the render data, including the Nanite resources and the fallback mesh the masks bake from.
 		Mesh->PostEditChange();
 		Mesh->MarkPackageDirty();

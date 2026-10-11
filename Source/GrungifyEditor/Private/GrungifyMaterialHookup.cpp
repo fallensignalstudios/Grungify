@@ -11,6 +11,7 @@
 #include "FileHelpers.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "GrungifySettings.h"
+#include "GrungifyCompat.h"
 #include "GrungifyTypes.h"
 #include "GrungifyWeatheringZone.h"
 #include "GrungifyZoneComponent.h"
@@ -224,7 +225,7 @@ namespace
 		// RecompileMaterial builds streaming data, which runs CollectGarbage. Retain even transient callers.
 		TStrongObjectPtr<UMaterial> KeepMaterialAlive(Material);
 		UMaterialEditingLibrary::RecompileMaterial(Material);
-		FMaterialResource* Resource = Material->GetMaterialResource(GMaxRHIShaderPlatform);
+		FMaterialResource* Resource = GRUNGIFY_GET_MAX_RHI_MATERIAL_RESOURCE(Material);
 		if (!Resource)
 		{
 			OutErrors = TEXT("no material resource was available to verify compilation");

@@ -253,6 +253,16 @@ struct GRUNGIFY_API FGrungifyPalette
 	float Strength = 1.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideContrast = false;
+
+	/**
+	 * Contrast: how boldly faint wear shows. 1 is the standard look; below 1 is subtler (0.6 is close to Grungify 0.5),
+	 * above 1 lifts light wear so more of it reads (2 is heavy). Unlike Strength, it doesn't change fully worn areas.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideContrast", ClampMin = "0.2", UIMax = "3"))
+	float Contrast = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
 	bool bOverrideChipStrength = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideChipStrength", ClampMin = "0", UIMax = "2"))
@@ -884,7 +894,7 @@ namespace Grungify
 	};
 
 	/** Bumped whenever the generated content changes; older assets are rebuilt in place. */
-	constexpr int32 ContentVersion = 7;
+	constexpr int32 ContentVersion = 8;
 	constexpr float MaskModeVertex = 501.f;
 	constexpr float MaskModeTexture = 502.f;
 	/** Instanced meshes: masks come from per-instance custom data. */

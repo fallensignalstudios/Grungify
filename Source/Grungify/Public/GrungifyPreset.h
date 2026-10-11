@@ -95,13 +95,13 @@ public:
 	float FloorKickHeightCm = 30.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surfaces")
-	FGrungifySurfaceProfile StoneProfile = FGrungifySurfaceProfile(1.0f, 0.8f, 0.5f, 0.8f);
+	FGrungifySurfaceProfile StoneProfile = FGrungifySurfaceProfile(1.0f, 1.0f, 0.7f, 1.0f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surfaces")
-	FGrungifySurfaceProfile MetalProfile = FGrungifySurfaceProfile(0.6f, 1.0f, 1.0f, 0.6f);
+	FGrungifySurfaceProfile MetalProfile = FGrungifySurfaceProfile(0.85f, 1.0f, 1.0f, 0.85f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surfaces")
-	FGrungifySurfaceProfile TrimProfile = FGrungifySurfaceProfile(0.8f, 0.7f, 0.8f, 1.3f);
+	FGrungifySurfaceProfile TrimProfile = FGrungifySurfaceProfile(0.9f, 0.85f, 0.9f, 1.3f);
 
 	/** Named profiles slot rules can refer to (e.g. Ceramic, Steel, Bronze). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Surfaces")

@@ -240,7 +240,7 @@ General rules:
 
 1. **Hero / thumbnail.** A wide shot of a weathered bay, with the plugin name added in post. The Fab thumbnail is
    cropped, so keep the subject centred.
-2. **Before / After split.** The same camera (`Cam_BeforeAfter`), left half clean and right half applied.
+2. **Before / After split.** The same camera (the Before / After bay's `Cam_<Bay>`), left half clean and right half applied.
 3. **The four layers.** A 2×2 grid of the mask debug view, one panel each for edge chips, dust, runoff and handling.
 4. **Runoff under vents.** A close-up of streaks fanning down a wall below a vent.
 5. **Dust at feet and on stairs.** Dust following the traced floor across a stair or second storey.
@@ -266,7 +266,7 @@ General rules:
 | 0:37–0:45 | Extended layers turn on: soot above a lamp, moss, rust bloom, cracks. | Extended layers |
 | 0:45–0:52 | Content Browser right-click **Add Grungify** on a Substrate material; the graph updates. | One-click material hookup, Substrate included |
 | 0:52–0:58 | Nanite mesh with texture masks; the ISM bay; a wear stamp dragged over a wall. | Nanite, instances, wear stamps |
-| 0:58–1:05 | PIE: footsteps and impacts paint runtime wear onto a floor. | Runtime wear |
+| 0:58–1:05 | PIE in a test level with `UGrungifyRuntimeWearComponent` on the player: footsteps and impacts paint runtime wear onto a floor. | Runtime wear |
 | 1:05–1:10 | Zones panel with *Apply All*; commandlet output in a terminal. | Scales to whole levels and CI |
 | 1:10–1:15 | Before/After wipe on the hero shot; logo and "UE 5.5 – 5.8". | Grungify, on Fab |
 

@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 9,
-	"VersionName": "0.5.1",
+	"Version": 10,
+	"VersionName": "0.6.0",
 	"FriendlyName": "Grungify",
 	"Description": "Procedural damage and weathering zones: dust at feet, runoff below vents, handling wear on rails and chips along exposed edges, following stone, metal and trim construction.",
 	"Category": "Editor",

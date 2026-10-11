@@ -28,6 +28,8 @@ REQUIRED_CONTENT = [
     "Content/BP_WeatheringZone.uasset",
     "Content/Materials/MF_GrungifyWeathering.uasset",
     "Content/Materials/MF_GrungifySubstrate.uasset",
+    "Content/Materials/MF_GrungifyLandscape.uasset",
+    "Content/Materials/MF_GrungifyDisplacement.uasset",
     "Content/Materials/M_GrungifyMaskDebug.uasset",
     "Content/Materials/M_GrungifyExample.uasset",
     "Content/Materials/T_GrungifyNoMask.uasset",
