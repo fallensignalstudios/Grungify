@@ -574,6 +574,11 @@ namespace Grungify
 
 			for (int32 LODIndex = 0; LODIndex < RenderData.LODResources.Num(); ++LODIndex)
 			{
+				if (Params.CancelRequested())
+				{
+					Out.bCancelled = true;
+					return;
+				}
 				const FStaticMeshLODResources& LOD = RenderData.LODResources[LODIndex];
 				FTopology Topo;
 				if (!Topo.Build(LOD, Transform, SharpRef))
@@ -705,6 +710,12 @@ namespace Grungify
 				}
 			}
 
+			if (Params.CancelRequested())
+			{
+				Out.bCancelled = true;
+				return false;
+			}
+
 			FEdgeField Edges;
 			Edges.Build(Topo, Params.EdgeAngleDeg, Params.EdgeWearWidth);
 
@@ -716,7 +727,9 @@ namespace Grungify
 				OutEdgeQueriesPerRow->Init(0, Size);
 			}
 #endif
-			ParallelFor(Size, [&](int32 Y)
+			// Rows are processed in batches so cancellation can be polled on the game thread between them.
+			// Batching changes neither the order-independent per-texel results nor any output.
+			auto ProcessRow = [&](int32 Y)
 			{
 				for (int32 X = 0; X < Size; ++X)
 				{
@@ -774,7 +787,18 @@ namespace Grungify
 #endif
 					Out.TexturePixels[Pixel] = ToColor(EvaluatePoint(S, Params));
 				}
-			});
+			};
+			constexpr int32 RowsPerBatch = 32;
+			for (int32 FirstRow = 0; FirstRow < Size; FirstRow += RowsPerBatch)
+			{
+				if (Params.CancelRequested())
+				{
+					Out.bCancelled = true;
+					return false;
+				}
+				const int32 NumRows = FMath::Min(RowsPerBatch, Size - FirstRow);
+				ParallelFor(NumRows, [&](int32 Row) { ProcessRow(FirstRow + Row); });
+			}
 
 			FMaskStats Stats;
 			for (int32 Pixel = 0; Pixel < NumPixels; ++Pixel)
@@ -1010,6 +1034,159 @@ namespace Grungify
 	}
 #endif // WITH_DEV_AUTOMATION_TESTS
 
+	FGrungifyUVReport ValidateMaskUVs(const FStaticMeshLODResources& LOD, const FTransform& Transform, int32 Channel)
+	{
+		FGrungifyUVReport Report;
+		Report.Channel = Channel;
+		Report.bChecked = true;
+
+		const FStaticMeshVertexBuffer& Attributes = LOD.VertexBuffers.StaticMeshVertexBuffer;
+		const FPositionVertexBuffer& Positions = LOD.VertexBuffers.PositionVertexBuffer;
+		const int32 NumChannels = int32(Attributes.GetNumTexCoords());
+		if (Channel < 0 || Channel >= NumChannels)
+		{
+			Report.Verdict = TEXT("failed");
+			Report.Problems.Add(FString::Printf(TEXT("mesh has %d UV channel(s); mask channel %d is missing (Project Settings > Plugins > Grungify > Mask UV Channel)"), NumChannels, Channel));
+			return Report;
+		}
+		Report.bPresent = true;
+
+		TArray<uint32> Indices;
+		LOD.IndexBuffer.GetCopy(Indices);
+		const uint32 NumVerts = Attributes.GetNumVertices();
+
+		// Coarse raster of strict triangle interiors: texels claimed twice mean overlapping islands.
+		// Shared edges are never counted twice because points exactly on an edge are not strictly inside.
+		constexpr int32 Res = 256;
+		TArray<uint8> Claims;
+		Claims.Init(0, Res * Res);
+
+		double UVArea = 0.0;
+		double OutsideArea = 0.0;
+		int32 NumTris = 0;
+		int32 NumDegenerate = 0;
+		double MinDensity = TNumericLimits<double>::Max();
+		double MaxDensity = 0.0;
+
+		for (int32 T = 0; T + 2 < Indices.Num(); T += 3)
+		{
+			const uint32 I[3] = { Indices[T], Indices[T + 1], Indices[T + 2] };
+			if (I[0] >= NumVerts || I[1] >= NumVerts || I[2] >= NumVerts || Positions.GetNumVertices() < NumVerts)
+			{
+				continue;
+			}
+			++NumTris;
+
+			FVector2D UV[3];
+			FVector P[3];
+			bool bOutside = false;
+			for (int32 K = 0; K < 3; ++K)
+			{
+				const FVector2f Raw = Attributes.GetVertexUV(I[K], uint32(Channel));
+				UV[K] = FVector2D(Raw.X, Raw.Y);
+				bOutside |= Raw.X < -1e-3f || Raw.Y < -1e-3f || Raw.X > 1.001f || Raw.Y > 1.001f;
+				const FVector3f L = Positions.VertexPosition(I[K]);
+				P[K] = Transform.TransformPosition(FVector(L.X, L.Y, L.Z));
+			}
+
+			const double TriUVArea = 0.5 * FMath::Abs(Cross2(UV[1] - UV[0], UV[2] - UV[0]));
+			const double TriWorldArea = 0.5 * FVector::CrossProduct(P[1] - P[0], P[2] - P[0]).Size();
+			if (TriUVArea < 1e-12)
+			{
+				NumDegenerate += TriWorldArea > 1e-4 ? 1 : 0;
+				continue;
+			}
+			UVArea += TriUVArea;
+			OutsideArea += bOutside ? TriUVArea : 0.0;
+			if (TriWorldArea > 1.0) // ignore sub-cm² slivers when measuring density spread
+			{
+				const double Density = TriWorldArea / TriUVArea;
+				MinDensity = FMath::Min(MinDensity, Density);
+				MaxDensity = FMath::Max(MaxDensity, Density);
+			}
+
+			const FVector2D S0 = UV[0] * Res, S1 = UV[1] * Res, S2 = UV[2] * Res;
+			const float Area2 = Cross2(S1 - S0, S2 - S0);
+			const int32 MinX = FMath::Clamp(FMath::FloorToInt(FMath::Min3(S0.X, S1.X, S2.X)), 0, Res - 1);
+			const int32 MaxX = FMath::Clamp(FMath::CeilToInt(FMath::Max3(S0.X, S1.X, S2.X)), 0, Res - 1);
+			const int32 MinY = FMath::Clamp(FMath::FloorToInt(FMath::Min3(S0.Y, S1.Y, S2.Y)), 0, Res - 1);
+			const int32 MaxY = FMath::Clamp(FMath::CeilToInt(FMath::Max3(S0.Y, S1.Y, S2.Y)), 0, Res - 1);
+			for (int32 Y = MinY; Y <= MaxY; ++Y)
+			{
+				for (int32 X = MinX; X <= MaxX; ++X)
+				{
+					const FVector2D C(X + 0.5, Y + 0.5);
+					const float W0 = Cross2(S2 - S1, C - S1) / Area2;
+					const float W1 = Cross2(S0 - S2, C - S2) / Area2;
+					const float W2 = 1.f - W0 - W1;
+					if (W0 > 1e-4f && W1 > 1e-4f && W2 > 1e-4f)
+					{
+						uint8& Claim = Claims[Y * Res + X];
+						Claim = uint8(FMath::Min<int32>(Claim + 1, 255));
+					}
+				}
+			}
+		}
+
+		int32 Covered = 0;
+		int32 Overlapped = 0;
+		for (const uint8 Claim : Claims)
+		{
+			Covered += Claim > 0 ? 1 : 0;
+			Overlapped += Claim > 1 ? 1 : 0;
+		}
+
+		Report.Coverage = float(Covered) / float(Res * Res);
+		Report.Overlap = Covered > 0 ? float(Overlapped) / float(Covered) : 0.f;
+		Report.OutOfRange = UVArea > 0.0 ? float(OutsideArea / UVArea) : 0.f;
+		Report.Degenerate = NumTris > 0 ? float(NumDegenerate) / float(NumTris) : 0.f;
+		Report.DensitySpread = (MaxDensity > 0.0 && MinDensity > 0.0) ? float(MaxDensity / MinDensity) : 0.f;
+
+		bool bFailed = false;
+		bool bWarn = false;
+		auto Problem = [&Report](bool bSerious, bool& bFlag, const FString& Text)
+		{
+			bFlag = true;
+			Report.Problems.Add(FString::Printf(TEXT("%s: %s"), bSerious ? TEXT("failed") : TEXT("warning"), *Text));
+		};
+
+		if (Covered == 0)
+		{
+			Problem(true, bFailed, TEXT("UVs cover no area"));
+		}
+		if (Report.Overlap > 0.05f)
+		{
+			Problem(true, bFailed, FString::Printf(TEXT("%.1f%% of covered texels are claimed by overlapping islands; wear would be shared between surfaces"), Report.Overlap * 100.f));
+		}
+		else if (Report.Overlap > 0.005f)
+		{
+			Problem(false, bWarn, FString::Printf(TEXT("%.1f%% of covered texels overlap"), Report.Overlap * 100.f));
+		}
+		if (Report.OutOfRange > 0.02f)
+		{
+			Problem(true, bFailed, FString::Printf(TEXT("%.1f%% of UV area lies outside 0..1 and would be clamped"), Report.OutOfRange * 100.f));
+		}
+		else if (Report.OutOfRange > 0.f)
+		{
+			Problem(false, bWarn, FString::Printf(TEXT("%.1f%% of UV area lies outside 0..1"), Report.OutOfRange * 100.f));
+		}
+		if (Report.Degenerate > 0.01f)
+		{
+			Problem(false, bWarn, FString::Printf(TEXT("%.1f%% of triangles have zero UV area and get no wear"), Report.Degenerate * 100.f));
+		}
+		if (Report.DensitySpread > 8.f)
+		{
+			Problem(false, bWarn, FString::Printf(TEXT("texel density varies %.0fx across the mesh; wear detail will be uneven"), Report.DensitySpread));
+		}
+		if (Covered > 0 && Report.Coverage < 0.2f)
+		{
+			Problem(false, bWarn, FString::Printf(TEXT("UVs use only %.0f%% of the texture; resolution is spent on empty space"), Report.Coverage * 100.f));
+		}
+
+		Report.Verdict = bFailed ? TEXT("failed") : bWarn ? TEXT("warning") : TEXT("ok");
+		return Report;
+	}
+
 	bool GenerateComponent(UStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult)
 	{
 		UStaticMesh* Mesh = Component ? Component->GetStaticMesh() : nullptr;
@@ -1039,21 +1216,37 @@ namespace Grungify
 		const double CellsPerM2 = FMath::Square(100.0 / FMath::Max<double>(Params.FeatureScale, 1.0));
 		const bool bSparse = Topo0.NumVerts / AreaM2 < CellsPerM2;
 
+		// Validate the mask UV channel whenever a texture is a candidate, so the report says why it was or wasn't used.
+		const bool bWantsTexture = Params.MaskOutput == EGrungifyMaskOutput::Texture
+			|| (Params.MaskOutput == EGrungifyMaskOutput::Auto && (OutResult.bNanite || bSparse));
+		if (bWantsTexture)
+		{
+			OutResult.MaskUV = ValidateMaskUVs(LOD0, Transform, Params.MaskUVChannel);
+		}
+		const bool bUVsUsable = bHasMaskUV && (!OutResult.MaskUV.bChecked || OutResult.MaskUV.Verdict != TEXT("failed"));
+
 		bool bTexture = false;
 		switch (Params.MaskOutput)
 		{
 		case EGrungifyMaskOutput::Texture:
+			// Explicitly requested: honour it whenever the channel exists, but say what's wrong with it.
 			bTexture = bHasMaskUV;
 			if (!bHasMaskUV)
 			{
 				OutResult.Notes += FString::Printf(TEXT("No UV channel %d for the mask texture; used vertex colours. "), Params.MaskUVChannel);
 			}
+			else if (!bUVsUsable)
+			{
+				OutResult.Notes += FString::Printf(TEXT("UV channel %d failed validation but Texture output was requested; expect artefacts (see Mask UV). "), Params.MaskUVChannel);
+			}
 			break;
 		case EGrungifyMaskOutput::Auto:
-			bTexture = bHasMaskUV && (OutResult.bNanite || bSparse);
-			if (!bHasMaskUV && (OutResult.bNanite || bSparse))
+			bTexture = bUVsUsable && (OutResult.bNanite || bSparse);
+			if (!bTexture && (OutResult.bNanite || bSparse))
 			{
-				OutResult.Notes += FString::Printf(TEXT("%s mesh but no UV channel %d; used vertex colours. "), OutResult.bNanite ? TEXT("Nanite") : TEXT("Sparse"), Params.MaskUVChannel);
+				OutResult.Notes += FString::Printf(TEXT("%s mesh but UV channel %d is %s; used vertex colours. "),
+					OutResult.bNanite ? TEXT("Nanite") : TEXT("Sparse"), Params.MaskUVChannel,
+					bHasMaskUV ? TEXT("unsuitable (see Mask UV)") : TEXT("missing"));
 			}
 			break;
 		default:
@@ -1067,12 +1260,19 @@ namespace Grungify
 		if (bTexture)
 		{
 			OutResult.Output = EGrungifyMaskOutput::Texture;
-			BakeTexture(LOD0, Topo0, Context, Params, OutResult, SurfaceVotes);
+			if (!BakeTexture(LOD0, Topo0, Context, Params, OutResult, SurfaceVotes))
+			{
+				return false;
+			}
 		}
 		else
 		{
 			OutResult.Output = EGrungifyMaskOutput::VertexColor;
 			BakeVertexColors(*RenderData, Transform, Context, Params, SharpRef, OutResult, SurfaceVotes);
+			if (OutResult.bCancelled)
+			{
+				return false;
+			}
 			if (OutResult.bNanite)
 			{
 				OutResult.Notes += TEXT("Nanite mesh with vertex-colour masks: may not render. ");
@@ -1090,6 +1290,141 @@ namespace Grungify
 		OutResult.DominantSurface = EGrungifySurfaceType(Best + 1);
 		return true;
 	}
+
+#if WITH_DEV_AUTOMATION_TESTS
+	namespace
+	{
+		/** CPU-only LOD with the given positions, per-vertex UVs (same in channels 0 and 1) and triangles. */
+		void InitTestLOD(FStaticMeshLODResources& LOD, const TArray<FVector3f>& Positions, const TArray<FVector2f>& UVs, const TArray<uint32>& Indices)
+		{
+			const uint32 NumVerts = uint32(Positions.Num());
+			LOD.VertexBuffers.PositionVertexBuffer.Init(NumVerts);
+			FStaticMeshVertexBuffer& Attributes = LOD.VertexBuffers.StaticMeshVertexBuffer;
+			Attributes.SetUseFullPrecisionUVs(true);
+			Attributes.Init(NumVerts, 2);
+			for (uint32 V = 0; V < NumVerts; ++V)
+			{
+				LOD.VertexBuffers.PositionVertexBuffer.VertexPosition(V) = Positions[V];
+				Attributes.SetVertexTangents(V, FVector3f(1.f, 0.f, 0.f), FVector3f(0.f, 1.f, 0.f), FVector3f(0.f, 0.f, 1.f));
+				Attributes.SetVertexUV(V, 0, UVs[V]);
+				Attributes.SetVertexUV(V, 1, UVs[V]);
+			}
+			LOD.IndexBuffer.SetIndices(Indices, EIndexBufferStride::Force32Bit);
+		}
+	}
+
+	IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGrungifyUVValidationTest, "Grungify.Generation.MaskUVValidation",
+		EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+	bool FGrungifyUVValidationTest::RunTest(const FString& Parameters)
+	{
+		// A 100 x 100 cm quad split along its diagonal: the shared edge must not count as overlap.
+		const TArray<FVector3f> QuadPos = { { 0.f, 0.f, 0.f }, { 100.f, 0.f, 0.f }, { 100.f, 100.f, 0.f }, { 0.f, 100.f, 0.f } };
+		const TArray<FVector2f> QuadUV = { { 0.f, 0.f }, { 1.f, 0.f }, { 1.f, 1.f }, { 0.f, 1.f } };
+		{
+			FStaticMeshLODResources LOD(false);
+			InitTestLOD(LOD, QuadPos, QuadUV, { 0, 1, 2, 0, 2, 3 });
+			const FGrungifyUVReport Report = ValidateMaskUVs(LOD, FTransform::Identity, 1);
+			TestTrue(TEXT("Clean quad: present"), Report.bPresent);
+			TestEqual(TEXT("Clean quad: verdict"), Report.Verdict, FString(TEXT("ok")));
+			TestEqual(TEXT("Clean quad: no overlap along the shared diagonal"), Report.Overlap, 0.f);
+			TestTrue(TEXT("Clean quad: covers most of the square"), Report.Coverage > 0.95f);
+			TestTrue(TEXT("Clean quad: uniform density"), FMath::IsNearlyEqual(Report.DensitySpread, 1.f, 0.01f));
+		}
+		{
+			// Two separate quads stacked on the same UV island (typical of mirrored or tiled UV0).
+			TArray<FVector3f> Pos = QuadPos;
+			for (const FVector3f& P : QuadPos)
+			{
+				Pos.Add(P + FVector3f(0.f, 0.f, 200.f));
+			}
+			TArray<FVector2f> UV = QuadUV;
+			UV.Append(QuadUV);
+			FStaticMeshLODResources LOD(false);
+			InitTestLOD(LOD, Pos, UV, { 0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7 });
+			const FGrungifyUVReport Report = ValidateMaskUVs(LOD, FTransform::Identity, 1);
+			TestEqual(TEXT("Stacked islands: verdict"), Report.Verdict, FString(TEXT("failed")));
+			TestTrue(TEXT("Stacked islands: overlap detected"), Report.Overlap > 0.9f);
+		}
+		{
+			TArray<FVector2f> UV;
+			for (const FVector2f& T : QuadUV)
+			{
+				UV.Add(T * 2.f);
+			}
+			FStaticMeshLODResources LOD(false);
+			InitTestLOD(LOD, QuadPos, UV, { 0, 1, 2, 0, 2, 3 });
+			const FGrungifyUVReport Report = ValidateMaskUVs(LOD, FTransform::Identity, 1);
+			TestEqual(TEXT("Tiling UVs: verdict"), Report.Verdict, FString(TEXT("failed")));
+			TestTrue(TEXT("Tiling UVs: out of range"), Report.OutOfRange > 0.5f);
+		}
+		{
+			FStaticMeshLODResources LOD(false);
+			InitTestLOD(LOD, QuadPos, QuadUV, { 0, 1, 2, 0, 2, 3 });
+			const FGrungifyUVReport Report = ValidateMaskUVs(LOD, FTransform::Identity, 3);
+			TestFalse(TEXT("Missing channel: not present"), Report.bPresent);
+			TestEqual(TEXT("Missing channel: verdict"), Report.Verdict, FString(TEXT("failed")));
+			TestEqual(TEXT("Missing channel: explained"), Report.Problems.Num(), 1);
+		}
+		return true;
+	}
+
+	IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGrungifyTextureCancelTest, "Grungify.Generation.TextureBakeCancellation",
+		EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+	bool FGrungifyTextureCancelTest::RunTest(const FString& Parameters)
+	{
+		// Same CPU-only quad as above, baked at 256 x 256 so there are several row batches.
+		FStaticMeshLODResources LOD(false);
+		InitTestLOD(LOD, { { 0.f, 0.f, 0.f }, { 100.f, 0.f, 0.f }, { 100.f, 100.f, 0.f }, { 0.f, 100.f, 0.f } },
+			{ { 0.f, 0.f }, { 1.f, 0.f }, { 1.f, 1.f }, { 0.f, 1.f } }, { 0, 1, 2, 0, 2, 3 });
+		FTopology Topo;
+		if (!TestTrue(TEXT("Topology"), Topo.Build(LOD, FTransform::Identity, 0.13f)))
+		{
+			return false;
+		}
+
+		FGrungifyFloorField Floor;
+		Floor.BuildFlat(-50.);
+		FGrungifyGenerationParams Params;
+		Params.Floor = &Floor;
+		Params.Seed = 7;
+		Params.ZoneTransform = FTransform::Identity;
+		Params.ZoneExtent = FVector(500.);
+		Params.MaskUVChannel = 1;
+		Params.MaskTexelSize = 0.25f;
+		Params.MaxMaskResolution = 256;
+		Params.AmbientStreaks = 1.f;
+
+		FGrungifyComponentContext Context;
+		Context.Slots.SetNum(1);
+
+		FGrungifyComponentResult Reference;
+		int32 ReferenceVotes[3] = { 0, 0, 0 };
+		TestTrue(TEXT("Reference bake"), BakeTexture(LOD, Topo, Context, Params, Reference, ReferenceVotes));
+		TestEqual(TEXT("Reference resolution"), Reference.TextureSize, 256);
+
+		// A callback that never cancels must not change a single texel.
+		int32 Polls = 0;
+		Params.ShouldCancel = [&Polls]() { ++Polls; return false; };
+		FGrungifyComponentResult Polled;
+		int32 PolledVotes[3] = { 0, 0, 0 };
+		TestTrue(TEXT("Polled bake"), BakeTexture(LOD, Topo, Context, Params, Polled, PolledVotes));
+		TestTrue(TEXT("Polling leaves the output identical"), Polled.TexturePixels == Reference.TexturePixels);
+		TestFalse(TEXT("Polled bake not cancelled"), Polled.bCancelled);
+		TestTrue(TEXT("Polled between row batches"), Polls >= 256 / 32);
+
+		// Cancelling partway stops the bake and marks the result unusable.
+		int32 Remaining = 3;
+		Params.ShouldCancel = [&Remaining]() { return --Remaining < 0; };
+		FGrungifyComponentResult Cancelled;
+		int32 CancelledVotes[3] = { 0, 0, 0 };
+		TestFalse(TEXT("Cancelled bake returns false"), BakeTexture(LOD, Topo, Context, Params, Cancelled, CancelledVotes));
+		TestTrue(TEXT("Cancelled bake is marked"), Cancelled.bCancelled);
+		TestEqual(TEXT("Cancelled bake has no texture size"), Cancelled.TextureSize, 0);
+		return true;
+	}
+#endif // WITH_DEV_AUTOMATION_TESTS
 }
 
 #endif // WITH_EDITOR

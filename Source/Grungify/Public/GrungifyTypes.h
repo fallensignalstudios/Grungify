@@ -185,11 +185,79 @@ struct GRUNGIFY_API FGrungifySlotRule
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Effect", meta = (EditCondition = "bOverrideProfile"))
 	FGrungifySurfaceProfile Profile;
 
+	/** Use a named profile from the zone's Material Profiles (saved in presets). Ignored when Override Profile is on. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Effect", meta = (EditCondition = "!bExclude && !bOverrideProfile"))
+	FName ProfileName;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Effect", meta = (EditCondition = "!bExclude"))
 	EGrungifyRailMode Rail = EGrungifyRailMode::Inherit;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Effect", meta = (EditCondition = "!bExclude"))
 	FGrungifyGate Gate;
+};
+
+/**
+ * Shader-side look written onto every material instance the zone owns, on every Preview and Apply.
+ * Only fields whose override is ticked are written; the rest inherit from the mesh's own material.
+ */
+USTRUCT(BlueprintType)
+struct GRUNGIFY_API FGrungifyPalette
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideDustColor = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideDustColor"))
+	FLinearColor DustColor = FLinearColor(0.55f, 0.50f, 0.42f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideRunoffColor = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideRunoffColor"))
+	FLinearColor RunoffColor = FLinearColor(0.16f, 0.11f, 0.07f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideTrimChipColor = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideTrimChipColor"))
+	FLinearColor TrimChipColor = FLinearColor(0.45f, 0.42f, 0.38f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideStrength = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideStrength", ClampMin = "0", UIMax = "2"))
+	float Strength = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideChipStrength = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideChipStrength", ClampMin = "0", UIMax = "2"))
+	float ChipStrength = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideDustStrength = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideDustStrength", ClampMin = "0", UIMax = "2"))
+	float DustStrength = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideRunoffStrength = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideRunoffStrength", ClampMin = "0", UIMax = "2"))
+	float RunoffStrength = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideHandlingStrength = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideHandlingStrength", ClampMin = "0", UIMax = "2"))
+	float HandlingStrength = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
+	bool bOverrideReliefStrength = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideReliefStrength", ClampMin = "0", UIMax = "2"))
+	float ReliefStrength = 0.f;
 };
 
 /** A hand-placed leak that runoff streaks flow down from. */
@@ -289,6 +357,119 @@ struct GRUNGIFY_API FGrungifyComponentRecord
 	TArray<TObjectPtr<UMaterialInterface>> OverrideMaterials;
 };
 
+/** Why one material slot was or wasn't weathered, and how it was classified. */
+USTRUCT(BlueprintType)
+struct GRUNGIFY_API FGrungifySlotReport
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	int32 Slot = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString SlotName;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString Material;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	bool bIncluded = true;
+
+	/** Plain-language reason it was included or excluded. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString Reason;
+
+	/** Matched slot rule (label and what matched), or empty. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString Rule;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString Surface;
+
+	/** Where the surface came from: rule, tag, physical material, keyword (and which), zone override or fallback. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString SurfaceSource;
+
+	/** Which wear profile was used. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString Profile;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	bool bRail = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString RailSource;
+
+	/** Active gates (facing, height, texture) in readable form. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString Gates;
+
+	/** Problems specific to this slot (e.g. a gate UV channel the mesh doesn't have). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	TArray<FString> Warnings;
+};
+
+/** Checks on the UV channel the mask texture is baked into. */
+USTRUCT(BlueprintType)
+struct GRUNGIFY_API FGrungifyUVReport
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	int32 Channel = 0;
+
+	/** False when the check did not run (vertex output requested, no readable mesh). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	bool bChecked = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	bool bPresent = false;
+
+	/** "ok", "warning" or "failed". */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString Verdict;
+
+	/** Share of the mesh's UV area that lands outside 0..1. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	float OutOfRange = 0.f;
+
+	/** Share of covered texels claimed by more than one triangle (overlapping islands). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	float Overlap = 0.f;
+
+	/** Share of triangles with zero UV area. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	float Degenerate = 0.f;
+
+	/** Share of the 0..1 square the UVs cover. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	float Coverage = 0.f;
+
+	/** Ratio between the most and least stretched triangles (world area per UV area); 1 = uniform texel density. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	float DensitySpread = 0.f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	TArray<FString> Problems;
+};
+
+/** Wall-clock time spent in one phase of a run. */
+USTRUCT(BlueprintType)
+struct GRUNGIFY_API FGrungifyPhaseTiming
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString Phase;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	float Seconds = 0.f;
+
+	/** Items processed (floor cells, meshes, writes...). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	int32 Items = 0;
+};
+
 /** What happened to one component in a run. */
 USTRUCT(BlueprintType)
 struct GRUNGIFY_API FGrungifyComponentReport
@@ -314,6 +495,17 @@ struct GRUNGIFY_API FGrungifyComponentReport
 	/** One line per material slot: index, material, surface, rule, flags. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	TArray<FString> Slots;
+
+	/** Structured per-slot decisions: why each slot was included or excluded, and how it was classified. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	TArray<FGrungifySlotReport> SlotDetails;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FGrungifyUVReport MaskUV;
+
+	/** Time spent generating this mesh's masks. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	float Seconds = 0.f;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	int32 Vertices = 0;
@@ -372,6 +564,21 @@ struct GRUNGIFY_API FGrungifyRunReport
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	TArray<FGrungifyComponentReport> Components;
+
+	/** Time per phase: floor traces, runoff sources, scan, generation, writes. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	TArray<FGrungifyPhaseTiming> Phases;
+
+	/** The run was cancelled; Cancelled During names the phase. No meshes were written after cancellation. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	bool bCancelled = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString CancelledDuring;
+
+	/** Preset the zone's look was loaded from, if any. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString Preset;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	TArray<FString> Warnings;

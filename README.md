@@ -13,7 +13,7 @@ Each material slot is classified as **stone**, **metal** or **trim**, so the wea
 
 Everything is driven by a **Seed**, so the same seed and settings always produce the same result.
 
-> **Status:** v0.2.1 targets UE 5.8. This revision fixes build compatibility, state restoration, overlap ownership and material activation. Native verification results are recorded below; visual quality still needs review on the intended meshes and lighting.
+> **Status:** v0.3.0 targets UE 5.8. v0.2.x was natively verified (results below). v0.3.0 adds generation progress, phase timings and cancellation; saved presets and a palette; mask-UV validation; and per-slot decision reports. These v0.3.0 additions have not been compiled or run yet, and visual quality still needs review on the intended meshes and lighting.
 
 ---
 
@@ -73,6 +73,27 @@ You don't need materials hooked up to start: set **Preview Display** to *All Mas
 
 Apply and Clear are single undo steps (Ctrl+Z). **New Seed** rolls a new random seed; type a seed in by hand to get back a previous look. **Dry Run** generates and reports without touching anything.
 
+### Progress and cancelling
+
+Any Dry Run, Preview or Apply that takes longer than about 0.3 s opens a progress dialog with a **Cancel** button. The dialog names the current phase and, during generation, each mesh in turn (`Actor / Component (3 of 40)`).
+
+Generation runs in four phases: floor traces, runoff sources, scan, and mask generation. Cancel is checked between phases, every row of floor-trace cells, and every LOD and every 32 texture rows inside each mesh. Nothing is written until generation has finished. So Cancel never leaves a half-weathered level:
+
+- **Preview:** nothing new is written; the previous preview was already removed before generation started.
+- **Apply:** no mesh is weathered and already-applied meshes are unchanged; an active preview is removed.
+- **Dry Run:** nothing changes.
+
+The final write phase is short and can't be cancelled, so its dialog has no Cancel button. Every run records how long each phase took, and how many items it handled, in **Last Report → Phases**; the zone's Status line shows them too.
+
+### Presets and palette
+
+- **Palette** (on the zone) sets the material look: dust, runoff and trim-chip colours, overall and per-channel strength, and relief. Only the fields you tick are written; everything else keeps inheriting from the mesh's own material instance. The palette is written onto the zone's own material instances on every Preview and Apply, so it survives regeneration, re-seeding, Clear → Apply and plugin-content rebuilds.
+- **Material Profiles** (under *Surfaces*) are named wear profiles such as *Ceramic*, *Steel* or *Bronze*. A slot rule uses one by setting **Profile Name**.
+- **Presets** (`Grungify Preset` data assets) store a whole look: layer settings, the Stone/Metal/Trim profiles, Material Profiles, the palette and, optionally, the seed. Scene-specific settings stay on the zone: wear direction, leaks, actor lists, slot rules and filtering.
+  - **Save To Preset** writes the zone's look into the assigned preset. If none is assigned, it creates `GP_<ZoneName>` in **Preset Folder** (default `/Game/Grungify/Presets`) and assigns it.
+  - Assigning a preset, or pressing **Load Preset**, copies it into the zone as one undo step and refreshes the preview.
+  - Presets live in your project's content, never in the plugin's generated content, so Update/Rebuild Plugin Content never touches them. They're ordinary assets, so you can share them between zones and levels and diff them in source control.
+
 A preview is never saved. Saving the level, deleting the zone, or unloading it (level unload or a World Partition cell streaming out) discards the preview and puts the meshes back. Delete is undoable, and undo restores the preview too. Autosaves keep the preview, since they're recovery copies and the zone's records are saved with them. Applied weathering stays on the meshes when the zone is deleted.
 
 ### Where the masks go
@@ -83,7 +104,20 @@ A preview is never saved. Saving the level, deleting the zone, or unloading it (
 | **Texture** | A per-instance mask texture baked in the mask UV channel (Project Settings, default UV 1), bound through a material instance on each slot. Texel size is physical (*Mask Texel Size*, default 4 cm). | Nanite meshes, and sparse geometry such as one-quad walls. Edge wear is computed from the distance to creased edges (*Edge Wear Width*), so it stays crisp regardless of vertex count. |
 | **Auto** (default) | Texture for Nanite or sparse meshes that have the mask UV channel, vertex colours otherwise. | |
 
-The mask UV channel must be non-overlapping, which lightmap UVs usually are. Meshes without that channel fall back to vertex colours, and the report says so. For Nanite meshes the texture is baked from the fallback mesh, which shares the UV layout.
+The mask UV channel must be non-overlapping, which lightmap UVs usually are. For Nanite meshes the texture is baked from the fallback mesh, which shares the UV layout.
+
+**UV validation.** Whenever a texture is a candidate for a mesh, its mask UV channel is checked first. The result goes into the report's **Mask UV** entry for that mesh:
+
+| Check | Fails at | Warns at |
+|---|---|---|
+| Channel present | missing | |
+| Overlapping islands (texels claimed by two triangles, on a 256² raster; shared edges don't count) | > 5% | > 0.5% |
+| UV area outside 0..1 | > 2% | any |
+| Zero-area UV triangles | | > 1% |
+| Texel-density spread (world area per UV area, most vs least stretched triangle) | | > 8× |
+| Coverage of the 0..1 square | none | < 20% |
+
+With **Auto** output, a mesh whose UVs fail falls back to vertex colours and the report says why. With **Texture** output the bake still runs, since it was asked for, but the report notes the failure.
 
 The mask texture and material instances live inside the component, so they're saved with the actor and removed by Clear. Both output modes create owned material instances only on admitted slots; excluded slots retain their materials and inactive shading.
 
@@ -104,15 +138,32 @@ Add entries to **Leaks** and drag their diamond widgets to the actual leak point
 
 ### Reports
 
-Every Dry Run, Preview and Apply fills **Last Report** on the zone. It's also readable from Blueprint or Python via `GetLastReport`, and written to `Saved/Grungify/Reports/<Zone>_<Operation>.json`. Per mesh it lists:
+Every Dry Run, Preview and Apply fills **Last Report** on the zone. It's also readable from Blueprint or Python via `GetLastReport`, and written to `Saved/Grungify/Reports/<Zone>_<Operation>.json`.
 
-- the result (vertex, texture or skipped) and why
-- each slot's material, surface, matched rule and flags
-- vertex count and texture size
+The run as a whole records:
+
+- phase timings
+- whether it was cancelled, and during which phase
+- the preset in use
+- warnings
+
+Each mesh records:
+
+- the result (vertex, texture or skipped) and why, including meshes and whole actors inside the zone that a setting or tag filtered out
+- vertex count, texture size and generation time
 - the mean and max of each mask
 - whether the mesh is Nanite
 - custom data conflicts
 - the previous owner
+- **Mask UV**: the validation above
+- **Slot Details**: one entry per material slot, covering:
+  - **Included** and the **Reason**, e.g. *"excluded by rule 'Deck' (Exclude is on; matched by slot name 'Deck_Planks' matches '\*Deck\*')"*, *"included; no slot rule matched"*, or *"excluded: rule 'Rail' has a gate texture that couldn't be read, so no wear is allowed (fail-safe)"*
+  - the **Rule** that matched and what matched it
+  - the **Surface** and its **Surface Source**: zone override, rule, component or actor tag, physical material, the keyword and which name it was found in, or fallback
+  - the **Profile** used: surface profile, the rule's own profile or a named Material Profile
+  - **Rail** and why
+  - active **Gates**
+  - per-slot **Warnings**: a gate UV channel the mesh doesn't have, a Profile Name that doesn't exist, or a slot with no material
 
 *Tools → Grungify* also has **Preview / Apply / Clear / Cancel All** for every zone in the level.
 
@@ -200,6 +251,15 @@ These cases should be checked in-editor on a test level, never on production roo
 7. **Inactive path:** untouched and cleared meshes using the function look identical to the same material without it.
 8. **Nanite / sparse:** on a Nanite-enabled mesh and a one-quad wall with lightmap UVs, Auto produces `texture` in the report, and the mask debug display shows crisp edge wear and streaks.
 9. **Targeting:** check a deck-exclusion rule, a gate texture, and a leak placed with the widget.
+10. **Cancel (v0.3.0):** on a zone large enough that the dialog appears, cancel during floor traces and again during mask generation, for both Preview and Apply. Afterwards no mesh should carry new masks, applied meshes should be unchanged, and Last Report should show `bCancelled` with the phase. Undo after a cancelled Apply should bring back only the removed preview.
+11. **Presets (v0.3.0):**
+    - Save To Preset with no preset assigned creates `GP_<Zone>` under `/Game/Grungify/Presets` and assigns it.
+    - Changing a value and pressing Load Preset brings the saved value back (one undo step).
+    - A palette override, such as dust colour, shows on the owned material instances after Preview, Apply, Clear → Apply, and Rebuild Plugin Content.
+12. **UV and slot reports (v0.3.0):**
+    - A mesh with stacked UV1 islands shows Mask UV `failed` with an overlap percentage, and Auto output falls back to vertex colours.
+    - Slot Details explain an excluded deck slot, a keyword-classified slot and a fallback slot.
+    - Run `Automation RunTests Grungify.Generation`, which includes the new `MaskUVValidation` and `TextureBakeCancellation` tests.
 
 ## Layout
 

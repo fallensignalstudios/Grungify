@@ -12,13 +12,18 @@ class UPrimitiveComponent;
 class UStaticMeshComponent;
 class UTexture2D;
 class UWorld;
+struct FStaticMeshLODResources;
 
 /** Floor heights sampled on a grid over the zone. Each cell can hold several floors (storeys, stairs). */
 class FGrungifyFloorField
 {
 public:
 	void BuildFlat(double InFloorZ);
-	void BuildTraced(UWorld* World, const FBox& InBounds, double Spacing, const AActor* IgnoreActor);
+	/** Returns false if ShouldCancel asked to stop (the field is then flat at the zone bottom). */
+	bool BuildTraced(UWorld* World, const FBox& InBounds, double Spacing, const AActor* IgnoreActor,
+		const TFunction<bool()>& ShouldCancel = TFunction<bool()>());
+
+	int32 NumCells() const { return NumX * NumY; }
 
 	/** Highest floor at or just below P. */
 	double FloorBelow(const FVector& P) const;
@@ -88,6 +93,11 @@ struct FGrungifyGenerationParams
 	int32 MaskUVChannel = 1;
 
 	const FGrungifyFloorField* Floor = nullptr;
+
+	/** Polled on the game thread between work batches. Returning true stops generation of the current mesh. */
+	TFunction<bool()> ShouldCancel;
+
+	bool CancelRequested() const { return ShouldCancel && ShouldCancel(); }
 	TArray<FGrungifyRunoffSource> Sources;
 };
 
@@ -124,6 +134,12 @@ struct FGrungifyComponentResult
 
 	EGrungifySurfaceType DominantSurface = EGrungifySurfaceType::Stone;
 	bool bNanite = false;
+
+	/** Generation stopped because ShouldCancel returned true; the result must not be written. */
+	bool bCancelled = false;
+
+	/** Mask UV channel checks (texture output candidates). */
+	FGrungifyUVReport MaskUV;
 	int32 Vertices = 0;
 	FLinearColor MeanMasks = FLinearColor(0.f, 0.f, 0.f, 0.f);
 	FLinearColor MaxMasks = FLinearColor(0.f, 0.f, 0.f, 0.f);
@@ -145,16 +161,23 @@ namespace Grungify
 	/** Splits "SM_HVACVent_02" into {"sm", "hvac", "vent", "02"}. */
 	void TokenizeName(const FString& Name, TArray<FString>& OutTokens);
 	/** True if any token starts with any keyword (so "railing" matches "rail" but "event" does not match "vent"). */
-	bool NameMatches(const FString& Name, const TArray<FString>& Keywords);
+	bool NameMatches(const FString& Name, const TArray<FString>& Keywords, FString* OutKeyword = nullptr);
 
-	EGrungifySurfaceType ClassifySlot(const UStaticMeshComponent* Component, int32 MaterialIndex, EGrungifySurfaceType Override);
-	bool IsRail(const UStaticMeshComponent* Component);
+	/** OutSource explains the decision (tag, physical material, keyword and where it was found, fallback...). */
+	EGrungifySurfaceType ClassifySlot(const UStaticMeshComponent* Component, int32 MaterialIndex, EGrungifySurfaceType Override, FString* OutSource = nullptr);
+	bool IsRail(const UStaticMeshComponent* Component, FString* OutSource = nullptr);
 	/** Pass either an actor or a component. */
 	bool IsVent(const AActor* Actor, const UPrimitiveComponent* Component);
 	bool HasIgnoreTag(const AActor* Actor, const UActorComponent* Component);
 
 	/** True if the rule targets this slot. */
-	bool RuleMatchesSlot(const FGrungifySlotRule& Rule, const UStaticMeshComponent* Component, int32 MaterialIndex);
+	bool RuleMatchesSlot(const FGrungifySlotRule& Rule, const UStaticMeshComponent* Component, int32 MaterialIndex, FString* OutWhy = nullptr);
+
+	/**
+	 * Checks the mask UV channel of a mesh LOD: presence, 0..1 range, overlapping islands, zero-area triangles,
+	 * coverage and texel-density spread. Overlap is measured on a coarse raster, independent of the bake.
+	 */
+	FGrungifyUVReport ValidateMaskUVs(const FStaticMeshLODResources& LOD, const FTransform& Transform, int32 Channel);
 
 	bool GenerateComponent(UStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult);
 
@@ -172,7 +195,8 @@ namespace Grungify
 	UTexture2D* CreateMaskTexture(UStaticMeshComponent* Component, int32 Size, const TArray<FColor>& Pixels);
 	/** Owns only admitted slots; Texture is null for vertex masks. Excluded material identities are retained. */
 	bool BindOwnedMaterials(UStaticMeshComponent* Component, UTexture2D* Texture,
-		const TArray<EGrungifySurfaceType>& MaterialSurfaces, UMaterialInterface* ParentOverride);
+		const TArray<EGrungifySurfaceType>& MaterialSurfaces, UMaterialInterface* ParentOverride,
+		const FGrungifyPalette* Palette = nullptr);
 }
 
 #endif // WITH_EDITOR

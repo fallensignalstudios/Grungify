@@ -382,8 +382,37 @@ namespace Grungify
 		return Texture;
 	}
 
+	/** Writes only the ticked palette fields, so everything else keeps inheriting from the mesh's material. */
+	static void ApplyPalette(UMaterialInstanceConstant* Instance, const FGrungifyPalette& Palette)
+	{
+		auto Vector = [Instance](bool bOverride, const TCHAR* Name, const FLinearColor& Value)
+		{
+			if (bOverride)
+			{
+				Instance->SetVectorParameterValueEditorOnly(FMaterialParameterInfo(Name), Value);
+			}
+		};
+		auto Scalar = [Instance](bool bOverride, const TCHAR* Name, float Value)
+		{
+			if (bOverride)
+			{
+				Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(Name), Value);
+			}
+		};
+		Vector(Palette.bOverrideDustColor, TEXT("Grungify Dust Color"), Palette.DustColor);
+		Vector(Palette.bOverrideRunoffColor, TEXT("Grungify Runoff Color"), Palette.RunoffColor);
+		Vector(Palette.bOverrideTrimChipColor, TEXT("Grungify Trim Chip Color"), Palette.TrimChipColor);
+		Scalar(Palette.bOverrideStrength, TEXT("Grungify Strength"), Palette.Strength);
+		Scalar(Palette.bOverrideChipStrength, TEXT("Grungify Chip Strength"), Palette.ChipStrength);
+		Scalar(Palette.bOverrideDustStrength, TEXT("Grungify Dust Strength"), Palette.DustStrength);
+		Scalar(Palette.bOverrideRunoffStrength, TEXT("Grungify Runoff Strength"), Palette.RunoffStrength);
+		Scalar(Palette.bOverrideHandlingStrength, TEXT("Grungify Handling Strength"), Palette.HandlingStrength);
+		Scalar(Palette.bOverrideReliefStrength, TEXT("Grungify Relief Strength"), Palette.ReliefStrength);
+	}
+
 	bool BindOwnedMaterials(UStaticMeshComponent* Component, UTexture2D* Texture,
-		const TArray<EGrungifySurfaceType>& MaterialSurfaces, UMaterialInterface* ParentOverride)
+		const TArray<EGrungifySurfaceType>& MaterialSurfaces, UMaterialInterface* ParentOverride,
+		const FGrungifyPalette* Palette)
 	{
 		if (MaterialSurfaces.Num() != Component->GetNumMaterials())
 		{
@@ -418,6 +447,10 @@ namespace Grungify
 			}
 			Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(ActiveParameterName()), 1.f);
 			Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(SurfaceOverrideParameterName()), float(int32(MaterialSurfaces[Slot]) - 1));
+			if (Palette)
+			{
+				ApplyPalette(Instance, *Palette);
+			}
 			Instance->PostEditChange();
 			Component->SetMaterial(Slot, Instance);
 		}

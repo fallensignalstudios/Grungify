@@ -128,7 +128,7 @@ namespace Grungify
 		Flush();
 	}
 
-	bool NameMatches(const FString& Name, const TArray<FString>& Keywords)
+	bool NameMatches(const FString& Name, const TArray<FString>& Keywords, FString* OutKeyword)
 	{
 		if (Name.IsEmpty() || Keywords.Num() == 0)
 		{
@@ -143,6 +143,10 @@ namespace Grungify
 			{
 				if (!Keyword.IsEmpty() && Token.StartsWith(Keyword, ESearchCase::IgnoreCase))
 				{
+					if (OutKeyword)
+					{
+						*OutKeyword = Keyword;
+					}
 					return true;
 				}
 			}
@@ -150,62 +154,88 @@ namespace Grungify
 		return false;
 	}
 
-	static EGrungifySurfaceType SurfaceFromTags(const TArray<FName>& Tags, const UGrungifySettings* Settings)
+	static EGrungifySurfaceType SurfaceFromTags(const TArray<FName>& Tags, const UGrungifySettings* Settings, FName* OutTag = nullptr)
 	{
 		for (const FName& Tag : Tags)
 		{
+			EGrungifySurfaceType Found = EGrungifySurfaceType::Auto;
 			if (Tag == Settings->TrimTag)
 			{
-				return EGrungifySurfaceType::Trim;
+				Found = EGrungifySurfaceType::Trim;
 			}
-			if (Tag == Settings->MetalTag)
+			else if (Tag == Settings->MetalTag)
 			{
-				return EGrungifySurfaceType::Metal;
+				Found = EGrungifySurfaceType::Metal;
 			}
-			if (Tag == Settings->StoneTag)
+			else if (Tag == Settings->StoneTag)
 			{
-				return EGrungifySurfaceType::Stone;
+				Found = EGrungifySurfaceType::Stone;
+			}
+			if (Found != EGrungifySurfaceType::Auto)
+			{
+				if (OutTag)
+				{
+					*OutTag = Tag;
+				}
+				return Found;
 			}
 		}
 		return EGrungifySurfaceType::Auto;
 	}
 
-	static EGrungifySurfaceType SurfaceFromName(const FString& Name, const UGrungifySettings* Settings)
+	static EGrungifySurfaceType SurfaceFromName(const FString& Name, const UGrungifySettings* Settings, FString* OutKeyword = nullptr)
 	{
-		if (NameMatches(Name, Settings->TrimKeywords))
+		if (NameMatches(Name, Settings->TrimKeywords, OutKeyword))
 		{
 			return EGrungifySurfaceType::Trim;
 		}
-		if (NameMatches(Name, Settings->MetalKeywords))
+		if (NameMatches(Name, Settings->MetalKeywords, OutKeyword))
 		{
 			return EGrungifySurfaceType::Metal;
 		}
-		if (NameMatches(Name, Settings->StoneKeywords))
+		if (NameMatches(Name, Settings->StoneKeywords, OutKeyword))
 		{
 			return EGrungifySurfaceType::Stone;
 		}
 		return EGrungifySurfaceType::Auto;
 	}
 
-	EGrungifySurfaceType ClassifySlot(const UStaticMeshComponent* Component, int32 MaterialIndex, EGrungifySurfaceType Override)
+	EGrungifySurfaceType ClassifySlot(const UStaticMeshComponent* Component, int32 MaterialIndex, EGrungifySurfaceType Override, FString* OutSource)
 	{
+		auto Explain = [OutSource](const FString& Why)
+		{
+			if (OutSource)
+			{
+				*OutSource = Why;
+			}
+		};
+
 		if (Override != EGrungifySurfaceType::Auto)
 		{
+			Explain(TEXT("zone Surface Type override"));
 			return Override;
 		}
 
 		const UGrungifySettings* Settings = UGrungifySettings::Get();
 		const AActor* Owner = Component->GetOwner();
+		FName Tag;
+		FString Keyword;
 
 		// 1. Explicit tags win.
-		EGrungifySurfaceType Result = SurfaceFromTags(Component->ComponentTags, Settings);
-		if (Result == EGrungifySurfaceType::Auto && Owner)
-		{
-			Result = SurfaceFromTags(Owner->Tags, Settings);
-		}
+		EGrungifySurfaceType Result = SurfaceFromTags(Component->ComponentTags, Settings, &Tag);
 		if (Result != EGrungifySurfaceType::Auto)
 		{
+			Explain(FString::Printf(TEXT("component tag '%s'"), *Tag.ToString()));
 			return Result;
+		}
+		if (Owner)
+		{
+			Result = SurfaceFromTags(Owner->Tags, Settings, &Tag);
+			if (Result != EGrungifySurfaceType::Auto)
+			{
+				Explain(FString::Printf(TEXT("actor tag '%s'"), *Tag.ToString()));
+				return Result;
+			}
 		}
 
 		// 2. Physical material, then material names up the instance chain.
@@ -217,6 +247,7 @@ namespace Grungify
 				{
 					if (*Mapped != EGrungifySurfaceType::Auto)
 					{
+						Explain(FString::Printf(TEXT("physical material %s (surface type %d) in Physical Surface Map"), *PhysMat->GetName(), int32(PhysMat->SurfaceType.GetValue())));
 						return *Mapped;
 					}
 				}
@@ -224,9 +255,10 @@ namespace Grungify
 
 			for (const UMaterialInterface* It = Material; It; )
 			{
-				Result = SurfaceFromName(It->GetName(), Settings);
+				Result = SurfaceFromName(It->GetName(), Settings, &Keyword);
 				if (Result != EGrungifySurfaceType::Auto)
 				{
+					Explain(FString::Printf(TEXT("keyword '%s' in material %s%s"), *Keyword, *It->GetName(), It == Material ? TEXT("") : TEXT(" (parent)")));
 					return Result;
 				}
 				const UMaterialInstance* Instance = Cast<UMaterialInstance>(It);
@@ -240,49 +272,71 @@ namespace Grungify
 			const TArray<FStaticMaterial>& StaticMaterials = Mesh->GetStaticMaterials();
 			if (StaticMaterials.IsValidIndex(MaterialIndex))
 			{
-				Result = SurfaceFromName(StaticMaterials[MaterialIndex].MaterialSlotName.ToString(), Settings);
+				const FString SlotName = StaticMaterials[MaterialIndex].MaterialSlotName.ToString();
+				Result = SurfaceFromName(SlotName, Settings, &Keyword);
 				if (Result != EGrungifySurfaceType::Auto)
 				{
+					Explain(FString::Printf(TEXT("keyword '%s' in slot name %s"), *Keyword, *SlotName));
 					return Result;
 				}
 			}
 
-			Result = SurfaceFromName(Mesh->GetName(), Settings);
+			Result = SurfaceFromName(Mesh->GetName(), Settings, &Keyword);
 			if (Result != EGrungifySurfaceType::Auto)
 			{
+				Explain(FString::Printf(TEXT("keyword '%s' in mesh %s"), *Keyword, *Mesh->GetName()));
 				return Result;
 			}
 		}
 
 		if (Owner)
 		{
-			Result = SurfaceFromName(Owner->GetActorLabel(), Settings);
+			Result = SurfaceFromName(Owner->GetActorLabel(), Settings, &Keyword);
 			if (Result != EGrungifySurfaceType::Auto)
 			{
+				Explain(FString::Printf(TEXT("keyword '%s' in actor label %s"), *Keyword, *Owner->GetActorLabel()));
 				return Result;
 			}
 		}
 
+		Explain(TEXT("no tag, physical material or keyword matched; Fallback Surface Type"));
 		return Settings->FallbackSurfaceType == EGrungifySurfaceType::Auto ? EGrungifySurfaceType::Stone : Settings->FallbackSurfaceType;
 	}
 
-	bool IsRail(const UStaticMeshComponent* Component)
+	bool IsRail(const UStaticMeshComponent* Component, FString* OutSource)
 	{
 		const UGrungifySettings* Settings = UGrungifySettings::Get();
 		const AActor* Owner = Component->GetOwner();
-
-		if (Component->ComponentHasTag(Settings->RailTag) || (Owner && Owner->ActorHasTag(Settings->RailTag)))
+		FString Keyword;
+		auto Found = [OutSource](const FString& Why)
 		{
+			if (OutSource)
+			{
+				*OutSource = Why;
+			}
 			return true;
+		};
+
+		if (Component->ComponentHasTag(Settings->RailTag))
+		{
+			return Found(FString::Printf(TEXT("component tag '%s'"), *Settings->RailTag.ToString()));
+		}
+		if (Owner && Owner->ActorHasTag(Settings->RailTag))
+		{
+			return Found(FString::Printf(TEXT("actor tag '%s'"), *Settings->RailTag.ToString()));
 		}
 		if (const UStaticMesh* Mesh = Component->GetStaticMesh())
 		{
-			if (NameMatches(Mesh->GetName(), Settings->RailKeywords))
+			if (NameMatches(Mesh->GetName(), Settings->RailKeywords, &Keyword))
 			{
-				return true;
+				return Found(FString::Printf(TEXT("keyword '%s' in mesh %s"), *Keyword, *Mesh->GetName()));
 			}
 		}
-		return Owner && NameMatches(Owner->GetActorLabel(), Settings->RailKeywords);
+		if (Owner && NameMatches(Owner->GetActorLabel(), Settings->RailKeywords, &Keyword))
+		{
+			return Found(FString::Printf(TEXT("keyword '%s' in actor label %s"), *Keyword, *Owner->GetActorLabel()));
+		}
+		return false;
 	}
 
 	bool IsVent(const AActor* Actor, const UPrimitiveComponent* Component)
@@ -325,12 +379,12 @@ void FGrungifyFloorField::BuildFlat(double InFloorZ)
 	Heights.Reset();
 }
 
-void FGrungifyFloorField::BuildTraced(UWorld* World, const FBox& InBounds, double Spacing, const AActor* IgnoreActor)
+bool FGrungifyFloorField::BuildTraced(UWorld* World, const FBox& InBounds, double Spacing, const AActor* IgnoreActor, const TFunction<bool()>& ShouldCancel)
 {
 	BuildFlat(InBounds.Min.Z);
 	if (!World || !InBounds.IsValid)
 	{
-		return;
+		return true;
 	}
 
 	const UGrungifySettings* Settings = UGrungifySettings::Get();
@@ -381,6 +435,12 @@ void FGrungifyFloorField::BuildTraced(UWorld* World, const FBox& InBounds, doubl
 
 	for (int32 Y = 0; Y < NumY; ++Y)
 	{
+		// One poll per row of cells keeps the dialog responsive without slowing the traces.
+		if (ShouldCancel && ShouldCancel())
+		{
+			BuildFlat(InBounds.Min.Z);
+			return false;
+		}
 		for (int32 X = 0; X < NumX; ++X)
 		{
 			TArray<double, TInlineAllocator<4>>& Cell = Heights[Y * NumX + X];
@@ -409,6 +469,7 @@ void FGrungifyFloorField::BuildTraced(UWorld* World, const FBox& InBounds, doubl
 			Cell.Sort([](double A, double B) { return A > B; });
 		}
 	}
+	return true;
 }
 
 double FGrungifyFloorField::FloorBelow(const FVector& P) const
@@ -435,7 +496,7 @@ double FGrungifyFloorField::FloorBelow(const FVector& P) const
 
 namespace Grungify
 {
-	bool RuleMatchesSlot(const FGrungifySlotRule& Rule, const UStaticMeshComponent* Component, int32 MaterialIndex)
+	bool RuleMatchesSlot(const FGrungifySlotRule& Rule, const UStaticMeshComponent* Component, int32 MaterialIndex, FString* OutWhy)
 	{
 		const bool bHasActor = !Rule.Actor.IsNull();
 		const bool bHasPattern = !Rule.NamePattern.IsEmpty();
@@ -445,10 +506,15 @@ namespace Grungify
 			return false;
 		}
 
+		TArray<FString> Why;
 		const AActor* Owner = Component->GetOwner();
-		if (bHasActor && Rule.Actor.Get() != Owner)
+		if (bHasActor)
 		{
-			return false;
+			if (Rule.Actor.Get() != Owner)
+			{
+				return false;
+			}
+			Why.Add(FString::Printf(TEXT("actor %s"), Owner ? *Owner->GetActorLabel() : TEXT("?")));
 		}
 
 		const UMaterialInterface* SlotMaterial = Component->GetMaterial(MaterialIndex);
@@ -456,50 +522,62 @@ namespace Grungify
 		if (bHasMaterial)
 		{
 			const UMaterialInterface* Wanted = Rule.Material.Get();
-			bool bFound = false;
-			for (const UMaterialInterface* It = SlotMaterial; It && !bFound; )
+			const UMaterialInterface* Matched = nullptr;
+			for (const UMaterialInterface* It = SlotMaterial; It && !Matched; )
 			{
-				bFound = Wanted ? It == Wanted : It->GetPathName() == Rule.Material.ToSoftObjectPath().ToString();
+				if (Wanted ? It == Wanted : It->GetPathName() == Rule.Material.ToSoftObjectPath().ToString())
+				{
+					Matched = It;
+				}
 				const UMaterialInstance* Instance = Cast<UMaterialInstance>(It);
 				It = Instance ? Instance->Parent.Get() : nullptr;
 			}
-			if (!bFound)
+			if (!Matched)
 			{
 				return false;
 			}
+			Why.Add(FString::Printf(TEXT("material %s%s"), *Matched->GetName(), Matched == SlotMaterial ? TEXT("") : TEXT(" (parent)")));
 		}
 
 		if (bHasPattern)
 		{
-			TArray<FString> Names;
+			TArray<TPair<const TCHAR*, FString>> Names;
 			if (const UStaticMesh* Mesh = Component->GetStaticMesh())
 			{
 				const TArray<FStaticMaterial>& StaticMaterials = Mesh->GetStaticMaterials();
 				if (StaticMaterials.IsValidIndex(MaterialIndex))
 				{
-					Names.Add(StaticMaterials[MaterialIndex].MaterialSlotName.ToString());
+					Names.Emplace(TEXT("slot name"), StaticMaterials[MaterialIndex].MaterialSlotName.ToString());
 				}
-				Names.Add(Mesh->GetName());
+				Names.Emplace(TEXT("mesh"), Mesh->GetName());
 			}
 			for (const UMaterialInterface* It = SlotMaterial; It; )
 			{
-				Names.Add(It->GetName());
+				Names.Emplace(It == SlotMaterial ? TEXT("material") : TEXT("parent material"), It->GetName());
 				const UMaterialInstance* Instance = Cast<UMaterialInstance>(It);
 				It = Instance ? Instance->Parent.Get() : nullptr;
 			}
-			Names.Add(Component->GetName());
+			Names.Emplace(TEXT("component"), Component->GetName());
 			if (Owner)
 			{
-				Names.Add(Owner->GetActorLabel());
+				Names.Emplace(TEXT("actor label"), Owner->GetActorLabel());
 			}
 
-			const bool bAny = Names.ContainsByPredicate([&Rule](const FString& Name) { return Name.MatchesWildcard(Rule.NamePattern, ESearchCase::IgnoreCase); });
-			if (!bAny)
+			const TPair<const TCHAR*, FString>* Hit = Names.FindByPredicate([&Rule](const TPair<const TCHAR*, FString>& Name)
+			{
+				return Name.Value.MatchesWildcard(Rule.NamePattern, ESearchCase::IgnoreCase);
+			});
+			if (!Hit)
 			{
 				return false;
 			}
+			Why.Add(FString::Printf(TEXT("%s '%s' matches '%s'"), Hit->Key, *Hit->Value, *Rule.NamePattern));
 		}
 
+		if (OutWhy)
+		{
+			*OutWhy = FString::Join(Why, TEXT(", "));
+		}
 		return true;
 	}
 }

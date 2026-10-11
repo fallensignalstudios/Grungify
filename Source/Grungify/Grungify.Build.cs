@@ -27,6 +27,8 @@ public class Grungify : ModuleRules
 		{
 			// Transactions (undo/redo) for Preview / Apply / Clear.
 			PrivateDependencyModuleNames.Add("UnrealEd");
+			// Creating and saving preset assets.
+			PrivateDependencyModuleNames.Add("AssetRegistry");
 		}
 	}
 }

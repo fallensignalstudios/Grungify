@@ -6,6 +6,7 @@
 #include "GrungifyWeatheringZone.generated.h"
 
 class UArrowComponent;
+class UGrungifyPreset;
 class UGrungifyZoneComponent;
 class UStaticMeshComponent;
 struct FGrungifyComponentContext;
@@ -53,6 +54,14 @@ public:
 	/** Generate and report what would happen, without touching any mesh. See Last Report and Saved/Grungify/Reports. */
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Grungify")
 	void DryRun();
+
+	/** Copy the look (layer settings, profiles, material profiles, palette, optionally the seed) from Preset into this zone. */
+	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Grungify|Preset")
+	void LoadPreset();
+
+	/** Write this zone's look into Preset, creating a new preset asset in Preset Folder if none is assigned. */
+	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Grungify|Preset")
+	void SaveToPreset();
 
 	UFUNCTION(BlueprintPure, Category = "Grungify")
 	const FGrungifyRunReport& GetLastReport() const { return LastReport; }
@@ -215,6 +224,26 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Surfaces")
 	FGrungifySurfaceProfile TrimProfile = FGrungifySurfaceProfile(0.8f, 0.7f, 0.8f, 1.3f);
 
+	/** Named profiles slot rules can use via Profile Name (e.g. Ceramic, Steel, Bronze). Saved in presets. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Surfaces")
+	TMap<FName, FGrungifySurfaceProfile> MaterialProfiles;
+
+	// ----------------------------------------------------------------- Palette
+
+	/** Material look written onto the zone's own material instances on every Preview and Apply, so it survives regeneration. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Palette")
+	FGrungifyPalette Palette;
+
+	// ------------------------------------------------------------------ Preset
+
+	/** Assigning a preset loads it into the zone. Use Save To Preset to store changes back. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Preset")
+	TObjectPtr<UGrungifyPreset> Preset;
+
+	/** Where Save To Preset creates a new preset asset when none is assigned. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Preset", meta = (ContentDir))
+	FDirectoryPath PresetFolder;
+
 	// -------------------------------------------------------------- Filtering
 
 	/** Wear fades out over this distance inside the zone's faces. */
@@ -312,8 +341,11 @@ private:
 	bool CancelDependentPreviews();
 	void BuildParams(FGrungifyGenerationParams& OutParams) const;
 	void BuildContext(UStaticMeshComponent* Component, TMap<UTexture2D*, TUniquePtr<FGrungifyGateSampler>>& Samplers, FGrungifyComponentContext& OutContext, FGrungifyComponentReport& Report);
-	void GenerateResults(const TCHAR* Operation, TArray<FGrungifyComponentResult>& OutResults, TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers);
-	bool ShouldConsiderActor(const AActor* Actor, const FBox& ZoneBox) const;
+	/** Returns false if the user cancelled; nothing has been written at that point. Shows a progress dialog for long runs. */
+	bool GenerateResults(const TCHAR* Operation, TArray<FGrungifyComponentResult>& OutResults, TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers);
+	/** OutReason is set when an actor inside the zone is filtered out by a zone setting or tag (for the report). */
+	bool ShouldConsiderActor(const AActor* Actor, const FBox& ZoneBox, FString* OutReason = nullptr) const;
+	void CopyFromPreset(const UGrungifyPreset& Source);
 	/** Writes masks, custom data and materials only when both original CPD arrays leave our slots free. */
 	bool WriteResult(const FGrungifyComponentResult& Result, EGrungifyPreviewDisplay Display, const FGrungifyComponentRecord& OriginalState);
 	const FGrungifyComponentRecord* FindOriginalRecord(const UStaticMeshComponent* Component) const;
