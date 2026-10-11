@@ -1,9 +1,9 @@
 #include "GrungifyCommandlet.h"
 
 #include "Editor.h"
-#include "EditorLoadingAndSavingUtils.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "FileHelpers.h" // UEditorLoadingAndSavingUtils
 #include "GrungifyBlueprintLibrary.h"
 #include "GrungifyWeatheringZone.h"
 #include "HAL/FileManager.h"

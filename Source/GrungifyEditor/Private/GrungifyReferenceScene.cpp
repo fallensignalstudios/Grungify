@@ -18,7 +18,7 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
-#include "FileHelpers.h"
+#include "FileHelpers.h" // FEditorFileUtils, UEditorLoadingAndSavingUtils
 #include "GameFramework/WorldSettings.h"
 #include "GrungifySettings.h"
 #include "GrungifyTypes.h"

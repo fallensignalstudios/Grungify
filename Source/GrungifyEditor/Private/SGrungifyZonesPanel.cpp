@@ -981,7 +981,7 @@ TSharedRef<SWidget> SGrungifyZoneRow::GenerateWidgetForColumn(const FName& Colum
 			}
 			if (Zone->IsGeneratingInBackground())
 			{
-				return LOCTEXT("PreviewBackground", "background…");
+				return LOCTEXT("PreviewBackground", "background...");
 			}
 			return Zone->bPreviewActive
 				? FText::Format(LOCTEXT("PreviewYes", "yes ({0})"), Zone->GetPreviewCount())

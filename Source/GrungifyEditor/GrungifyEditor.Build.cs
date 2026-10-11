@@ -20,6 +20,8 @@ public class GrungifyEditor : ModuleRules
 			"RHI",
 			"AssetRegistry",
 			"DeveloperSettings",
+			// AScreenshotFunctionalTest for the reference scene's screenshot tests.
+			"FunctionalTesting",
 			"Grungify"
 		});
 	}

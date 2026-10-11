@@ -1322,6 +1322,57 @@ namespace Grungify
 	}
 #endif // WITH_DEV_AUTOMATION_TESTS
 
+	namespace
+	{
+		/** Area of the triangle clipped to 0..1, not the area of every triangle crossing a boundary. */
+		double TriangleUVAreaInsideUnitSquare(const FVector2D (&UV)[3])
+		{
+			TArray<FVector2D, TInlineAllocator<8>> Polygon;
+			TArray<FVector2D, TInlineAllocator<8>> Clipped;
+			for (const FVector2D& P : UV)
+			{
+				Polygon.Add(P);
+			}
+			// Sutherland-Hodgman clipping against the four sides of the unit square.
+			for (int32 Edge = 0; Edge < 4 && Polygon.Num() > 0; ++Edge)
+			{
+				const int32 Axis = Edge / 2;
+				const bool bLower = (Edge % 2) == 0;
+				const double Boundary = bLower ? 0.0 : 1.0;
+				auto Coordinate = [Axis](const FVector2D& P) { return Axis == 0 ? P.X : P.Y; };
+				auto Inside = [&](const FVector2D& P) { return bLower ? Coordinate(P) >= Boundary : Coordinate(P) <= Boundary; };
+				Clipped.Reset();
+				FVector2D Previous = Polygon.Last();
+				bool bPreviousInside = Inside(Previous);
+				for (const FVector2D& Current : Polygon)
+				{
+					const bool bCurrentInside = Inside(Current);
+					if (bPreviousInside != bCurrentInside)
+					{
+						const double T = (Boundary - Coordinate(Previous)) / (Coordinate(Current) - Coordinate(Previous));
+						FVector2D Intersection = Previous + (Current - Previous) * T;
+						if (Axis == 0) { Intersection.X = Boundary; }
+						else { Intersection.Y = Boundary; }
+						Clipped.Add(Intersection);
+					}
+					if (bCurrentInside) { Clipped.Add(Current); }
+					Previous = Current;
+					bPreviousInside = bCurrentInside;
+				}
+				Swap(Polygon, Clipped);
+			}
+			if (Polygon.Num() < 3) { return 0.0; }
+			double TwiceArea = 0.0;
+			for (int32 K = 1; K + 1 < Polygon.Num(); ++K)
+			{
+				const FVector2D A = Polygon[K] - Polygon[0];
+				const FVector2D B = Polygon[K + 1] - Polygon[0];
+				TwiceArea += A.X * B.Y - A.Y * B.X;
+			}
+			return 0.5 * FMath::Abs(TwiceArea);
+		}
+	}
+
 	FGrungifyUVReport ValidateMaskUVs(const FStaticMeshLODResources& LOD, const FTransform& Transform, int32 Channel)
 	{
 		FGrungifyUVReport Report;
@@ -1367,17 +1418,16 @@ namespace Grungify
 
 			FVector2D UV[3];
 			FVector P[3];
-			bool bOutside = false;
 			for (int32 K = 0; K < 3; ++K)
 			{
 				const FVector2f Raw = Attributes.GetVertexUV(I[K], uint32(Channel));
 				UV[K] = FVector2D(Raw.X, Raw.Y);
-				bOutside |= Raw.X < -1e-3f || Raw.Y < -1e-3f || Raw.X > 1.001f || Raw.Y > 1.001f;
 				const FVector3f L = Positions.VertexPosition(I[K]);
 				P[K] = Transform.TransformPosition(FVector(L.X, L.Y, L.Z));
 			}
 
-			const double TriUVArea = 0.5 * FMath::Abs(Cross2(UV[1] - UV[0], UV[2] - UV[0]));
+			const FVector2D A = UV[1] - UV[0], B = UV[2] - UV[0];
+			const double TriUVArea = 0.5 * FMath::Abs(A.X * B.Y - A.Y * B.X);
 			const double TriWorldArea = 0.5 * FVector::CrossProduct(P[1] - P[0], P[2] - P[0]).Size();
 			if (TriUVArea < 1e-12)
 			{
@@ -1385,7 +1435,7 @@ namespace Grungify
 				continue;
 			}
 			UVArea += TriUVArea;
-			OutsideArea += bOutside ? TriUVArea : 0.0;
+			OutsideArea += FMath::Clamp(TriUVArea - TriangleUVAreaInsideUnitSquare(UV), 0.0, TriUVArea);
 			if (TriWorldArea > 1.0) // ignore sub-cm² slivers when measuring density spread
 			{
 				const double Density = TriWorldArea / TriUVArea;
@@ -1733,6 +1783,36 @@ namespace Grungify
 			const FGrungifyUVReport Report = ValidateMaskUVs(LOD, FTransform::Identity, 1);
 			TestEqual(TEXT("Tiling UVs: verdict"), Report.Verdict, FString(TEXT("failed")));
 			TestTrue(TEXT("Tiling UVs: out of range"), Report.OutOfRange > 0.5f);
+		}
+		{
+			// A small boundary excursion affects only its thin outside strip, not both whole triangles.
+			TArray<FVector2f> UV = QuadUV;
+			for (FVector2f& T : UV) { T.X *= 1.002f; }
+			FStaticMeshLODResources LOD(false);
+			InitTestLOD(LOD, QuadPos, UV, { 0, 1, 2, 0, 2, 3 });
+			const FGrungifyUVReport Report = ValidateMaskUVs(LOD, FTransform::Identity, 1);
+			TestTrue(TEXT("Small overflow: actual outside-area fraction"), FMath::IsNearlyEqual(Report.OutOfRange, 0.002f / 1.002f, 1e-5f));
+			TestEqual(TEXT("Small overflow: warns without failing usable UVs"), Report.Verdict, FString(TEXT("warning")));
+		}
+		{
+			// A genuinely larger excursion must still fail the unchanged two-percent threshold.
+			TArray<FVector2f> UV = QuadUV;
+			for (FVector2f& T : UV) { T.X *= 1.05f; }
+			FStaticMeshLODResources LOD(false);
+			InitTestLOD(LOD, QuadPos, UV, { 0, 1, 2, 0, 2, 3 });
+			const FGrungifyUVReport Report = ValidateMaskUVs(LOD, FTransform::Identity, 1);
+			TestTrue(TEXT("Large overflow: actual outside-area fraction"), FMath::IsNearlyEqual(Report.OutOfRange, 0.05f / 1.05f, 1e-5f));
+			TestEqual(TEXT("Large overflow: fails"), Report.Verdict, FString(TEXT("failed")));
+		}
+		{
+			// Exercise all four clipping boundaries at once, including negative UV coordinates.
+			TArray<FVector2f> UV = QuadUV;
+			for (FVector2f& T : UV) { T = T * 1.004f - FVector2f(0.002f, 0.002f); }
+			FStaticMeshLODResources LOD(false);
+			InitTestLOD(LOD, QuadPos, UV, { 0, 1, 2, 0, 2, 3 });
+			const FGrungifyUVReport Report = ValidateMaskUVs(LOD, FTransform::Identity, 1);
+			TestTrue(TEXT("Four-sided overflow: actual outside-area fraction"), FMath::IsNearlyEqual(Report.OutOfRange, 1.f - 1.f / (1.004f * 1.004f), 1e-5f));
+			TestEqual(TEXT("Four-sided small overflow: warns"), Report.Verdict, FString(TEXT("warning")));
 		}
 		{
 			FStaticMeshLODResources LOD(false);

@@ -1895,6 +1895,35 @@ bool AGrungifyWeatheringZone::GenerateResults(const TCHAR* Operation, TArray<FGr
 	}
 	Job.Params.ShouldCancel = ShouldCancel;
 
+	// A later mesh can cancel the whole run before the write phase. Keep the diagnostics of the masks already
+	// generated, without reporting them as weathered in either the rows or the aggregate.
+	auto CancelDuringGeneration = [this, &Job]()
+	{
+		LastReport.bCancelled = true;
+		LastReport.CancelledDuring = TEXT("Mask generation");
+		for (FGrungifyGenerationJob::FItem& Item : Job.Items)
+		{
+			if (!Item.bGenerated || Item.bFailed || !Item.Component.IsValid())
+			{
+				continue;
+			}
+			FGrungifyComponentReport& Report = Item.Report;
+			const FString Kind = Item.Result.bInstanced ? TEXT("instanced") : Item.Result.Output == EGrungifyMaskOutput::Texture ? TEXT("texture") : TEXT("vertex");
+			Report.Result = TEXT("cancelled_before_write");
+			Report.Notes = Item.Result.Notes.TrimEnd() + FString::Printf(TEXT(" Generated %s masks were discarded before writing."), *Kind);
+			Report.Vertices = Item.Result.Vertices;
+			Report.TextureSize = Item.Result.TextureSize;
+			Report.MeanMasks = Item.Result.MeanMasks;
+			Report.MaxMasks = Item.Result.MaxMasks;
+			Report.bNanite = Item.Result.bNanite;
+			Report.MaskUV = Item.Result.MaskUV;
+			Report.Seconds = Item.Seconds;
+			Report.bFromCache = Item.bFromCache;
+			LastReport.Components.Add(MoveTemp(Report));
+		}
+		return false;
+	};
+
 	Task.EnterProgressFrame(80.f);
 	{
 		FGrungifyPhaseScope Phase(LastReport, TEXT("Mask generation"));
@@ -1907,16 +1936,12 @@ bool AGrungifyWeatheringZone::GenerateResults(const TCHAR* Operation, TArray<FGr
 				Item.bFromCache ? LOCTEXT("Cached", "  [cached]") : FText::GetEmpty()));
 			if (ShouldCancel())
 			{
-				LastReport.bCancelled = true;
-				LastReport.CancelledDuring = TEXT("Mask generation");
-				return false;
+				return CancelDuringGeneration();
 			}
 			Job.GenerateItem(Item);
 			if (Item.Result.bCancelled)
 			{
-				LastReport.bCancelled = true;
-				LastReport.CancelledDuring = TEXT("Mask generation");
-				return false;
+				return CancelDuringGeneration();
 			}
 			Phase.Items += Item.bFromCache ? 0 : 1;
 		}

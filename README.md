@@ -15,12 +15,12 @@ Each material slot is classified as **stone**, **metal** or **trim**, so the wea
 
 Everything is driven by a **Seed**, so the same seed and settings always produce the same result.
 
-> **Status:** v0.4.0 targets UE 5.8. v0.2.x was natively verified (results below). v0.3.0 added progress, cancellation, presets, a palette, mask-UV validation and per-slot reports. v0.4.0 adds:
+> **Status:** v0.4.0 targets UE 5.8. v0.3.1 was natively verified: Editor, Development and Shipping builds, and all nine native automation tests (results below). v0.4.0 adds:
 > - **Workflow:** a zones panel, wear stamps, a background generation cache, seed variants, bake-to-assets with PNG round-tripping, and a material library.
 > - **Generation:** sky exposure, traced water flow, extended layers, decal and mesh scatter, and instanced meshes.
 > - **Pipeline:** Data Layer targeting, a commandlet, a Blueprint/Python API, runtime wear, and a reference scene with screenshot and cooked-build tests.
 >
-> **Neither v0.3.0 nor v0.4.0 has been compiled or run yet.** They were written without an engine install, so expect a round of compile fixes. Visual quality still needs review on the intended meshes and lighting. See [Verification checklist](#verification-checklist).
+> **v0.4.0 has not been compiled or run yet.** It was written without an engine install, so expect a round of compile fixes. Preset round trips, public-action cancellation and final visual quality still need review on the intended meshes and lighting. See [Verification checklist](#verification-checklist).
 
 ---
 
@@ -94,6 +94,8 @@ Generation runs in these phases: floor traces, sky exposure (when enabled), scen
 - **Apply:** no mesh is weathered and already-applied meshes are unchanged; an active preview is removed.
 - **Dry Run:** nothing changes.
 
+If a later mesh cancels generation, completed CPU mask rows are marked `cancelled_before_write`; their mask and UV diagnostics remain available, while the report counts zero newly weathered meshes.
+
 The final write phase is short and can't be cancelled, so its dialog has no Cancel button. Every run records how long each phase took, and how many items it handled, in **Last Report → Phases**; the zone's Status line shows them too.
 
 ### Presets and palette
@@ -127,6 +129,8 @@ The mask UV channel must be non-overlapping, which lightmap UVs usually are. For
 | Zero-area UV triangles | | > 1% |
 | Texel-density spread (world area per UV area, most vs least stretched triangle) | | > 8× |
 | Coverage of the 0..1 square | none | < 20% |
+
+Out-of-range UV area is measured by clipping each triangle against the unit square. A triangle crossing a boundary contributes only its actual outside portion; a small atlas overflow produces a warning without falsely failing the two-percent threshold.
 
 With **Auto** output, a mesh whose UVs fail falls back to vertex colours and the report says why. With **Texture** output the bake still runs, since it was asked for, but the report notes the failure.
 
@@ -422,12 +426,13 @@ Backups made before v0.2.1 have no separate live-data snapshot. Restoring one us
 ## Native verification (UE 5.8.3, 2026-10-11)
 
 - A clean Win64 `BuildPlugin` passed for UnrealEditor Development, UnrealGame Development and UnrealGame Shipping.
+- v0.3.1 passed all nine native automation tests (eight plain successes, one expected occupied-data warning): the six original cases plus `TextureGateOutputConservation`, `MaskUVValidation` and `TextureBakeCancellation`. UV fixtures cover slight boundary overflow, genuinely excessive overflow and all four sides. The texture cancellation test exercises CPU generation cancellation; it does not establish public Preview/Apply cancellation, UI latency or the new report-row behavior.
 - All six native automation tests passed: five `Grungify.State` cases covering CPD, paint/material restoration, ownership and level removal, plus `Grungify.Content.InPlaceRegeneration`. The regeneration test rebuilds at CPD indices 0 → 12 → 0 and checks exact node counts, connections, parameter indices, compilation, saves and readiness.
 - A disposable native level produced eight reviewed 1280 × 720 captures with fixed exposure. A Nanite-enabled coffer used UV1 texture masks: Preview and Apply visibly weathered its edges/panels, while legacy modes 1/2, Cancel and Clear visually returned the baseline. Raw readable material/CPD state restored exactly; the images are not claimed to be pixel-identical. Ownership transfer, occupied saved/live CPD and five real settings-regeneration checks also passed. The editor exited normally with code 0, and all 3,545 protected production files remained unchanged.
 
 Run the tests in the isolated `HostProject` retained by `BuildPlugin -NoDeleteHostProject`, using `UnrealEditor-Cmd.exe <Package>/HostProject/HostProject.uproject -unattended -RenderOffscreen -ExecCmds="Automation RunTests Grungify" -TestExit="Automation Test Queue Empty"`. The content test refuses to rebuild assets in a production project.
 
-These checks covered v0.2.x only. They do not establish final environment art quality. Full undo/redo, save/reload, World Partition cell streaming and cooked game execution still need separate verification.
+These checks covered v0.2.x and v0.3.1, not v0.4.0. They do not establish final environment art quality. Full undo/redo, save/reload, World Partition cell streaming and cooked game execution still need separate verification.
 
 ## Texture bake cost
 

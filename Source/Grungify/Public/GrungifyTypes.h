@@ -704,7 +704,7 @@ struct GRUNGIFY_API FGrungifyComponentReport
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	FString Mesh;
 
-	/** "vertex", "texture" or "skipped". */
+	/** "vertex", "texture", "skipped" or "cancelled_before_write". */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	FString Result;
 
