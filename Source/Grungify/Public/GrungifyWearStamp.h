@@ -31,8 +31,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify Stamp", meta = (ClampMin = "0", ClampMax = "1"))
 	float Falloff = 0.6f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify Stamp")
-	FGrungifyStampLayers Layers;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify Stamp", meta = (DisplayName = "Layers"))
+	FGrungifyStampLayers WearLayers;
 
 	/** Break the edge up with noise at the zone's feature scale. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify Stamp", meta = (ClampMin = "0", ClampMax = "1"))

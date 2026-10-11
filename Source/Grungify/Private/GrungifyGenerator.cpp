@@ -16,6 +16,7 @@
 #include "GrungifySettings.h"
 #include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInterface.h"
+#include "Misc/Crc.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "StaticMeshResources.h"
 
@@ -498,8 +499,13 @@ bool FGrungifyFloorField::BuildTraced(UWorld* World, const FBox& InBounds, doubl
 uint32 FGrungifyFloorField::Hash() const
 {
 	uint32 Hash = HashCombine(GetTypeHash(FlatZ), GetTypeHash(NumX * 131 + NumY));
+	Hash = HashCombine(Hash, GetTypeHash(Bounds.Min));
+	Hash = HashCombine(Hash, GetTypeHash(Bounds.Max));
+	Hash = HashCombine(Hash, GetTypeHash(CellX));
+	Hash = HashCombine(Hash, GetTypeHash(CellY));
 	for (const TArray<double, TInlineAllocator<4>>& Cell : Heights)
 	{
+		Hash = HashCombine(Hash, GetTypeHash(Cell.Num()));
 		for (const double Height : Cell)
 		{
 			Hash = HashCombine(Hash, GetTypeHash(Height));
@@ -622,6 +628,9 @@ namespace Grungify
 
 bool FGrungifyGateSampler::Init(UTexture2D* Texture, FString& OutError)
 {
+	Width = Height = BytesPerPixel = 0;
+	Pixels.Reset();
+	ContentHash = 0;
 	if (!Texture)
 	{
 		OutError = TEXT("no gate texture");
@@ -657,7 +666,50 @@ bool FGrungifyGateSampler::Init(UTexture2D* Texture, FString& OutError)
 		OutError = FString::Printf(TEXT("gate texture %s has unexpected source size"), *Texture->GetName());
 		return false;
 	}
+	ContentHash = HashCombine(HashCombine(GetTypeHash(Width), GetTypeHash(Height)), GetTypeHash(BytesPerPixel));
+	for (int64 Offset = 0; Offset < Pixels.Num();)
+	{
+		const int32 Count = int32(FMath::Min<int64>(Pixels.Num() - Offset, MAX_int32));
+		ContentHash = FCrc::MemCrc32(Pixels.GetData() + Offset, Count, ContentHash);
+		Offset += Count;
+	}
 	return true;
+}
+
+namespace Grungify
+{
+	uint32 HashSlotContext(const FGrungifyComponentContext& Context)
+	{
+		uint32 Hash = GetTypeHash(Context.Slots.Num());
+		auto Add = [&Hash](uint32 Value) { Hash = HashCombine(Hash, Value); };
+		for (const FGrungifySlotInfo& Slot : Context.Slots)
+		{
+			Add(uint32(Slot.Surface));
+			Add(uint32(Slot.bExcluded));
+			Add(uint32(Slot.bRail));
+			for (float Value : { Slot.Profile.Dust, Slot.Profile.Runoff, Slot.Profile.Handling, Slot.Profile.EdgeChips })
+			{
+				Add(GetTypeHash(Value));
+			}
+			Add(uint32(Slot.Gate != nullptr));
+			if (const FGrungifyGate* Gate = Slot.Gate)
+			{
+				Add(uint32(Gate->bUseFacingGate));
+				Add(GetTypeHash(Gate->MinUpFacing));
+				Add(GetTypeHash(Gate->MaxUpFacing));
+				Add(uint32(Gate->bUseHeightGate));
+				Add(GetTypeHash(Gate->MinHeightCm));
+				Add(GetTypeHash(Gate->MaxHeightCm));
+				Add(GetTypeHash(Gate->GateUVChannel));
+				Add(uint32(Gate->GateChannel));
+				Add(uint32(Gate->bInvertGate));
+				Add(GetTypeHash(Gate->GateTexture ? Gate->GateTexture->GetPathName() : FString()));
+			}
+			Add(uint32(Slot.GateSampler != nullptr));
+			if (Slot.GateSampler) { Add(Slot.GateSampler->Hash()); }
+		}
+		return Hash;
+	}
 }
 
 float FGrungifyGateSampler::Sample(const FVector2f& UV, EGrungifyChannel Channel) const
@@ -834,6 +886,8 @@ uint32 FGrungifySegmentField::Hash() const
 		Hash = HashCombine(Hash, GetTypeHash(Seg.B));
 		Hash = HashCombine(Hash, GetTypeHash(Seg.Radius));
 		Hash = HashCombine(Hash, GetTypeHash(Seg.Value));
+		Hash = HashCombine(Hash, GetTypeHash(Seg.AlongA));
+		Hash = HashCombine(Hash, GetTypeHash(Seg.AlongB));
 	}
 	return Hash;
 }

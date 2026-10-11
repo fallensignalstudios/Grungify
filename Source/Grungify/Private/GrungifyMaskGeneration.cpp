@@ -769,7 +769,7 @@ namespace Grungify
 		}
 
 		/** Area-uniform random points on LOD0 (deterministic per mesh and seed), evaluated with every layer. */
-		void CollectScatterSamples(const FTopology& Topo, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params,
+		void CollectScatterSamples(const FTopology& Topo, const FStaticMeshVertexBuffer& Attributes, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params,
 			FGrungifyComponentResult& Out, uint32 MeshSeed)
 		{
 			constexpr int32 MaxSamples = 4000;
@@ -817,6 +817,7 @@ namespace Grungify
 					{
 						continue;
 					}
+					S.GateUV = GateUVOf(*S.Slot, Attributes, I0) * W + GateUVOf(*S.Slot, Attributes, I1) * U + GateUVOf(*S.Slot, Attributes, I2) * V;
 
 					FGrungifyComponentResult::FScatterSample Sample;
 					Sample.Primary = EvaluatePoint(S, Params, &Sample.Extended);
@@ -1160,6 +1161,82 @@ namespace Grungify
 	}
 
 #if WITH_DEV_AUTOMATION_TESTS
+	IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGrungifyScatterGateTest, "Grungify.Generation.ScatterGateUV",
+		EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+	bool FGrungifyScatterGateTest::RunTest(const FString& Parameters)
+	{
+		FStaticMeshLODResources LOD(false);
+		FStaticMeshVertexBuffer& Attributes = LOD.VertexBuffers.StaticMeshVertexBuffer;
+		Attributes.SetUseFullPrecisionUVs(true);
+		Attributes.Init(3, 2);
+		const FVector2f UVs[] = { { 0.f, 0.f }, { 1.f, 0.f }, { 0.f, 1.f } };
+		for (uint32 Index = 0; Index < 3; ++Index)
+		{
+			Attributes.SetVertexUV(Index, 0, FVector2f::ZeroVector);
+			Attributes.SetVertexUV(Index, 1, UVs[Index]);
+		}
+		FTopology Topo;
+		Topo.Pos = { FVector::ZeroVector, FVector(400.0, 0.0, 0.0), FVector(0.0, 400.0, 0.0) };
+		Topo.Indices = { 0, 1, 2 };
+		Topo.FaceN = { FVector::UpVector };
+		Topo.TriSlot = { 0 };
+		Topo.Weld = { 0, 1, 2 };
+		Topo.Convex = { 0.f, 0.f, 0.f };
+		Topo.Concave = { 0.f, 0.f, 0.f };
+		FGrungifyFloorField Floor;
+		Floor.BuildFlat(0.0);
+		FGrungifyGenerationParams Params;
+		Params.Floor = &Floor;
+		Params.ZoneExtent = FVector(500.0, 500.0, 100.0);
+		Params.DustIntensity = 2.f;
+		// This is an upward floor face: default FloorDust=0 deliberately suppresses
+		// its dust. Admit dust explicitly so the regression tests gate registration.
+		Params.FloorDust = 1.f;
+		Params.ScatterDensity = 50.f;
+		FGrungifyComponentContext Context;
+		Context.Slots.AddDefaulted();
+		FGrungifyGate Gate;
+		Gate.GateUVChannel = 1;
+		UTexture2D* Texture = NewObject<UTexture2D>();
+		uint8 Pixels[] = { 0, 255 };
+		Texture->Source.Init(2, 1, 1, 1, TSF_G8, Pixels);
+		Gate.GateTexture = Texture;
+		FGrungifyGateSampler Sampler;
+		FString Error;
+		if (!TestTrue(TEXT("Scatter gate source readable"), Sampler.Init(Texture, Error))) { return false; }
+		Context.Slots[0].Gate = &Gate;
+		Context.Slots[0].GateSampler = &Sampler;
+		FPointSample WhitePoint;
+		WhitePoint.P = FVector(300.0, 50.0, 0.0);
+		WhitePoint.N = FVector::UpVector;
+		WhitePoint.Slot = &Context.Slots[0];
+		WhitePoint.GateUV = FVector2f(0.75f, 0.125f);
+		TestTrue(TEXT("White UV1 floor point has nonzero admitted dust before scatter"), EvaluatePoint(WhitePoint, Params).G > 0.05f);
+		FPointSample BlackPoint = WhitePoint;
+		BlackPoint.P.X = 100.0;
+		BlackPoint.GateUV.X = 0.25f;
+		TestEqual(TEXT("Black UV1 floor point suppresses all primary layers"), EvaluatePoint(BlackPoint, Params).GetMax(), 0.f);
+		FGrungifyComponentResult Permitted;
+		CollectScatterSamples(Topo, Attributes, Context, Params, Permitted, 123u);
+		AddInfo(FString::Printf(TEXT("UV1 white-half scatter samples: %d"), Permitted.ScatterSamples.Num()));
+		TestTrue(TEXT("White part of UV1 produces scatter even though UV0 and gate origin are black"), Permitted.ScatterSamples.Num() > 0);
+		for (const FGrungifyComponentResult::FScatterSample& Sample : Permitted.ScatterSamples)
+		{
+			TestTrue(TEXT("No scatter appears in the black half of the registered gate"), Sample.P.X >= 200.0);
+		}
+		Gate.bInvertGate = true;
+		FGrungifyComponentResult Inverted;
+		CollectScatterSamples(Topo, Attributes, Context, Params, Inverted, 123u);
+		AddInfo(FString::Printf(TEXT("Inverted UV1 white-half scatter samples: %d"), Inverted.ScatterSamples.Num()));
+		TestTrue(TEXT("Inverted gate produces scatter on its newly permitted half"), Inverted.ScatterSamples.Num() > 0);
+		for (const FGrungifyComponentResult::FScatterSample& Sample : Inverted.ScatterSamples)
+		{
+			TestTrue(TEXT("Inverted gate retains the same triangle UV registration"), Sample.P.X < 200.0);
+		}
+		return !HasAnyErrors();
+	}
+
 	IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGrungifyTextureGateConservationTest, "Grungify.Generation.TextureGateOutputConservation",
 		EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
@@ -1705,7 +1782,7 @@ namespace Grungify
 
 		if (Params.ScatterDensity > 0.f)
 		{
-			CollectScatterSamples(Topo0, Context, Params, OutResult, Params.Seed ^ GetTypeHash(Component->GetPathName()));
+			CollectScatterSamples(Topo0, LOD0.VertexBuffers.StaticMeshVertexBuffer, Context, Params, OutResult, Params.Seed ^ GetTypeHash(Component->GetPathName()));
 			if (OutResult.bCancelled)
 			{
 				return false;

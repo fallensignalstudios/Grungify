@@ -94,7 +94,7 @@ namespace Grungify
 	void CaptureStaticState(UStaticMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
 	void CaptureCommonState(UMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
 	void RestoreStaticState(UStaticMeshComponent* Component, const FGrungifyComponentRecord& Record, const FStaticMeshRenderData* RenderData);
-	bool RestoreRecordTail(UMeshComponent* Component, const FGrungifyComponentRecord& Record);
+	bool RestoreRecordTail(UMeshComponent* Component, UInstancedStaticMeshComponent* Instanced, const FGrungifyComponentRecord& Record);
 
 	void CaptureRecord(UMeshComponent* Component, FGrungifyComponentRecord& OutRecord)
 	{
@@ -159,6 +159,7 @@ namespace Grungify
 		if (const UInstancedStaticMeshComponent* Instanced = Cast<UInstancedStaticMeshComponent>(Component))
 		{
 			OutRecord.bHasInstanceData = true;
+			OutRecord.InstanceCount = Instanced->GetInstanceCount();
 			OutRecord.NumInstanceCustomDataFloats = Instanced->NumCustomDataFloats;
 			OutRecord.InstanceCustomData = Instanced->PerInstanceSMCustomData;
 		}
@@ -206,6 +207,24 @@ namespace Grungify
 			}
 		}
 
+		UInstancedStaticMeshComponent* Instanced = nullptr;
+		if (Record.bHasInstanceData)
+		{
+			Instanced = Cast<UInstancedStaticMeshComponent>(Component);
+			const int32 NumFloats = Record.NumInstanceCustomDataFloats;
+			// Older nonzero-stride backups encode their original count in the array length.
+			const int32 CapturedInstances = Record.InstanceCount != INDEX_NONE ? Record.InstanceCount
+				: NumFloats > 0 && Record.InstanceCustomData.Num() % NumFloats == 0
+					? Record.InstanceCustomData.Num() / NumFloats : INDEX_NONE;
+			if (!Instanced || NumFloats < 0 || CapturedInstances < 0
+				|| Instanced->GetInstanceCount() != CapturedInstances
+				|| int64(Record.InstanceCustomData.Num()) != int64(CapturedInstances) * NumFloats)
+			{
+				UE_LOG(LogGrungify, Error, TEXT("%s: instance layout changed or cannot be verified; state and original backup retained."), *Component->GetPathName());
+				return false;
+			}
+		}
+
 		if (bTransactional)
 		{
 			Component->SetFlags(RF_Transactional);
@@ -244,7 +263,7 @@ namespace Grungify
 				UE_LOG(LogGrungify, Warning, TEXT("%s: legacy backup has no live CPD snapshot; restoring live data from its original defaults."), *Component->GetPathName());
 			}
 		}
-		return RestoreRecordTail(Component, Record);
+		return RestoreRecordTail(Component, Instanced, Record);
 	}
 
 	void RestoreStaticState(UStaticMeshComponent* Component, const FGrungifyComponentRecord& Record, const FStaticMeshRenderData* RenderData)
@@ -304,26 +323,19 @@ namespace Grungify
 		}
 	}
 
-	bool RestoreRecordTail(UMeshComponent* Component, const FGrungifyComponentRecord& Record)
+	/** Instanced is the component RestoreRecord verified against the captured instance layout (null otherwise). */
+	bool RestoreRecordTail(UMeshComponent* Component, UInstancedStaticMeshComponent* Instanced, const FGrungifyComponentRecord& Record)
 	{
 		// Instanced meshes: put the per-instance custom data back exactly (count and values).
-		if (Record.bHasInstanceData)
+		if (Instanced)
 		{
-			if (UInstancedStaticMeshComponent* Instanced = Cast<UInstancedStaticMeshComponent>(Component))
+			const int32 NumFloats = Record.NumInstanceCustomDataFloats;
+			Instanced->SetNumCustomDataFloats(NumFloats);
+			if (NumFloats > 0)
 			{
-				const int32 NumFloats = Record.NumInstanceCustomDataFloats;
-				const int32 Instances = Instanced->GetInstanceCount();
-				Instanced->SetNumCustomDataFloats(NumFloats);
-				if (NumFloats > 0 && Record.InstanceCustomData.Num() == Instances * NumFloats)
+				for (int32 Index = 0; Index < Instanced->GetInstanceCount(); ++Index)
 				{
-					for (int32 Index = 0; Index < Instances; ++Index)
-					{
-						Instanced->SetCustomData(Index, TArrayView<const float>(Record.InstanceCustomData.GetData() + Index * NumFloats, NumFloats));
-					}
-				}
-				else if (NumFloats > 0)
-				{
-					UE_LOG(LogGrungify, Warning, TEXT("%s: instance count changed since the backup; per-instance custom data reset to zero."), *Component->GetPathName());
+					Instanced->SetCustomData(Index, TArrayView<const float>(Record.InstanceCustomData.GetData() + Index * NumFloats, NumFloats));
 				}
 			}
 		}

@@ -5,6 +5,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/World.h"
@@ -23,6 +24,8 @@ namespace GrungifyRuntimeWear
 	/** Zone default; used when an instance predates the texel-size parameter. */
 	constexpr float FallbackTexelSizeCm = 4.f;
 	constexpr int32 ChannelsPerMask = 4;
+	/** The generated material's unweathered default is not a baked runtime mask. */
+	const TCHAR* NoMaskTexturePath = TEXT("/Grungify/Materials/T_GrungifyNoMask.T_GrungifyNoMask");
 }
 
 UGrungifyRuntimeWearSubsystem* UGrungifyRuntimeWearSubsystem::Get(const UObject* WorldContextObject)
@@ -71,6 +74,18 @@ bool UGrungifyRuntimeWearSubsystem::TraceAndAddWear(const FVector& Location, con
 
 bool UGrungifyRuntimeWearSubsystem::AddWearAtHit(const FHitResult& Hit, EGrungifyWearLayer Layer, float RadiusCm, float Amount)
 {
+	// Canvas additive writes RGB only. AlphaHoldout erases alpha and attenuates RGB;
+	// do not create targets or replace materials for unsupported alpha/invalid layers.
+	if (!SupportsRuntimeLayer(Layer))
+	{
+		if (!bWarnedUnsupportedLayer)
+		{
+			bWarnedUnsupportedLayer = true;
+			UE_LOG(LogGrungify, Warning, TEXT("Runtime wear: unsupported layer %d is skipped. Handling and Moss need alpha-only accumulation; invalid layer values are also rejected."), int32(Layer));
+		}
+		return false;
+	}
+
 	UStaticMeshComponent* Component = Cast<UStaticMeshComponent>(Hit.GetComponent());
 	Amount = FMath::Clamp(Amount, 0.f, 1.f);
 	if (!IsValid(Component) || RadiusCm <= 0.f || Amount <= 0.f)
@@ -78,11 +93,20 @@ bool UGrungifyRuntimeWearSubsystem::AddWearAtHit(const FHitResult& Hit, EGrungif
 		return false;
 	}
 
-	// Only meshes whose owned instances read the mask texture can show painted wear.
+	// Only meshes whose active instances read the mask texture can show painted wear.
 	const UGrungifySettings* Settings = UGrungifySettings::Get();
 	const TArray<float>& CustomData = Component->GetCustomPrimitiveData().Data;
 	const int32 ModeIndex = Settings->CustomPrimitiveDataIndex + Grungify::CPD_MaskMode;
 	if (!CustomData.IsValidIndex(ModeIndex) || CustomData[ModeIndex] != Grungify::MaskModeTexture)
+	{
+		return false;
+	}
+
+	// A face must resolve to an eligible binding; excluded or unresolved faces cannot
+	// fall back to painting other slots that happen to share the same UV space.
+	int32 HitSection = INDEX_NONE;
+	const UMaterialInterface* KnownHitMaterial = Component->GetMaterialFromCollisionFaceIndex(Hit.FaceIndex, HitSection);
+	if (!KnownHitMaterial || !IsEligibleMaterial(KnownHitMaterial))
 	{
 		return false;
 	}
@@ -113,26 +137,36 @@ bool UGrungifyRuntimeWearSubsystem::AddWearAtHit(const FHitResult& Hit, EGrungif
 	const bool bExtended = LayerIndex >= GrungifyRuntimeWear::ChannelsPerMask;
 	const int32 Channel = LayerIndex % GrungifyRuntimeWear::ChannelsPerMask;
 
-	// Paint only the slot that was hit when it can be identified; otherwise every slot shares the UV space anyway.
-	int32 HitSlot = INDEX_NONE;
+	// State creation replaces bindings, so resolve the current face again and require
+	// its corresponding runtime slot. Never fall back to painting every active slot.
 	int32 SectionIndex = INDEX_NONE;
-	if (const UMaterialInterface* HitMaterial = Component->GetMaterialFromCollisionFaceIndex(Hit.FaceIndex, SectionIndex))
+	const UMaterialInterface* HitMaterial = Component->GetMaterialFromCollisionFaceIndex(Hit.FaceIndex, SectionIndex);
+	if (!HitMaterial)
 	{
-		HitSlot = State->Slots.IndexOfByPredicate([HitMaterial](const FGrungifyRuntimeWearSlot& Slot)
-		{
-			return Slot.Dynamic == HitMaterial;
-		});
+		return false;
+	}
+	const int32 HitSlot = State->Slots.IndexOfByPredicate([HitMaterial](const FGrungifyRuntimeWearSlot& Slot)
+	{
+		return Slot.Dynamic == HitMaterial;
+	});
+	if (HitSlot == INDEX_NONE)
+	{
+		return false;
 	}
 
 	TArray<int32, TInlineAllocator<4>> PaintedTargets;
 	bool bMissingExtended = false;
 	for (int32 SlotIndex = 0; SlotIndex < State->Slots.Num(); ++SlotIndex)
 	{
-		if (HitSlot != INDEX_NONE && SlotIndex != HitSlot)
+		if (SlotIndex != HitSlot)
 		{
 			continue;
 		}
 		const FGrungifyRuntimeWearSlot& Slot = State->Slots[SlotIndex];
+		if (Component->GetMaterial(Slot.MaterialIndex) != Slot.Dynamic || !IsEligibleMaterial(Slot.Dynamic))
+		{
+			continue;
+		}
 		const int32 TargetIndex = bExtended ? Slot.ExtendedTarget : Slot.MaskTarget;
 		if (TargetIndex == INDEX_NONE)
 		{
@@ -143,8 +177,10 @@ bool UGrungifyRuntimeWearSubsystem::AddWearAtHit(const FHitResult& Hit, EGrungif
 		{
 			continue;
 		}
-		PaintedTargets.Add(TargetIndex);
-		PaintBrush(State->Targets[TargetIndex].RenderTarget, UV, 2.f * RadiusCm / Slot.TexelSizeCm, Channel, Amount);
+		if (PaintBrush(State->Targets[TargetIndex].RenderTarget, UV, 2.f * RadiusCm / Slot.TexelSizeCm, Channel, Amount))
+		{
+			PaintedTargets.Add(TargetIndex);
+		}
 	}
 
 	if (bMissingExtended && PaintedTargets.Num() == 0 && !State->bWarnedNoExtended)
@@ -154,6 +190,28 @@ bool UGrungifyRuntimeWearSubsystem::AddWearAtHit(const FHitResult& Hit, EGrungif
 			*Component->GetPathName(), *UEnum::GetValueAsString(Layer));
 	}
 	return PaintedTargets.Num() > 0;
+}
+
+bool UGrungifyRuntimeWearSubsystem::SupportsRuntimeLayer(EGrungifyWearLayer Layer)
+{
+	const int32 Index = int32(Layer);
+	return Index >= 0 && Index < 2 * GrungifyRuntimeWear::ChannelsPerMask
+		&& Index % GrungifyRuntimeWear::ChannelsPerMask < 3;
+}
+
+bool UGrungifyRuntimeWearSubsystem::IsEligibleMaterial(const UMaterialInterface* Material)
+{
+	const UMaterialInstance* Instance = Cast<UMaterialInstance>(Material);
+	if (!Instance)
+	{
+		return false;
+	}
+	float Active = 0.f;
+	UTexture* Mask = nullptr;
+	return Instance->GetScalarParameterValue(FMaterialParameterInfo(Grungify::ActiveParameterName()), Active)
+		&& FMath::IsNearlyEqual(Active, 1.f)
+		&& Instance->GetTextureParameterValue(FMaterialParameterInfo(Grungify::MaskTextureParameterName()), Mask, true)
+		&& Mask != nullptr && Mask->GetPathName() != GrungifyRuntimeWear::NoMaskTexturePath;
 }
 
 int32 UGrungifyRuntimeWearSubsystem::FindStateIndex(const UStaticMeshComponent* Component) const
@@ -174,21 +232,26 @@ FGrungifyRuntimeWearState* UGrungifyRuntimeWearSubsystem::FindOrCreateState(USta
 
 	FGrungifyRuntimeWearState State;
 	State.Component = Component;
+	State.OriginalOverrideMaterials = Component->OverrideMaterials;
 	for (int32 MaterialIndex = 0; MaterialIndex < Component->GetNumMaterials(); ++MaterialIndex)
 	{
 		UMaterialInstance* Instance = Cast<UMaterialInstance>(Component->GetMaterial(MaterialIndex));
-		if (!Instance)
+		if (!IsEligibleMaterial(Instance))
 		{
 			continue;
 		}
 
 		UTexture* Mask = nullptr;
-		if (!Instance->GetTextureParameterValue(FMaterialParameterInfo(Grungify::MaskTextureParameterName()), Mask) || !Mask)
+		if (!Instance->GetTextureParameterValue(FMaterialParameterInfo(Grungify::MaskTextureParameterName()), Mask, true) || !Mask)
 		{
 			continue;
 		}
 		UTexture* Extended = nullptr;
-		Instance->GetTextureParameterValue(FMaterialParameterInfo(Grungify::ExtendedMaskTextureParameterName()), Extended);
+		Instance->GetTextureParameterValue(FMaterialParameterInfo(Grungify::ExtendedMaskTextureParameterName()), Extended, true);
+		if (Extended && Extended->GetPathName() == GrungifyRuntimeWear::NoMaskTexturePath)
+		{
+			Extended = nullptr;
+		}
 
 		float TexelSizeCm = 0.f;
 		if (!Instance->GetScalarParameterValue(FMaterialParameterInfo(Grungify::MaskTexelSizeParameterName()), TexelSizeCm) || TexelSizeCm <= 0.f)
@@ -227,6 +290,7 @@ FGrungifyRuntimeWearState* UGrungifyRuntimeWearSubsystem::FindOrCreateState(USta
 	{
 		return nullptr;
 	}
+	State.RuntimeOverrideMaterials = Component->OverrideMaterials;
 	return &States.Add_GetRef(MoveTemp(State));
 }
 
@@ -325,12 +389,16 @@ UTexture2D* UGrungifyRuntimeWearSubsystem::GetBrushTexture()
 	return BrushTexture;
 }
 
-void UGrungifyRuntimeWearSubsystem::PaintBrush(UTextureRenderTarget2D* Target, const FVector2D& UV, float DiameterTexels, int32 Channel, float Amount)
+bool UGrungifyRuntimeWearSubsystem::PaintBrush(UTextureRenderTarget2D* Target, const FVector2D& UV, float DiameterTexels, int32 Channel, float Amount)
 {
+	if (Channel < 0 || Channel > 2)
+	{
+		return false;
+	}
 	UTexture2D* Brush = GetBrushTexture();
 	if (!Target || !Brush)
 	{
-		return;
+		return false;
 	}
 
 	UCanvas* Canvas = nullptr;
@@ -342,13 +410,9 @@ void UGrungifyRuntimeWearSubsystem::PaintBrush(UTextureRenderTarget2D* Target, c
 		const FVector2D Diameter(FMath::Max(DiameterTexels, 1.f));
 		const FVector2D Position = UV * Size - Diameter * 0.5f;
 
-		// Canvas additive blending adds RGB but never accumulates destination alpha, so the alpha layers
-		// (handling, moss) use alpha holdout instead: colour is kept and alpha becomes a + s(1 - a).
-		// BLEND_AlphaHoldout is a UE5 EBlendMode; UCanvas::K2_DrawTexture maps it to SE_BLEND_AlphaHoldout
-		// (colour: Zero/One, alpha: One/InverseSourceAlpha) through FCanvas::BlendToSimpleElementBlend.
-		// Either way an 8-bit UNORM target saturates at 1.
+		// Native Canvas additive uses CW_RGB and One/One: add only the selected RGB
+		// channel, preserving alpha. Alpha-layer requests are rejected before mutation.
 		FLinearColor Color(0.f, 0.f, 0.f, 0.f);
-		EBlendMode BlendMode = BLEND_Additive;
 		switch (Channel)
 		{
 		case 0:
@@ -360,14 +424,11 @@ void UGrungifyRuntimeWearSubsystem::PaintBrush(UTextureRenderTarget2D* Target, c
 		case 2:
 			Color.B = Amount;
 			break;
-		default:
-			Color.A = Amount;
-			BlendMode = BLEND_AlphaHoldout;
-			break;
 		}
-		Canvas->K2_DrawTexture(Brush, Position, Diameter, FVector2D::ZeroVector, FVector2D::UnitVector, Color, BlendMode);
+		Canvas->K2_DrawTexture(Brush, Position, Diameter, FVector2D::ZeroVector, FVector2D::UnitVector, Color, BLEND_Additive);
 	}
 	UKismetRenderingLibrary::EndDrawCanvasToRenderTarget(this, Context);
+	return Canvas != nullptr;
 }
 
 void UGrungifyRuntimeWearSubsystem::ResetRuntimeWear(UPrimitiveComponent* Component)
@@ -398,12 +459,34 @@ void UGrungifyRuntimeWearSubsystem::RestoreState(UStaticMeshComponent* Component
 	{
 		return;
 	}
+	if (Component->OverrideMaterials == State.RuntimeOverrideMaterials)
+	{
+		// Notify renderer/physics/material caches through the public setter, then restore
+		// the raw array so inherited defaults, null holes and its length remain exact.
+		const UStaticMesh* Mesh = Component->GetStaticMesh();
+		const int32 MaterialCount = FMath::Max(Component->OverrideMaterials.Num(), State.OriginalOverrideMaterials.Num());
+		for (int32 MaterialIndex = 0; MaterialIndex < MaterialCount; ++MaterialIndex)
+		{
+			UMaterialInterface* OriginalMaterial = State.OriginalOverrideMaterials.IsValidIndex(MaterialIndex)
+				? State.OriginalOverrideMaterials[MaterialIndex].Get() : nullptr;
+			if (!OriginalMaterial && Mesh)
+			{
+				OriginalMaterial = Mesh->GetMaterial(MaterialIndex);
+			}
+			Component->SetMaterial(MaterialIndex, OriginalMaterial);
+		}
+		Component->OverrideMaterials = State.OriginalOverrideMaterials;
+		Component->MarkRenderStateDirty();
+		return;
+	}
 	for (const FGrungifyRuntimeWearSlot& Slot : State.Slots)
 	{
 		// Leave slots alone that gameplay has re-assigned since we painted them.
 		if (Component->GetMaterial(Slot.MaterialIndex) == Slot.Dynamic)
 		{
-			Component->SetMaterial(Slot.MaterialIndex, Slot.OriginalMaterial);
+			UMaterialInterface* OriginalOverride = State.OriginalOverrideMaterials.IsValidIndex(Slot.MaterialIndex)
+				? State.OriginalOverrideMaterials[Slot.MaterialIndex].Get() : nullptr;
+			Component->SetMaterial(Slot.MaterialIndex, OriginalOverride);
 		}
 	}
 }

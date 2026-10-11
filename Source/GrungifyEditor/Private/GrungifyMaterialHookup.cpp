@@ -20,9 +20,12 @@
 #include "MaterialEditingLibrary.h"
 #include "MaterialShared.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialAttributeDefinitionMap.h"
 #include "Materials/MaterialExpressionConstant.h"
 #include "Materials/MaterialExpressionConstant3Vector.h"
 #include "Materials/MaterialExpressionGetMaterialAttributes.h"
+#include "Materials/MaterialExpressionFunctionInput.h"
+#include "Materials/MaterialExpressionFunctionOutput.h"
 #include "Materials/MaterialExpressionMaterialFunctionCall.h"
 #include "Materials/MaterialExpressionSetMaterialAttributes.h"
 #include "Materials/MaterialExpressionSubstrate.h"
@@ -34,7 +37,9 @@
 #include "Misc/Paths.h"
 #include "Misc/ScopedSlowTask.h"
 #include "RHIGlobals.h"
+#include "ScopedTransaction.h"
 #include "Subsystems/AssetEditorSubsystem.h"
+#include "UObject/StrongObjectPtr.h"
 #include "Widgets/Notifications/SNotificationList.h"
 
 #define LOCTEXT_NAMESPACE "GrungifyMaterialHookup"
@@ -139,6 +144,14 @@ namespace
 		Input.MaskR = Input.MaskG = Input.MaskB = Input.MaskA = 0;
 	}
 
+	/** The current legacy adapter cannot retain dormant connections or unconnected pin metadata. */
+	template <typename TInput>
+	bool HasUnsupportedConnection(const TInput& Input)
+	{
+		return (Input.UseConstant && Input.Expression)
+			|| (!Input.Expression && (Input.OutputIndex != 0 || Input.Mask || Input.MaskR || Input.MaskG || Input.MaskB || Input.MaskA));
+	}
+
 	/**
 	 * What feeds a legacy property: its connection, or a new tagged constant holding the value the material actually
 	 * used (Use Constant, or the engine default when unconnected), so routing through the function changes nothing.
@@ -189,7 +202,7 @@ namespace
 	template <typename TInput>
 	void RestoreProperty(UMaterial* Material, TInput& Property, const FExpressionInput* Source)
 	{
-		UMaterialExpression* Feed = Source ? Source->Expression.Get() : nullptr;
+		UMaterialExpression* Feed = Source ? Source->Expression : nullptr;
 		if (IsTagged(Feed, ConstantTag))
 		{
 			Property.UseConstant = IsTagged(Feed, UsedConstantTag) ? 1 : 0;
@@ -208,11 +221,14 @@ namespace
 
 	bool CompileErrors(UMaterial* Material, FString& OutErrors)
 	{
+		// RecompileMaterial builds streaming data, which runs CollectGarbage. Retain even transient callers.
+		TStrongObjectPtr<UMaterial> KeepMaterialAlive(Material);
 		UMaterialEditingLibrary::RecompileMaterial(Material);
 		FMaterialResource* Resource = Material->GetMaterialResource(GMaxRHIShaderPlatform);
 		if (!Resource)
 		{
-			return false;
+			OutErrors = TEXT("no material resource was available to verify compilation");
+			return true;
 		}
 		Resource->FinishCompilation();
 		OutErrors = FString::Join(Resource->GetCompileErrors(), TEXT("; "));
@@ -248,9 +264,17 @@ namespace
 		const FString PackagePath = FString(BackupRoot) + FPackageName::GetLongPackagePath(Relative);
 		const FString Name = Material->GetName() + TEXT("_PreGrungify");
 		const FString PackageName = PackagePath / Name;
-		if (FPackageName::DoesPackageExist(PackageName) || FindPackage(nullptr, *PackageName))
+		if (FPackageName::DoesPackageExist(PackageName))
 		{
-			return PackageName;
+			// Never overwrite a first backup, and do not mistake an unrelated/corrupt asset for one.
+			const FString ObjectPath = PackageName + TEXT(".") + Name;
+			return LoadObject<UMaterial>(nullptr, *ObjectPath, nullptr, LOAD_NoWarn | LOAD_Quiet)
+				? PackageName : FString();
+		}
+		// A previous failed save may have left an unsaved duplicate in memory. It is not a disk backup.
+		if (FindPackage(nullptr, *PackageName))
+		{
+			return FString();
 		}
 		IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
 		UObject* Copy = AssetTools.DuplicateAsset(Name, PackagePath, Material);
@@ -258,8 +282,9 @@ namespace
 		{
 			return FString();
 		}
-		UEditorLoadingAndSavingUtils::SavePackages({ Copy->GetPackage() }, /*bOnlyDirty*/ false);
-		return PackageName;
+		TStrongObjectPtr<UObject> KeepCopyAlive(Copy);
+		return UEditorLoadingAndSavingUtils::SavePackages({ Copy->GetPackage() }, /*bOnlyDirty*/ false)
+			? PackageName : FString();
 	}
 
 	void CloseEditors(UMaterial* Material)
@@ -295,8 +320,8 @@ namespace
 		const bool bNormal = Material->bTangentSpaceNormal;
 		Call->Desc = FString::Printf(TEXT("%s legacy%s"), CallTag, bNormal ? TEXT(" normal") : TEXT(""));
 
-		// The colour constant is stored as raw bytes and read back as linear values.
-		const FLinearColor ColorConstant = Data->BaseColor.Constant.ReinterpretAsLinear();
+		// UE 5.8 stores this input constant in linear colour space already.
+		const FLinearColor ColorConstant = Data->BaseColor.Constant;
 		const FExpressionInput BaseColor = SourceFor(Material, Data->BaseColor, MP_BaseColor, FVector4f(ColorConstant.R, ColorConstant.G, ColorConstant.B, 1.f), true, Y);
 		const FExpressionInput Roughness = SourceFor(Material, Data->Roughness, MP_Roughness, FVector4f(Data->Roughness.Constant, 0.f, 0.f, 0.f), false, Y + 150);
 		const FExpressionInput Metallic = SourceFor(Material, Data->Metallic, MP_Metallic, FVector4f(Data->Metallic.Constant, 0.f, 0.f, 0.f), false, Y + 250);
@@ -652,6 +677,7 @@ FGrungifyHookupResult UGrungifyMaterialHookup::AddGrungifyToMaterial(UMaterialIn
 		Result.Notes = TEXT("no material");
 		return Result;
 	}
+	TStrongObjectPtr<UMaterial> KeepMaterialAlive(Material);
 	Result.Material = Material->GetPathName();
 	if (MaterialInterface != Material)
 	{
@@ -703,6 +729,15 @@ FGrungifyHookupResult UGrungifyMaterialHookup::AddGrungifyToMaterial(UMaterialIn
 		}
 	}
 	Result.Path = PathName(Path);
+	if (Path == EHookupPath::Legacy && (HasUnsupportedConnection(Data->BaseColor) || HasUnsupportedConnection(Data->Roughness)
+		|| HasUnsupportedConnection(Data->Metallic) || HasUnsupportedConnection(Data->Normal)))
+	{
+		return Skip(TEXT("dormant Use Constant wiring or unconnected pin metadata cannot be restored exactly; material left unchanged"));
+	}
+	if (Path == EHookupPath::Attributes && !Material->bTangentSpaceNormal)
+	{
+		return Skip(TEXT("world-space normal attributes are unsupported by the tangent-space weathering function; material left unchanged"));
+	}
 
 	// Landscape materials read world-projected masks through their own function.
 	const bool bLandscape = IsLandscapeMaterial(Material);
@@ -729,12 +764,13 @@ FGrungifyHookupResult UGrungifyMaterialHookup::AddGrungifyToMaterial(UMaterialIn
 		if (Result.Backup.IsEmpty())
 		{
 			Result.Outcome = TEXT("failed");
-			Result.Notes += TEXT("could not make a backup copy, so the material was left alone");
+			Result.Notes += TEXT("could not create and save a backup copy, so the material was left alone");
 			return Result;
 		}
 	}
 
 	CloseEditors(Material);
+	FScopedTransaction Transaction(LOCTEXT("AddGrungifyTransaction", "Add Grungify to Material"));
 	Material->Modify();
 	bool bInserted = false;
 	switch (Path)
@@ -755,6 +791,7 @@ FGrungifyHookupResult UGrungifyMaterialHookup::AddGrungifyToMaterial(UMaterialIn
 		FGrungifyHookupResult Ignored;
 		RemoveInserted(Material, Ignored);
 		UMaterialEditingLibrary::RecompileMaterial(Material);
+		Transaction.Cancel();
 		Result.Outcome = TEXT("failed");
 		Result.Notes += bInserted ? FString::Printf(TEXT("the hooked-up material didn't compile (%s); change reverted"), *Errors) : TEXT("; change reverted");
 		return Result;
@@ -775,6 +812,7 @@ FGrungifyHookupResult UGrungifyMaterialHookup::RemoveGrungifyFromMaterial(UMater
 		Result.Notes = TEXT("no material");
 		return Result;
 	}
+	TStrongObjectPtr<UMaterial> KeepMaterialAlive(Material);
 	Result.Material = Material->GetPathName();
 	FString Why;
 	if (!IsWritable(Material, Why))
@@ -785,9 +823,16 @@ FGrungifyHookupResult UGrungifyMaterialHookup::RemoveGrungifyFromMaterial(UMater
 	}
 
 	CloseEditors(Material);
+	FScopedTransaction Transaction(LOCTEXT("RemoveGrungifyTransaction", "Remove Grungify from Material"));
 	Material->Modify();
+	// DeleteMaterialExpression also clears incoming links. Snapshot existing nodes for a complete undo.
+	for (UMaterialExpression* Expression : Material->GetExpressions())
+	{
+		if (Expression) { Expression->Modify(); }
+	}
 	if (!RemoveInserted(Material, Result))
 	{
+		Transaction.Cancel();
 		Result.Outcome = TEXT("skipped");
 		Result.Notes = UsesGrungify(Material)
 			? TEXT("Grungify was wired in by hand, not by this tool; remove it in the material editor")
@@ -797,7 +842,10 @@ FGrungifyHookupResult UGrungifyMaterialHookup::RemoveGrungifyFromMaterial(UMater
 	FString Errors;
 	if (CompileErrors(Material, Errors))
 	{
-		Result.Notes = FString::Printf(TEXT("removed, but the material reports errors (%s); the backup in %s has the original"), *Errors, BackupRoot);
+		Result.Notes = FString::Printf(TEXT("nodes removed, but compilation could not be verified (%s); use Undo to restore the hookup"), *Errors);
+		Material->MarkPackageDirty();
+		Result.Outcome = TEXT("failed");
+		return Result;
 	}
 	Material->MarkPackageDirty();
 	Result.Outcome = TEXT("removed");

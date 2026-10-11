@@ -4,6 +4,7 @@
 
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
 
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/Level.h"
 #include "Engine/StaticMesh.h"
@@ -12,6 +13,7 @@
 #include "GrungifyWeatheringZone.h"
 #include "GrungifyZoneComponent.h"
 #include "Materials/Material.h"
+#include "MaterialDomain.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Misc/AutomationTest.h"
 #include "StaticMeshComponentLODInfo.h"
@@ -272,6 +274,79 @@ bool FGrungifyLevelRemovalTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Level removal restores both arrays/materials"), Fixture.Component->GetDefaultCustomPrimitiveData().Data == Before.CustomData
 		&& Fixture.Component->GetCustomPrimitiveData().Data == Before.LiveCustomData
 		&& Fixture.Component->OverrideMaterials == Before.OverrideMaterials);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGrungifyInstanceLayoutRestoreTest, "Grungify.State.InstanceLayoutChangeRetainsBackup",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FGrungifyInstanceLayoutRestoreTest::RunTest(const FString& Parameters)
+{
+	FGrungifyTestWorld Fixture;
+	if (!TestNotNull(TEXT("Cube fixture"), Fixture.Component)) { return false; }
+	AActor* Actor = Fixture.Component->GetOwner();
+	Fixture.Component->DestroyComponent();
+	UInstancedStaticMeshComponent* Component = NewObject<UInstancedStaticMeshComponent>(Actor);
+	Actor->AddInstanceComponent(Component);
+	Actor->SetRootComponent(Component);
+	Component->SetMobility(EComponentMobility::Static);
+	Component->SetStaticMesh(Fixture.Mesh);
+	Component->AddInstance(FTransform::Identity);
+	Component->AddInstance(FTransform(FVector(150., 0., 0.)));
+	Component->RegisterComponent();
+	Fixture.Component = Component;
+	Component->SetNumCustomDataFloats(2);
+	const TArray<float> First{ .125f, .25f };
+	const TArray<float> Second{ .75f, .875f };
+	TestTrue(TEXT("Initial first custom data"), Component->SetCustomData(0, First));
+	TestTrue(TEXT("Initial second custom data"), Component->SetCustomData(1, Second));
+	FGrungifyComponentRecord Original;
+	Grungify::CaptureRecord(Component, Original);
+	TestEqual(TEXT("Captured instance count"), Original.InstanceCount, 2);
+
+	TGuardValue<int32> InstanceBase(GetMutableDefault<UGrungifySettings>()->InstanceCustomDataIndex, 2);
+	TGuardValue<int32> PrimitiveBase(GetMutableDefault<UGrungifySettings>()->CustomPrimitiveDataIndex, 0);
+	AGrungifyWeatheringZone* Zone = Fixture.Zone();
+	Zone->Apply();
+	if (!TestNotNull(TEXT("Applied ISM has original backup"), Zone->FindAppliedRecord(Component))) { return false; }
+	Component->AddInstance(FTransform(FVector(300., 0., 0.)));
+	FGrungifyComponentRecord Changed;
+	Grungify::CaptureRecord(Component, Changed);
+	AddExpectedError(TEXT("instance layout changed or cannot be verified"), EAutomationExpectedErrorFlags::Contains, 1);
+	Zone->Clear();
+	TestNotNull(TEXT("Failed Clear retains original backup"), Zone->FindAppliedRecord(Component));
+	TestEqual(TEXT("Failed Clear preserves current stride"), Component->NumCustomDataFloats, Changed.NumInstanceCustomDataFloats);
+	TestTrue(TEXT("Failed Clear preserves every current instance value"), Component->PerInstanceSMCustomData == Changed.InstanceCustomData);
+	TestTrue(TEXT("Failed Clear preserves materials and both CPD arrays"), Component->OverrideMaterials == Changed.OverrideMaterials
+		&& Component->GetDefaultCustomPrimitiveData().Data == Changed.CustomData
+		&& Component->GetCustomPrimitiveData().Data == Changed.LiveCustomData);
+	TestTrue(TEXT("Remove only the added instance"), Component->RemoveInstance(2));
+	Zone->Clear();
+	TestNull(TEXT("Successful retry releases backup"), Zone->FindAppliedRecord(Component));
+	TestEqual(TEXT("Retry restores original stride"), Component->NumCustomDataFloats, Original.NumInstanceCustomDataFloats);
+	TestTrue(TEXT("Retry restores all original values"), Component->PerInstanceSMCustomData == Original.InstanceCustomData);
+	TestTrue(TEXT("Retry restores original materials and CPD"), Component->OverrideMaterials == Original.OverrideMaterials
+		&& Component->GetDefaultCustomPrimitiveData().Data == Original.CustomData
+		&& Component->GetCustomPrimitiveData().Data == Original.LiveCustomData);
+
+	// Nonzero-stride old records remain verifiable from their exact captured array.
+	FGrungifyComponentRecord Legacy = Original;
+	Legacy.InstanceCount = INDEX_NONE;
+	TestTrue(TEXT("Legacy nonzero-stride record restores"), Grungify::RestoreRecord(Legacy, false));
+	Component->SetNumCustomDataFloats(0);
+	FGrungifyComponentRecord ZeroStride;
+	Grungify::CaptureRecord(Component, ZeroStride);
+	Component->AddInstance(FTransform(FVector(300., 0., 0.)));
+	Component->SetNumCustomDataFloats(2);
+	TestTrue(TEXT("New user data on added instance"), Component->SetCustomData(2, Second));
+	const TArray<float> NewData = Component->PerInstanceSMCustomData;
+	AddExpectedError(TEXT("instance layout changed or cannot be verified"), EAutomationExpectedErrorFlags::Contains, 1);
+	TestFalse(TEXT("Zero-stride backup also refuses changed count"), Grungify::RestoreRecord(ZeroStride, false));
+	TestTrue(TEXT("Zero-stride refusal does not clear new user data"), Component->PerInstanceSMCustomData == NewData);
+	TestTrue(TEXT("Remove added instance before zero-stride retry"), Component->RemoveInstance(2));
+	TestTrue(TEXT("Zero-stride retry restores"), Grungify::RestoreRecord(ZeroStride, false));
+	TestEqual(TEXT("Original zero stride restored"), Component->NumCustomDataFloats, 0);
+	TestTrue(TEXT("Original empty instance data restored"), Component->PerInstanceSMCustomData.IsEmpty());
 	return true;
 }
 

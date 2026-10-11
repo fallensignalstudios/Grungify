@@ -74,9 +74,10 @@ What it does for each kind of material:
 
 Safety:
 
-- **Backups:** before the first change, a copy goes to `/Game/Grungify/Backups/<original path>/<Name>_PreGrungify`. Later Adds keep that first copy.
-- **Compile check:** each hooked-up material is compiled straight away. If it doesn't compile, the change is reverted and reported.
-- **Remove** puts back exactly the original wiring, including component masks, *Use Constant* values and unconnected pins. It only touches nodes the tool inserted; wiring you added by hand is left for you.
+- **Backups:** before the first change, a saved copy goes to `/Game/Grungify/Backups/<original path>/<Name>_PreGrungify`. Failed saves and unsaved backup collisions stop Add. Later Adds keep the first saved material copy.
+- **Compile check:** each hooked-up material is compiled straight away, with the subject kept alive across Unreal's garbage collection. A failed Add rolls back its edits. A failed Remove is reported as a failure; use Undo to recover its prior graph.
+- **Undo:** Add and Remove are editor transactions. Remove restores supported original connections, component masks and constant values. Legacy pins with dormant wires behind *Use Constant*, disconnected non-default pin metadata, and world-space normals in Material Attributes are refused before any edit because exact restoration is not supported yet.
+- **Inserted nodes:** Remove identifies tool nodes by their Grungify description tags. Avoid copying those tags onto unrelated nodes; persistent per-hookup ownership is still needed for more complex edited graphs.
 - **Open editors:** a material's open editor is closed before it's changed, so the two can't clash.
 - **Skipped materials:** engine content, Grungify's own materials, unlit materials and non-surface domains (decals, post process, UI) are skipped with a reason.
 - **Saving:** changed materials are left unsaved, ready for review.
@@ -414,6 +415,16 @@ for report in unreal.GrungifyBlueprintLibrary.run_all_zones(world, unreal.Grungi
     print(report.zone, report.weathered, report.skipped, report.seconds)
 ```
 
+The editor builders are also available to Blueprint and Python through `UGrungifyEditorLibrary`:
+
+```python
+message = unreal.GrungifyEditorLibrary.build_reference_scene()
+# A message string means success; None means failure (the log contains details).
+# This explicitly creates/saves /Game/Grungify/Reference and opens its map.
+# Run it in an isolated test project or after saving your current work.
+message = unreal.GrungifyEditorLibrary.build_material_library(False)
+```
+
 ### Runtime wear (gameplay)
 
 `UGrungifyRuntimeWearSubsystem` (a world subsystem) paints extra wear into **texture-output** meshes during play: impacts, footsteps, scorch marks.
@@ -425,6 +436,7 @@ for report in unreal.GrungifyBlueprintLibrary.run_all_zones(world, unreal.Grungi
 - **Component:** `UGrungifyRuntimeWearComponent` paints under its owner with `EmitWear`, for example from footstep notifies.
 - **How it works:** on a component's first hit, its baked mask textures are copied into render targets, and its slots switch to dynamic material instances that read them. Reset switches back to the baked result.
 - **Setup:** enable *Project Settings → Physics → Support UV From Hit Results*, and trace against complex collision so hits carry a face index. Meshes weathered with vertex-colour or instanced output can't be painted at runtime.
+- **Current channel limit:** runtime Handling and Moss painting returns `false` before changing materials or masks. UE canvas additive drawing writes RGB only; alpha holdout erases existing masks rather than accumulating alpha. These alpha channels need a dedicated channel-preserving render pass and a real GPU readback test before they can be enabled safely. Procedural Handling and Moss generation is unaffected.
 
 
 ### Reports
@@ -531,14 +543,17 @@ Backups made before v0.2.1 have no separate live-data snapshot. Restoring one us
 
 ## Native verification (UE 5.8.3, 2026-10-11)
 
-- A clean Win64 `BuildPlugin` passed for UnrealEditor Development, UnrealGame Development and UnrealGame Shipping.
+- v0.5.1 passed Win64 `BuildPlugin` for UnrealEditor Development, UnrealGame Development and UnrealGame Shipping, with `-NoPCH -NoSharedPCH -DisableUnity` and unchanged source hashes throughout the build.
+- v0.5.1 passed all 18 native automation tests (17 plain successes and one expected occupied-data warning). The material-hookup fixture exercises Add/Remove, Undo/Redo, unchanged legacy connections, unsupported-input refusal and backup failure. The cache/scatter, exact instance-layout restoration and runtime-wear admission tests also passed. The actual editor process exited normally with code 0.
+- The v0.5.1 reference builder saved seven weathered meshes and four functional screenshot actors in the isolated host project. `Grungify.Runtime.ReferenceSceneCooked` checks editor-loaded bindings and textures; its name does not establish a packaged or cooked rendering pass. Substrate was disabled, so its generated graph was validated but its enabled shader/render path remains unverified.
+- All four v0.5.1 functional screenshot tests produced readable 1280 × 720 images and the editor exited normally with code 0. Each reported a missing approved baseline warning. Edge wear is visible on the trim and Nanite coffer; broad surfaces and sparse-wall/runoff treatment remain subtle. These are visual smoke checks, not approved regression comparisons or final art acceptance.
 - v0.3.1 passed all nine native automation tests (eight plain successes, one expected occupied-data warning): the six original cases plus `TextureGateOutputConservation`, `MaskUVValidation` and `TextureBakeCancellation`. UV fixtures cover slight boundary overflow, genuinely excessive overflow and all four sides. The texture cancellation test exercises CPU generation cancellation; it does not establish public Preview/Apply cancellation, UI latency or the new report-row behavior.
 - All six native automation tests passed: five `Grungify.State` cases covering CPD, paint/material restoration, ownership and level removal, plus `Grungify.Content.InPlaceRegeneration`. The regeneration test rebuilds at CPD indices 0 → 12 → 0 and checks exact node counts, connections, parameter indices, compilation, saves and readiness.
 - A disposable native level produced eight reviewed 1280 × 720 captures with fixed exposure. A Nanite-enabled coffer used UV1 texture masks: Preview and Apply visibly weathered its edges/panels, while legacy modes 1/2, Cancel and Clear visually returned the baseline. Raw readable material/CPD state restored exactly; the images are not claimed to be pixel-identical. Ownership transfer, occupied saved/live CPD and five real settings-regeneration checks also passed. The editor exited normally with code 0, and all 3,545 protected production files remained unchanged.
 
-Run the tests in the isolated `HostProject` retained by `BuildPlugin -NoDeleteHostProject`, using `UnrealEditor-Cmd.exe <Package>/HostProject/HostProject.uproject -unattended -RenderOffscreen -ExecCmds="Automation RunTests Grungify" -TestExit="Automation Test Queue Empty"`. The content test refuses to rebuild assets in a production project.
+Run the tests in the isolated `HostProject` retained by `BuildPlugin -NoDeleteHostProject`, using `UnrealEditor.exe <Package>/HostProject/HostProject.uproject -unattended -RenderOffscreen -ExecCmds="Automation RunTests StartsWith:Grungify;SoftQuit" -ReportExportPath=<FreshReportDirectory>`. Inspect the exported test counts and actual process exit. The content test refuses to rebuild assets in a production project.
 
-These checks covered v0.2.x and v0.3.1, not v0.4.0. They do not establish final environment art quality. Full undo/redo, save/reload, World Partition cell streaming and cooked game execution still need separate verification.
+The nine-test and disposable-level observations above are retained v0.2.x/v0.3.1 history. These checks do not establish final environment art quality. Material Attributes/Substrate hookup, general zone undo/redo, save/reload, World Partition cell streaming, channel-preserving GPU runtime painting and cooked game execution still need separate verification.
 
 ## Texture bake cost
 
@@ -578,7 +593,7 @@ These cases should be checked in-editor on a test level, never on production roo
       - render-target drawing in runtime wear
       - World Partition actor descriptors in the commandlet (`ForEachActorDescInstance`, 5.4+ API), and map loading through `UEditorLoadingAndSavingUtils` inside a commandlet
       - Substrate expression members (`DiffuseAlbedo`, `F0`, `Background`, `Foreground`, `Mix`), custom-node additional outputs, and Get/Set Material Attributes setup in the hookup tool
-      - `UStaticMesh::NaniteSettings` access in the reference scene (switch to `Get/SetNaniteSettings` if it's private)
+      - `UStaticMesh::NaniteSettings` access in the reference scene (use the supported `Get/SetNaniteSettings` accessors)
     - Then run `Automation RunTests Grungify` and check that the existing `Grungify.State`, `Grungify.Content` and `Grungify.Generation` tests still pass. The texture-bake conservation test should be unchanged, since every new feature defaults to off.
 14. **Reference scene and screenshots:**
     - Run *Tools → Grungify → Build Reference Scene*, then `Automation RunTests Project.Functional Tests` with the map open.

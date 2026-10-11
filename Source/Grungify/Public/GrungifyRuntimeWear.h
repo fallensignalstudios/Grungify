@@ -73,13 +73,22 @@ struct FGrungifyRuntimeWearState
 	UPROPERTY(Transient)
 	TArray<FGrungifyRuntimeWearSlot> Slots;
 
+	/** Raw arrays preserve inherited slots, null holes and trailing entries on reset. */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UMaterialInterface>> OriginalOverrideMaterials;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UMaterialInterface>> RuntimeOverrideMaterials;
+
 	bool bWarnedNoExtended = false;
 };
 
 /**
  * Paints wear into Texture-output meshes at runtime (impacts, footsteps, fire). On a component's first wear its
  * baked mask textures are copied into render targets and its slots switch to dynamic instances that read them;
- * ResetRuntimeWear switches back to the baked result.
+ * ResetRuntimeWear switches back to the baked result. Only active material instances with
+ * an explicit mask override are painted. Runtime Handling and Moss are unsupported until the renderer can
+ * accumulate alpha without changing RGB; those calls return false without changing materials or masks.
  *
  * Hit UVs come from UGameplayStatics::FindCollisionUV, which needs Project Settings > Physics >
  * "Support UV From Hit Results" and a complex-collision trace that returns the face index.
@@ -92,7 +101,7 @@ class GRUNGIFY_API UGrungifyRuntimeWearSubsystem : public UWorldSubsystem
 public:
 	static UGrungifyRuntimeWearSubsystem* Get(const UObject* WorldContextObject);
 
-	/** Adds a soft round patch of Layer at a complex-collision hit on a Texture-output static mesh. Returns false if nothing was painted. */
+	/** Adds an RGB-layer patch to an active Texture-output slot with an explicit baked mask. Handling, Moss and invalid layers return false without mutation. */
 	UFUNCTION(BlueprintCallable, Category = "Grungify|Runtime Wear")
 	bool AddWearAtHit(const FHitResult& Hit, EGrungifyWearLayer Layer, float RadiusCm = 20.f, float Amount = 0.5f);
 
@@ -113,10 +122,12 @@ protected:
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
 
 private:
+	static bool SupportsRuntimeLayer(EGrungifyWearLayer Layer);
+	static bool IsEligibleMaterial(const UMaterialInterface* Material);
 	FGrungifyRuntimeWearState* FindOrCreateState(UStaticMeshComponent* Component);
 	int32 FindOrCreateTarget(FGrungifyRuntimeWearState& State, UTexture* Source);
 	UTexture2D* GetBrushTexture();
-	void PaintBrush(UTextureRenderTarget2D* Target, const FVector2D& UV, float DiameterTexels, int32 Channel, float Amount);
+	bool PaintBrush(UTextureRenderTarget2D* Target, const FVector2D& UV, float DiameterTexels, int32 Channel, float Amount);
 	static void RestoreState(UStaticMeshComponent* Component, const FGrungifyRuntimeWearState& State);
 	void PruneStaleStates();
 
@@ -134,6 +145,11 @@ private:
 
 	bool bWarnedMissingUV = false;
 	bool bWarnedMissingTexelSize = false;
+	bool bWarnedUnsupportedLayer = false;
+
+#if WITH_DEV_AUTOMATION_TESTS
+	friend struct FGrungifyRuntimeWearTestAccess;
+#endif
 };
 
 /** Emits runtime wear under its owner, e.g. from footstep anim notifies. */
@@ -149,7 +165,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (ClampMin = "0", Units = "cm"))
 	float TraceDistanceCm = 250.f;
 
-	/** Traces straight down from the owner and paints Layer where the trace lands. */
+	/** Traces down and paints a supported RGB layer. Handling/Moss currently return false; choose an RGB layer explicitly. */
 	UFUNCTION(BlueprintCallable, Category = "Grungify|Runtime Wear")
 	bool EmitWear(EGrungifyWearLayer Layer = EGrungifyWearLayer::Handling, float RadiusCm = 20.f, float Amount = 0.5f);
 };

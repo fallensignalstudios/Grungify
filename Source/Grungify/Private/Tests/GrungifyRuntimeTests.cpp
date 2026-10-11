@@ -18,6 +18,7 @@
 #include "Misc/AutomationTest.h"
 #include "Misc/PackageName.h"
 #include "Tests/AutomationCommon.h"
+#include "UObject/Package.h"
 
 namespace
 {

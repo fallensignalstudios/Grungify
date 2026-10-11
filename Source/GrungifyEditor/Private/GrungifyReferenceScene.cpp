@@ -125,7 +125,7 @@ namespace
 			FAssetRegistryModule::AssetCreated(Mesh);
 		}
 		Mesh->Modify();
-		Mesh->NaniteSettings.bEnabled = true;
+		Mesh->GetNaniteSettings().bEnabled = true;
 		// PostEditChange rebuilds the render data, including the Nanite resources and the fallback mesh the masks bake from.
 		Mesh->PostEditChange();
 		Mesh->MarkPackageDirty();
@@ -422,8 +422,8 @@ bool FGrungifyReferenceScene::Build(FString& OutMessage)
 	{
 		return Fail(TEXT("could not spawn the weathering zone"));
 	}
-	Zone->SetActorLabel(TEXT("WeatheringZone_Reference"));
 	Zone->bLivePreview = false;
+	Zone->SetActorLabel(TEXT("WeatheringZone_Reference"));
 	Zone->Seed = ReferenceSeed;
 	Zone->MaskOutput = EGrungifyMaskOutput::Auto;
 	Zone->Extended.MoistureIntensity = 0.6f;

@@ -590,6 +590,10 @@ struct GRUNGIFY_API FGrungifyComponentRecord
 	UPROPERTY()
 	bool bHasInstanceData = false;
 
+	/** Instance layout at capture; unknown for records saved before this field existed. */
+	UPROPERTY()
+	int32 InstanceCount = INDEX_NONE;
+
 	UPROPERTY()
 	int32 NumInstanceCustomDataFloats = 0;
 
