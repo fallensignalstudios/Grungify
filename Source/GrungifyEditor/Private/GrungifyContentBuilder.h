@@ -2,14 +2,30 @@
 
 #include "CoreMinimal.h"
 
+/** What a content build did, and whether everything connected, compiled and saved. */
+struct FGrungifyContentReport
+{
+	TArray<FString> Created;
+	TArray<FString> Rebuilt;
+	TArray<FString> Errors;
+	TArray<FString> Notes;
+	bool bSaved = true;
+
+	bool HasErrors() const { return Errors.Num() > 0 || !bSaved; }
+	FString ToString() const;
+};
+
 /**
- * Creates the plugin's assets in /Grungify (they can't ship as text in source control):
- *   BP_WeatheringZone, MF_GrungifyWeathering, M_GrungifyMaskDebug, M_GrungifyExample.
- * Only missing assets are created; delete one and rebuild to regenerate it.
+ * Creates and maintains the plugin's assets in /Grungify:
+ *   BP_WeatheringZone, MF_GrungifyWeathering, M_GrungifyMaskDebug, M_GrungifyExample, T_GrungifyNoMask.
+ * The generated material assets carry a version marker (content version, custom data index, mask UV channel).
+ * When it doesn't match, they are rebuilt in place, so every material that already uses MF_GrungifyWeathering
+ * picks up fixes and settings changes without relinking.
  */
 struct FGrungifyContentBuilder
 {
-	/** Returns the number of assets created. */
-	static int32 BuildMissingContent();
-	static bool IsContentMissing();
+	/** Creates missing assets and rebuilds outdated ones (or all generated ones when bForceRebuild). */
+	static FGrungifyContentReport Run(bool bForceRebuild);
+
+	static bool NeedsWork();
 };

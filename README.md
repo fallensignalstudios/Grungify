@@ -13,7 +13,7 @@ Each material slot is classified as **stone**, **metal** or **trim**, so the wea
 
 Everything is driven by a **Seed**, so the same seed and settings always produce the same result.
 
-> **Status:** v0.1, written for UE 5.8. This version hasn't been compiled or run in the editor yet. Expect a round of compile fixes on the first build.
+> **Status:** v0.2 for UE 5.8. v0.1 built in the editor after a one-line include fix (now applied). The v0.2 changes (texture masks, targeting, exact restore, reports, content migration) have not been compiled or run yet, and visual quality and Nanite rendering are still unverified. See *Verification checklist* below.
 
 ---
 
@@ -27,8 +27,18 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
    - `Materials/MF_GrungifyWeathering`: the material function that renders the wear
    - `Materials/M_GrungifyMaskDebug`: shows the raw masks during preview
    - `Materials/M_GrungifyExample`: a minimal master material that already uses the function
+   - `Materials/T_GrungifyNoMask`: the black default for the mask texture parameter
 
-   If they're missing, run **Tools → Grungify → Build Plugin Content**. Uasset files can't ship as text, so they're generated locally instead. Commit them once they exist.
+   Uasset files can't ship as text, so they're generated locally. Commit them once they exist.
+
+### Content versioning
+
+The generated material assets carry a marker of the form `[GrungifyContent v3 cpd=0 uv=1]` (content version, custom data index, mask UV channel). On editor start, and whenever the CPD index or mask UV channel changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Assets from v0.1, including the roughness/metallic mask bug, are rebuilt automatically.
+
+- **Tools → Grungify → Update Plugin Content** creates missing assets and rebuilds outdated ones.
+- **Rebuild Plugin Content** forces a rebuild of all the generated material assets.
+
+Every build checks each graph connection, compiles the debug and example materials and reports their compile errors, and checks that the packages saved. Results go to the Output Log and `Saved/Grungify/ContentReport.txt`, with a notification if anything failed.
 
 ## Hook up your materials (once per master material)
 
@@ -36,13 +46,19 @@ The zone writes masks; the material function renders them. In each master materi
 
 ```
 [your Base Color] ──► BaseColor ┐
-[your Roughness]  ──► Roughness ├─ MF_GrungifyWeathering ─► BaseColor / Roughness / Metallic outputs
-[your Metallic]   ──► Metallic  ┘
+[your Roughness]  ──► Roughness │
+[your Metallic]   ──► Metallic  ├─ MF_GrungifyWeathering ─► BaseColor / Roughness / Metallic / Normal
+[your Normal]     ──► Normal    │
                       SurfaceOverride (optional, default -1)
 ```
 
+- **Meshes no zone has touched (or that were cleared) pass through unchanged.** The function only applies wear when the zone has set the mask mode in custom primitive data. Unpainted vertex colours (white) are ignored.
 - **SurfaceOverride**: leave unconnected to use the type the zone detected for the mesh. On a mesh that mixes stone and metal slots, set it per material: `0` stone, `1` metal, `2` trim.
-- Tweakable parameters (group *Grungify*): `Grungify Dust Color`, `Grungify Runoff Color`, `Grungify Trim Chip Color`, `Grungify Strength`.
+- **Normal** is passed through unchanged unless `Grungify Relief Strength` is above 0. When it is, chips read as recessed and dust as slightly raised, layered on top of your normal rather than replacing it. Relief uses finite differences rather than ddx/ddy, so it also works with Nanite.
+- Parameters (group *Grungify*):
+  - colours: `Grungify Dust Color`, `Grungify Runoff Color`, `Grungify Trim Chip Color`
+  - strength: overall `Grungify Strength`, plus separate `Grungify Chip / Dust / Runoff / Handling Strength`
+  - relief: `Grungify Relief Strength`
 - The shading code lives in `Shaders/Private/Grungify.ush`, so you can tune the look there without rebuilding the graph.
 
 You don't need materials hooked up to start: set **Preview Display** to *All Masks* and the preview swaps in the debug material.
@@ -55,7 +71,48 @@ You don't need materials hooked up to start: set **Preview Display** to *All Mas
 4. Press **Apply** to commit, or **Cancel Preview** to drop the preview.
 5. Press **Clear** to put every mesh the zone touched back the way it was.
 
-Apply and Clear are single undo steps (Ctrl+Z). **New Seed** rolls a new random seed; type a seed in by hand to get back a previous look.
+Apply and Clear are single undo steps (Ctrl+Z). **New Seed** rolls a new random seed; type a seed in by hand to get back a previous look. **Dry Run** generates and reports without touching anything.
+
+A preview is never saved. Saving the level, deleting the zone, or unloading it (level unload or a World Partition cell streaming out) discards the preview and puts the meshes back. Delete is undoable, and undo restores the preview too. Autosaves keep the preview, since they're recovery copies and the zone's records are saved with them. Applied weathering stays on the meshes when the zone is deleted.
+
+### Where the masks go
+
+| Mask Output | Storage | Use for |
+|---|---|---|
+| **Vertex Color** | Per-instance override vertex colours on every LOD | Dense meshes. Detail follows vertex density, and it may not render on Nanite. |
+| **Texture** | A per-instance mask texture baked in the mask UV channel (Project Settings, default UV 1), bound through a material instance on each slot. Texel size is physical (*Mask Texel Size*, default 4 cm). | Nanite meshes, and sparse geometry such as one-quad walls. Edge wear is computed from the distance to creased edges (*Edge Wear Width*), so it stays crisp regardless of vertex count. |
+| **Auto** (default) | Texture for Nanite or sparse meshes that have the mask UV channel, vertex colours otherwise. | |
+
+The mask UV channel must be non-overlapping, which lightmap UVs usually are. Meshes without that channel fall back to vertex colours, and the report says so. For Nanite meshes the texture is baked from the fallback mesh, which shares the UV layout.
+
+The mask texture and material instances live inside the component, so they're saved with the actor and removed by Clear.
+
+### Targeting
+
+| Setting | What it does |
+|---|---|
+| **Include Only Actors** / **Excluded Actors** | Actor-level filters. |
+| **Required Component Tags** | Only components carrying one of these tags. |
+| **Slot Rules** | Per material slot, first match wins. Match by actor, wildcard name (slot, material and its parents, mesh, component, actor label), or exact material. A rule can **exclude** the slot, set its **surface**, give it its own **profile** (e.g. separate ceramic, steel and bronze multipliers), force **rail on or off**, and **gate** it by facing, by height above the floor, or by a painted **gate texture** in any UV channel. |
+| **Overlap Policy** | *Skip Owned* (default) leaves meshes another zone applied to alone and reports them. *Take Over* moves ownership, including the original backup, to this zone on Apply. Meshes another zone is currently previewing are always skipped. |
+
+Example: rail wear without touching a joined bridge deck. Add a rule matching `*Deck*` (or the deck material) with *Exclude* on. Or give it a profile with Handling 0 and a facing gate, if the deck should still collect dust.
+
+### Runoff at real leak locations
+
+Add entries to **Leaks** and drag their diamond widgets to the actual leak points. Each leak has its own radius, length and strength. Turn off **Auto Detect Vents** to use only hand-placed leaks and the explicit **Runoff Sources** actors.
+
+### Reports
+
+Every Dry Run, Preview and Apply fills **Last Report** on the zone. It's also readable from Blueprint or Python via `GetLastReport`, and written to `Saved/Grungify/Reports/<Zone>_<Operation>.json`. Per mesh it lists:
+
+- the result (vertex, texture or skipped) and why
+- each slot's material, surface, matched rule and flags
+- vertex count and texture size
+- the mean and max of each mask
+- whether the mesh is Nanite
+- custom data conflicts
+- the previous owner
 
 *Tools → Grungify* also has **Preview / Apply / Clear / Cancel All** for every zone in the level.
 
@@ -93,18 +150,37 @@ Traced floors only count if the mesh is at least *Min Floor Size* (150 cm) acros
 
 - Masks are computed per vertex. Edge convexity comes from the welded mesh topology: how sharply faces bend at a vertex, and whether the neighbouring vertices fall away (convex) or rise up (concave). Floors come from a grid of downward multi-hit traces. Runoff is projected down from each source's footprint.
 - Results go into per-instance **override vertex colours** on each `StaticMeshComponent` (every LOD), the same storage Mesh Paint uses. They're saved with the level and the meshes' own assets aren't modified.
-- Feature scale, seed and detected surface type go into **custom primitive data** (4 floats starting at index 0; configurable), which the material function reads.
-- The zone keeps a backup of each mesh's previous vertex colours and custom data. That's what Clear and Cancel Preview restore.
+- **Custom primitive data** holds 5 floats starting at the configured index (default 0): mask mode, surface type, feature scale, seed offset and debug channel. If a mesh already has non-zero values at those indices, the zone leaves that mesh completely untouched and reports a conflict instead of overwriting another system's data.
+- Before touching a mesh, the zone records everything it might change, and Clear and Cancel Preview put back exactly that:
+  - override vertex colours per LOD
+  - the mesh-paint cache (painted vertices)
+  - the LOD data count
+  - the static mesh derived-data key
+  - the complete default custom primitive data array, including its length (an originally empty array comes back empty)
+  - the complete override material array, including its length
 
 ## Limitations
 
-- **Vertex density matters.** Masks live on vertices, and the shader adds detail at the feature scale. A wall made of one quad gets only four samples, so the shape of the wear will be coarse.
-- **Nanite** meshes may not show per-instance vertex colours. The zone warns when it touches one. Disable Nanite on those meshes, or check how your engine version handles it.
-- **Instanced / HISM** components are skipped, since all instances share one set of vertex colours.
-- **Existing vertex colours are replaced** on meshes inside the zone. Clear restores them.
-- **Overlapping zones:** the last one applied wins on shared meshes. Clearing a zone restores what the mesh looked like before *that* zone.
+- **Vertex Color output** follows vertex density, and Nanite may not render it. Use Texture output (the Auto default picks it) for Nanite and sparse meshes.
+- **Texture output** needs a non-overlapping UV channel and adds a texture per mesh: about 1 byte per texel compressed (DXT5), plus mips.
+- **Instanced / HISM** components are skipped, since all instances share one set of vertex colours and materials.
+- **Existing vertex colours are replaced** on meshes weathered with Vertex Color output. Clear restores them.
 - **Movable** meshes are skipped unless *Include Movable* is on.
 - Weathered meshes must stay put: moving a mesh after Apply doesn't move its wear. Re-apply the zone.
+
+## Verification checklist
+
+These cases should be checked in-editor on a test level, never on production rooms:
+
+1. **Build:** the plugin compiles. On first start the Output Log shows the content rebuilt to v3 with no errors, and `Saved/Grungify/ContentReport.txt` has no `ERROR` lines.
+2. **Channel masks:** in MF_GrungifyWeathering, the Roughness mask is R only and the Metallic mask is G only.
+3. **Exact restore:** on a mesh whose default custom primitive data is `[]`, run Preview → Cancel Preview, and separately Apply → Clear. The data is `[]` again. Repeat on a mesh with painted vertex colours, a mesh with only some material slots overridden, and a mesh whose CPD indices 0–4 are already in use (it should be reported as a conflict and left untouched).
+4. **Undo:** run Apply → Ctrl+Z and Clear → Ctrl+Z. Delete a zone while previewing, then Ctrl+Z.
+5. **Save/reload:** Preview → save → reload should show no preview on any mesh, and the zone shows no preview active. Apply → save → reload should keep the weathering, and Clear after the reload should restore the originals.
+6. **Unload:** Preview, then unload the zone's World Partition cell or sublevel. The meshes should return to their originals.
+7. **Inactive path:** untouched and cleared meshes using the function look identical to the same material without it.
+8. **Nanite / sparse:** on a Nanite-enabled mesh and a one-quad wall with lightmap UVs, Auto produces `texture` in the report, and the mask debug display shows crisp edge wear and streaks.
+9. **Targeting:** check a deck-exclusion rule, a gate texture, and a leak placed with the widget.
 
 ## Layout
 

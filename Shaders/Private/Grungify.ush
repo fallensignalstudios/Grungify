@@ -1,11 +1,12 @@
 // Grungify weathering shading.
 //
 // Included by the custom nodes in /Grungify/Materials/MF_GrungifyWeathering and M_GrungifyMaskDebug.
-// The weathering zone bakes coarse masks into vertex colour; this file breaks them up at the
-// zone's physical feature scale so chips, dust and streaks stay crisp on low-poly meshes.
+// The weathering zone bakes masks into vertex colour or a per-instance mask texture; this file breaks
+// them up at the zone's physical feature scale so chips, dust and streaks stay crisp.
 //
 //   Masks.r = edge chips   Masks.g = dust   Masks.b = runoff   Masks.a = handling
-//   Surface: 0 = stone, 1 = metal, 2 = trim
+//   MaskMode: 0 = inactive (inputs pass through unchanged), 1 = vertex colour, 2 = mask texture
+//   Surface:  0 = stone, 1 = metal, 2 = trim
 
 #pragma once
 
@@ -70,93 +71,177 @@ struct FGrungifyResult
 	float Metallic;
 };
 
+struct FGrungifyLayers
+{
+	float Chip;
+	float Dust;
+	float Runoff;
+	float Handling;
+};
+
+// Unpainted vertex colours read as white, so the mode (from custom primitive data the zone writes)
+// decides whether there are masks at all. Untouched and cleared meshes have mode 0.
+float4 GrungifySelectMasks(float MaskMode, float4 VertexMasks, float4 TextureMasks)
+{
+	if (MaskMode > 1.5)
+	{
+		return TextureMasks;
+	}
+	if (MaskMode > 0.5)
+	{
+		return VertexMasks;
+	}
+	return float4(0.0, 0.0, 0.0, 0.0);
+}
+
+float3 GrungifyNoisePos(float3 WorldPos, float FeatureScaleCm, float SeedOffset)
+{
+	const float Scale = FeatureScaleCm > 0.5 ? FeatureScaleCm : 25.0;
+	return WorldPos / Scale + SeedOffset;
+}
+
+// Masks are probabilities; noise at the feature scale decides where wear actually shows.
+FGrungifyLayers GrungifyLayers(float4 Masks, float3 P, float WorldNormalZ)
+{
+	const uint Seed = 1013u;
+	FGrungifyLayers L;
+
+	L.Handling = Masks.a * lerp(0.7, 1.0, GrungifyFbm(P * 0.5, Seed));
+
+	const float Streak = GrungifyFbm(float3(P.x * 3.0, P.y * 3.0, P.z * 0.25), Seed + 7u);
+	L.Runoff = Masks.b > 0.0 ? smoothstep(0.15, 0.85, Masks.b * (0.5 + Streak)) : 0.0;
+
+	const float ChipNoise = GrungifyFbm(P * 2.0, Seed + 13u);
+	L.Chip = Masks.r > 0.01 ? smoothstep(ChipNoise - 0.04, ChipNoise + 0.04, Masks.r * 0.9) : 0.0;
+
+	const float DustNoise = GrungifyFbm(P * 0.8, Seed + 29u);
+	L.Dust = saturate(Masks.g * lerp(0.55, 1.25, DustNoise));
+	L.Dust = saturate(L.Dust + Masks.g * saturate(WorldNormalZ) * 0.25);
+
+	return L;
+}
+
 FGrungifyResult GrungifyEvaluate(
-	float3 BaseColor, float Roughness, float Metallic, float4 Masks,
+	float3 BaseColor, float Roughness, float Metallic,
+	float MaskMode, float4 VertexMasks, float4 TextureMasks,
 	float3 WorldPos, float3 WorldNormal,
 	float SurfaceFromZone, float SurfaceOverride,
 	float FeatureScaleCm, float SeedOffset,
-	float3 DustColor, float3 RunoffColor, float3 ChipColor, float Strength)
+	float3 DustColor, float3 RunoffColor, float3 ChipColor,
+	float Strength, float4 ChannelStrength)
 {
 	FGrungifyResult R;
 	R.BaseColor = BaseColor;
 	R.Roughness = Roughness;
 	R.Metallic = Metallic;
 
+	// Inactive: the material responds exactly as it would without Grungify.
+	if (MaskMode < 0.5)
+	{
+		return R;
+	}
+
+	const float4 Masks = saturate(GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks) * Strength * ChannelStrength);
 	const float Surface = SurfaceOverride >= 0.0 ? SurfaceOverride : SurfaceFromZone;
 	const int SurfaceId = (int)round(Surface);
-	const float Scale = FeatureScaleCm > 0.5 ? FeatureScaleCm : 25.0;
-	const float3 P = WorldPos / Scale + SeedOffset;
-	const uint Seed = 1013u;
-
-	Masks = saturate(Masks * Strength);
+	const FGrungifyLayers L = GrungifyLayers(Masks, GrungifyNoisePos(WorldPos, FeatureScaleCm, SeedOffset), WorldNormal.z);
 
 	// Handling: polish on metal, oily darkening on stone and trim.
-	const float Handling = Masks.a * lerp(0.7, 1.0, GrungifyFbm(P * 0.5, Seed));
 	if (SurfaceId == 1)
 	{
-		R.Roughness = lerp(R.Roughness, R.Roughness * 0.45, Handling);
-		R.Metallic = lerp(R.Metallic, max(R.Metallic, 0.6), Handling * 0.5);
-		R.BaseColor = lerp(R.BaseColor, saturate(R.BaseColor * 1.1), Handling * 0.5);
+		R.Roughness = lerp(R.Roughness, R.Roughness * 0.45, L.Handling);
+		R.Metallic = lerp(R.Metallic, max(R.Metallic, 0.6), L.Handling * 0.5);
+		R.BaseColor = lerp(R.BaseColor, saturate(R.BaseColor * 1.1), L.Handling * 0.5);
 	}
 	else
 	{
-		R.BaseColor *= lerp(1.0, 0.82, Handling);
-		R.Roughness = lerp(R.Roughness, R.Roughness * 0.7, Handling);
+		R.BaseColor *= lerp(1.0, 0.82, L.Handling);
+		R.Roughness = lerp(R.Roughness, R.Roughness * 0.7, L.Handling);
 	}
 
-	// Runoff: long vertical streaks. Rust on metal, dark staining elsewhere.
-	const float Streak = GrungifyFbm(float3(P.x * 3.0, P.y * 3.0, P.z * 0.25), Seed + 7u);
-	const float Runoff = smoothstep(0.15, 0.85, Masks.b * (0.5 + Streak));
+	// Runoff: rust on metal, dark staining elsewhere.
 	if (SurfaceId == 1)
 	{
 		const float3 Rust = RunoffColor * float3(1.6, 1.1, 0.8);
-		R.BaseColor = lerp(R.BaseColor, Rust + R.BaseColor * 0.2, Runoff * 0.85);
-		R.Metallic = lerp(R.Metallic, 0.0, Runoff);
-		R.Roughness = lerp(R.Roughness, 0.85, Runoff);
+		R.BaseColor = lerp(R.BaseColor, Rust + R.BaseColor * 0.2, L.Runoff * 0.85);
+		R.Metallic = lerp(R.Metallic, 0.0, L.Runoff);
+		R.Roughness = lerp(R.Roughness, 0.85, L.Runoff);
 	}
 	else
 	{
-		R.BaseColor = lerp(R.BaseColor, RunoffColor + R.BaseColor * 0.35, Runoff * 0.8);
-		R.Roughness = lerp(R.Roughness, R.Roughness * 0.85, Runoff);
+		R.BaseColor = lerp(R.BaseColor, RunoffColor + R.BaseColor * 0.35, L.Runoff * 0.8);
+		R.Roughness = lerp(R.Roughness, R.Roughness * 0.85, L.Runoff);
 	}
 
-	// Edge chips: the mask is a probability, noise decides which bits actually chip.
-	const float ChipNoise = GrungifyFbm(P * 2.0, Seed + 13u);
-	const float Chip = Masks.r > 0.01 ? smoothstep(ChipNoise - 0.04, ChipNoise + 0.04, Masks.r * 0.9) : 0.0;
+	// Edge chips.
 	if (SurfaceId == 1)
 	{
 		// Paint chips back to bare metal.
-		R.BaseColor = lerp(R.BaseColor, float3(0.62, 0.62, 0.64), Chip);
-		R.Metallic = lerp(R.Metallic, 1.0, Chip);
-		R.Roughness = lerp(R.Roughness, 0.35, Chip);
+		R.BaseColor = lerp(R.BaseColor, float3(0.62, 0.62, 0.64), L.Chip);
+		R.Metallic = lerp(R.Metallic, 1.0, L.Chip);
+		R.Roughness = lerp(R.Roughness, 0.35, L.Chip);
 	}
 	else if (SurfaceId == 2)
 	{
 		// Trim chips through to its substrate.
-		R.BaseColor = lerp(R.BaseColor, ChipColor, Chip);
-		R.Metallic = lerp(R.Metallic, 0.0, Chip);
-		R.Roughness = lerp(R.Roughness, 0.8, Chip);
+		R.BaseColor = lerp(R.BaseColor, ChipColor, L.Chip);
+		R.Metallic = lerp(R.Metallic, 0.0, L.Chip);
+		R.Roughness = lerp(R.Roughness, 0.8, L.Chip);
 	}
 	else
 	{
 		// Fresh, lighter stone where the weathered face broke away.
-		R.BaseColor = lerp(R.BaseColor, saturate(R.BaseColor * 1.35 + 0.06), Chip);
-		R.Roughness = lerp(R.Roughness, min(R.Roughness + 0.15, 1.0), Chip);
+		R.BaseColor = lerp(R.BaseColor, saturate(R.BaseColor * 1.35 + 0.06), L.Chip);
+		R.Roughness = lerp(R.Roughness, min(R.Roughness + 0.15, 1.0), L.Chip);
 	}
 
-	// Dust sits on top of everything, a little heavier on upward-facing pixels.
-	const float DustNoise = GrungifyFbm(P * 0.8, Seed + 29u);
-	float Dust = saturate(Masks.g * lerp(0.55, 1.25, DustNoise));
-	Dust = saturate(Dust + Masks.g * saturate(WorldNormal.z) * 0.25);
-	R.BaseColor = lerp(R.BaseColor, DustColor, Dust * 0.85);
-	R.Roughness = lerp(R.Roughness, 0.92, Dust);
-	R.Metallic = lerp(R.Metallic, 0.0, Dust);
+	// Dust sits on top of everything.
+	R.BaseColor = lerp(R.BaseColor, DustColor, L.Dust * 0.85);
+	R.Roughness = lerp(R.Roughness, 0.92, L.Dust);
+	R.Metallic = lerp(R.Metallic, 0.0, L.Dust);
 
 	return R;
 }
 
-float3 GrungifyMaskDebug(float4 Masks, float Channel)
+float GrungifyReliefHeight(float4 Masks, float3 P, float WorldNormalZ)
 {
+	const FGrungifyLayers L = GrungifyLayers(Masks, P, WorldNormalZ);
+	return 0.35 * L.Dust - L.Chip;
+}
+
+// Optional relief: chips read as recessed and dust as slightly raised. The input tangent-space normal is
+// perturbed, never replaced, and comes back unchanged when Relief is 0 or the mesh is inactive.
+// Uses finite differences along the tangent frame (no ddx/ddy), so it also works for Nanite compute shading.
+float3 GrungifyReliefNormal(
+	float3 NormalTS, float Relief,
+	float MaskMode, float4 VertexMasks, float4 TextureMasks,
+	float3 WorldPos, float3 WorldNormal, float3 TangentWS, float3 BitangentWS,
+	float FeatureScaleCm, float SeedOffset, float Strength, float4 ChannelStrength)
+{
+	if (MaskMode < 0.5 || Relief <= 0.0)
+	{
+		return NormalTS;
+	}
+
+	const float4 Masks = saturate(GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks) * Strength * ChannelStrength);
+	if (Masks.r <= 0.01 && Masks.g <= 0.01)
+	{
+		return NormalTS;
+	}
+
+	const float3 P = GrungifyNoisePos(WorldPos, FeatureScaleCm, SeedOffset);
+	const float Step = 0.03;
+	const float H0 = GrungifyReliefHeight(Masks, P, WorldNormal.z);
+	const float HT = GrungifyReliefHeight(Masks, P + normalize(TangentWS) * Step, WorldNormal.z);
+	const float HB = GrungifyReliefHeight(Masks, P + normalize(BitangentWS) * Step, WorldNormal.z);
+	const float2 Slope = float2(HT - H0, HB - H0) / Step;
+
+	return normalize(float3(NormalTS.xy - Slope * Relief * 0.05, NormalTS.z));
+}
+
+float3 GrungifyMaskDebug(float MaskMode, float4 VertexMasks, float4 TextureMasks, float Channel)
+{
+	const float4 Masks = GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks);
 	const int C = (int)round(Channel);
 	if (C == 1) return Masks.rrr;
 	if (C == 2) return Masks.ggg;

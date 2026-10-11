@@ -10,6 +10,7 @@ class UActorComponent;
 class UMaterialInterface;
 class UPrimitiveComponent;
 class UStaticMeshComponent;
+class UTexture2D;
 class UWorld;
 
 /** Floor heights sampled on a grid over the zone. Each cell can hold several floors (storeys, stairs). */
@@ -31,6 +32,20 @@ private:
 	int32 NumY = 0;
 	/** Per cell, highest first. */
 	TArray<TArray<double, TInlineAllocator<4>>> Heights;
+};
+
+/** CPU copy of an 8-bit gate texture, sampled nearest with wrap. */
+class FGrungifyGateSampler
+{
+public:
+	bool Init(UTexture2D* Texture, FString& OutError);
+	float Sample(const FVector2f& UV, EGrungifyChannel Channel) const;
+
+private:
+	int32 Width = 0;
+	int32 Height = 0;
+	int32 BytesPerPixel = 0;
+	TArray64<uint8> Pixels;
 };
 
 struct FGrungifyGenerationParams
@@ -64,29 +79,58 @@ struct FGrungifyGenerationParams
 
 	float ChipIntensity = 1.f;
 	float EdgeAngleDeg = 60.f;
+	float EdgeWearWidth = 8.f;
 	float FloorKickHeight = 30.f;
 
-	/** Indexed by surface type - 1 (Stone, Metal, Trim). */
-	FGrungifySurfaceProfile Profiles[3];
+	EGrungifyMaskOutput MaskOutput = EGrungifyMaskOutput::Auto;
+	float MaskTexelSize = 4.f;
+	int32 MaxMaskResolution = 2048;
+	int32 MaskUVChannel = 1;
 
 	const FGrungifyFloorField* Floor = nullptr;
 	TArray<FGrungifyRunoffSource> Sources;
 };
 
+/** Everything resolved for one material slot. */
+struct FGrungifySlotInfo
+{
+	EGrungifySurfaceType Surface = EGrungifySurfaceType::Stone;
+	FGrungifySurfaceProfile Profile;
+	bool bRail = false;
+	bool bExcluded = false;
+	const FGrungifyGate* Gate = nullptr;
+	const FGrungifyGateSampler* GateSampler = nullptr;
+	FString Description;
+};
+
 struct FGrungifyComponentContext
 {
-	/** Resolved surface per material slot (never Auto). */
-	TArray<EGrungifySurfaceType> SlotSurfaces;
-	bool bIsRail = false;
+	TArray<FGrungifySlotInfo> Slots;
 };
 
 struct FGrungifyComponentResult
 {
 	UStaticMeshComponent* Component = nullptr;
-	/** One colour per render vertex, per LOD. Empty for LODs that could not be read. */
+
+	/** VertexColor or Texture (never Auto). */
+	EGrungifyMaskOutput Output = EGrungifyMaskOutput::VertexColor;
+
+	/** One colour per render vertex, per LOD (vertex output). */
 	TArray<TArray<FColor>> LODColors;
+
+	/** Square BGRA mask texture in the mask UV channel (texture output). */
+	int32 TextureSize = 0;
+	TArray<FColor> TexturePixels;
+
 	EGrungifySurfaceType DominantSurface = EGrungifySurfaceType::Stone;
 	bool bNanite = false;
+	int32 Vertices = 0;
+	FLinearColor MeanMasks = FLinearColor(0.f, 0.f, 0.f, 0.f);
+	FLinearColor MaxMasks = FLinearColor(0.f, 0.f, 0.f, 0.f);
+	FString Notes;
+
+	/** Index of this component's entry in the zone's run report. */
+	int32 ReportIndex = INDEX_NONE;
 };
 
 namespace Grungify
@@ -106,12 +150,23 @@ namespace Grungify
 	bool IsVent(const AActor* Actor, const UPrimitiveComponent* Component);
 	bool HasIgnoreTag(const AActor* Actor, const UActorComponent* Component);
 
+	/** True if the rule targets this slot. */
+	bool RuleMatchesSlot(const FGrungifySlotRule& Rule, const UStaticMeshComponent* Component, int32 MaterialIndex);
+
 	bool GenerateComponent(UStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult);
 
-	void CaptureRecord(UStaticMeshComponent* Component, bool bCaptureMaterials, FGrungifyComponentRecord& OutRecord);
-	void RestoreRecord(const FGrungifyComponentRecord& Record);
+	/** Snapshot of everything Grungify can change on a component. */
+	void CaptureRecord(UStaticMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
+	/** Puts the component back exactly as captured. Calls Modify() only when bTransactional. */
+	void RestoreRecord(const FGrungifyComponentRecord& Record, bool bTransactional = true);
+
 	void WriteVertexColors(UStaticMeshComponent* Component, const TArray<TArray<FColor>>& LODColors);
+	/** Writes the Grungify custom data values. Returns false (and writes nothing) if the indices hold someone else's data. */
+	bool CustomDataSlotsFree(const TArray<float>& OriginalData);
 	void WriteCustomData(UStaticMeshComponent* Component, const float (&Values)[CPD_Count]);
+	UTexture2D* CreateMaskTexture(UStaticMeshComponent* Component, int32 Size, const TArray<FColor>& Pixels);
+	/** Puts a material instance carrying the mask texture on every slot, parented to the slot's current material (or to ParentOverride). */
+	void BindMaskTexture(UStaticMeshComponent* Component, UTexture2D* Texture, UMaterialInterface* ParentOverride);
 	void SwapMaterials(UStaticMeshComponent* Component, UMaterialInterface* Material);
 }
 

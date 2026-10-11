@@ -8,15 +8,17 @@
 class UArrowComponent;
 class UGrungifyZoneComponent;
 class UStaticMeshComponent;
+struct FGrungifyComponentContext;
 struct FGrungifyComponentResult;
 struct FGrungifyGenerationParams;
+class FGrungifyGateSampler;
 
 /**
  * Drop into a level, size the box, then Preview / Apply / Clear.
  *
- * The zone bakes four wear masks into the vertex colours of every static mesh it overlaps:
- *   R = edge chips, G = dust, B = runoff, A = handling.
- * MF_GrungifyWeathering turns those masks into shading, so any material that calls it picks up the result.
+ * The zone bakes four wear masks into every static mesh it overlaps, as vertex colours or as a per-instance
+ * mask texture (Nanite and sparse geometry):  R = edge chips, G = dust, B = runoff, A = handling.
+ * MF_GrungifyWeathering turns those masks into shading; meshes the zone hasn't touched keep their original look.
  * Everything is driven by Seed, so the same settings always regenerate the same result.
  */
 UCLASS(Blueprintable, BlueprintType, meta = (DisplayName = "Grungify Weathering Zone"),
@@ -48,6 +50,13 @@ public:
 	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Grungify")
 	void NewSeed();
 
+	/** Generate and report what would happen, without touching any mesh. See Last Report and Saved/Grungify/Reports. */
+	UFUNCTION(CallInEditor, BlueprintCallable, Category = "Grungify")
+	void DryRun();
+
+	UFUNCTION(BlueprintPure, Category = "Grungify")
+	const FGrungifyRunReport& GetLastReport() const { return LastReport; }
+
 	// ---------------------------------------------------------------- General
 
 	/** Same seed + same settings = same result, every time. */
@@ -74,11 +83,29 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify")
 	EGrungifyPreviewDisplay PreviewDisplay = EGrungifyPreviewDisplay::FinalMaterial;
 
+	/** Vertex colours, or a per-instance mask texture that works on Nanite and sparse geometry. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify")
+	EGrungifyMaskOutput MaskOutput = EGrungifyMaskOutput::Auto;
+
+	/** Physical size of one mask texel. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (ClampMin = "0.25", UIMin = "1", UIMax = "20", Units = "cm"))
+	float MaskTexelSizeCm = 4.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (ClampMin = "32", ClampMax = "4096"))
+	int32 MaxMaskResolution = 2048;
+
+	/** Write every run's report to Saved/Grungify/Reports as JSON. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify")
+	bool bWriteReportFiles = true;
+
 	UPROPERTY(VisibleInstanceOnly, Transient, Category = "Grungify")
 	FString Status;
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Grungify")
 	bool bPreviewActive = false;
+
+	UPROPERTY(VisibleInstanceOnly, Transient, BlueprintReadOnly, Category = "Grungify")
+	FGrungifyRunReport LastReport;
 
 	// ---------------------------------------------------------- Wear direction
 
@@ -128,7 +155,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Runoff Below Vents", meta = (ClampMin = "0", ClampMax = "1"))
 	float AmbientStreaks = 0.15f;
 
-	/** Extra runoff sources besides anything tagged Grungify.Vent or named like a vent / drain / spout. */
+	/** Hand-placed leaks at the actual leak locations. Drag the diamonds in the viewport. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Runoff Below Vents")
+	TArray<FGrungifyLeak> Leaks;
+
+	/** Also treat actors tagged Grungify.Vent or named like a vent / drain / spout as sources. Turn off to use only Leaks and Runoff Sources. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Runoff Below Vents")
+	bool bAutoDetectVents = true;
+
+	/** Actors whose footprint is a runoff source. */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Grungify|Runoff Below Vents")
 	TArray<TSoftObjectPtr<AActor>> RunoffSources;
 
@@ -157,6 +192,10 @@ public:
 	/** Edges this sharp or sharper count fully as exposed edges. Lower it to catch bevelled edges. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Edge Chips", meta = (ClampMin = "5", ClampMax = "170", Units = "deg"))
 	float EdgeAngleDegrees = 60.f;
+
+	/** Width of edge wear in mask textures (vertex colours follow the mesh's own edge spacing). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Edge Chips", meta = (ClampMin = "0.5", UIMax = "50", Units = "cm"))
+	float EdgeWearWidthCm = 8.f;
 
 	/** Edges below this height get extra chipping from feet and carts. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Edge Chips", meta = (ClampMin = "0", UIMax = "100", Units = "cm"))
@@ -197,10 +236,32 @@ public:
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Grungify|Filtering")
 	TArray<TSoftObjectPtr<AActor>> ExcludedActors;
 
+	/** If set, only these actors are weathered. */
+	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Grungify|Targeting")
+	TArray<TSoftObjectPtr<AActor>> IncludeOnlyActors;
+
+	/** If set, only components carrying one of these tags are weathered. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Targeting")
+	TArray<FName> RequiredComponentTags;
+
+	/** Per-slot targeting: exclude slots, give them their own profile (ceramic, steel, bronze...), mark rails, gate by facing, height or a painted texture. First match wins. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Targeting")
+	TArray<FGrungifySlotRule> SlotRules;
+
+	/** What to do with meshes another zone has already weathered. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Targeting")
+	EGrungifyOverlapPolicy OverlapPolicy = EGrungifyOverlapPolicy::SkipOwned;
+
 	UGrungifyZoneComponent* GetZoneComponent() const { return ZoneComponent; }
 	const TArray<FGrungifyRunoffSource>& GetCachedRunoffSources() const { return CachedRunoffSources; }
 
 	virtual void OnConstruction(const FTransform& Transform) override;
+	virtual void Destroyed() override;
+	virtual void PostUnregisterAllComponents() override;
+
+	/** The record this zone holds for a component it has applied to, or null. */
+	const FGrungifyComponentRecord* FindAppliedRecord(const UStaticMeshComponent* Component) const;
+	bool IsPreviewing(const UStaticMeshComponent* Component) const;
 
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
@@ -213,6 +274,12 @@ public:
 
 	/** Re-scan the level for vents (also done on every Preview / Apply). */
 	void RefreshRunoffSources();
+
+	/** Puts previewed meshes back without an undo entry. Used before saves and when the zone is unloaded or destroyed. */
+	void DiscardPreview(const TCHAR* Reason);
+
+	/** Hands over the original-state record for a component (overlap take-over). */
+	bool ReleaseAppliedRecord(const UStaticMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
 #endif
 
 protected:
@@ -243,8 +310,12 @@ private:
 	void RefreshPreviewIfLive();
 	void RestorePreview();
 	void BuildParams(FGrungifyGenerationParams& OutParams) const;
-	void GenerateResults(TArray<FGrungifyComponentResult>& OutResults, FString& OutSummary);
+	void BuildContext(UStaticMeshComponent* Component, TMap<UTexture2D*, TUniquePtr<FGrungifyGateSampler>>& Samplers, FGrungifyComponentContext& OutContext, FGrungifyComponentReport& Report);
+	void GenerateResults(const TCHAR* Operation, TArray<FGrungifyComponentResult>& OutResults, TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers);
 	bool ShouldConsiderActor(const AActor* Actor, const FBox& ZoneBox) const;
-	void WriteResult(const FGrungifyComponentResult& Result, EGrungifyPreviewDisplay Display) const;
+	/** Writes masks, custom data and materials. Returns false if the custom data slots were taken. */
+	bool WriteResult(const FGrungifyComponentResult& Result, EGrungifyPreviewDisplay Display, const TArray<float>& OriginalCustomData) const;
+	const TArray<float>& OriginalCustomDataFor(const UStaticMeshComponent* Component, const TArray<float>& Current) const;
+	void FinishReport(double StartSeconds);
 #endif
 };

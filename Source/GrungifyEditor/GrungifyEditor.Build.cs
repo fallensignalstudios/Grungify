@@ -16,6 +16,8 @@ public class GrungifyEditor : ModuleRules
 			"UnrealEd",
 			"ToolMenus",
 			"MaterialEditor",
+			"Projects",
+			"RHI",
 			"AssetRegistry",
 			"DeveloperSettings",
 			"Grungify"

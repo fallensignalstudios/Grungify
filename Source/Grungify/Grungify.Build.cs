@@ -17,6 +17,8 @@ public class Grungify : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
+			"Json",
+			"JsonUtilities",
 			"RenderCore",
 			"RHI"
 		});

@@ -3,17 +3,15 @@
 #if WITH_EDITOR
 
 #include "CollisionQueryParams.h"
-#include "ComponentReregisterContext.h"
 #include "Components/StaticMeshComponent.h"
-#include "Components/StaticMeshComponentLODInfo.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/Texture2D.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "GrungifySettings.h"
 #include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInterface.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
-#include "Rendering/ColorVertexBuffer.h"
 #include "StaticMeshResources.h"
 
 namespace Grungify
@@ -433,541 +431,146 @@ double FGrungifyFloorField::FloorBelow(const FVector& P) const
 	return FMath::Min(FlatZ, P.Z);
 }
 
-// ---------------------------------------------------------------- Generation
+// -------------------------------------------------------------- Slot rules
 
 namespace Grungify
 {
-	static FORCEINLINE uint8 Quantize(float Value)
+	bool RuleMatchesSlot(const FGrungifySlotRule& Rule, const UStaticMeshComponent* Component, int32 MaterialIndex)
 	{
-		return uint8(FMath::RoundToInt(FMath::Clamp(Value, 0.f, 1.f) * 255.f));
-	}
-
-	static float ZoneWeight(const FGrungifyGenerationParams& Params, const FVector& P)
-	{
-		const FVector Local = Params.ZoneTransform.InverseTransformPositionNoScale(P);
-		const FVector Inside = Params.ZoneExtent - Local.GetAbs();
-		const double MinInside = Inside.GetMin();
-		if (MinInside <= 0.0)
-		{
-			return 0.f;
-		}
-		return Params.ZoneFalloff > 1.f ? FMath::Clamp(float(MinInside / Params.ZoneFalloff), 0.f, 1.f) : 1.f;
-	}
-
-	static float RunoffFromSource(const FGrungifyRunoffSource& Source, const FVector& P, const FVector& N, const FGrungifyGenerationParams& Params)
-	{
-		// Runoff follows gravity.
-		const FVector Rel = P - Source.Origin;
-		const double Below = -Rel.Z;
-		const double Lead = Source.Radius * 0.25;
-		if (Below < -Lead || Below > Params.RunoffLength)
-		{
-			return 0.f;
-		}
-
-		// Skip the far side of the wall the vent is mounted on.
-		const double BackfaceTolerance = Source.Radius * 0.25 + 2.0;
-		if (FVector::DotProduct(Source.Origin - P, N) < -BackfaceTolerance)
-		{
-			return 0.f;
-		}
-
-		const double Down = FMath::Max(Below, 0.0);
-		const double Lateral = FVector(Rel.X, Rel.Y, 0.0).Size();
-		const double Width = Source.Radius * (1.0 + Params.RunoffSpread * Down / Params.RunoffLength);
-		if (Lateral > Width)
-		{
-			return 0.f;
-		}
-
-		const float Edge = 1.f - FMath::SmoothStep(float(Width * 0.5), float(Width), float(Lateral));
-		const float Along = FMath::Pow(float(1.0 - Down / Params.RunoffLength), 1.5f);
-		const float Lip = Below < 0.0 ? float(1.0 + Below / Lead) : 1.f;
-
-		// Streaks: fine across the flow, long along it.
-		const double StreakScale = FMath::Max(Params.FeatureScale * 0.35, 1.0);
-		const FVector StreakP(P.X / StreakScale, P.Y / StreakScale, P.Z / (Params.RunoffLength * 0.5));
-		const float Streak = Fbm(StreakP, Params.Seed + 71u);
-
-		return Edge * Along * Lip * FMath::Lerp(0.35f, 1.f, Streak);
-	}
-
-	bool GenerateComponent(UStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult)
-	{
-		UStaticMesh* Mesh = Component ? Component->GetStaticMesh() : nullptr;
-		const FStaticMeshRenderData* RenderData = Mesh ? Mesh->GetRenderData() : nullptr;
-		if (!RenderData || RenderData->LODResources.Num() == 0 || !Params.Floor)
+		const bool bHasActor = !Rule.Actor.IsNull();
+		const bool bHasPattern = !Rule.NamePattern.IsEmpty();
+		const bool bHasMaterial = !Rule.Material.IsNull();
+		if (!Rule.bEnabled || (!bHasActor && !bHasPattern && !bHasMaterial))
 		{
 			return false;
 		}
 
-		OutResult.Component = Component;
-		OutResult.bNanite = Mesh->HasValidNaniteData();
-		OutResult.LODColors.SetNum(RenderData->LODResources.Num());
-
-		const FTransform& Transform = Component->GetComponentTransform();
-		const FVector Scale = Transform.GetScale3D();
-		const FVector InvScale(
-			FMath::IsNearlyZero(Scale.X) ? 0.0 : 1.0 / Scale.X,
-			FMath::IsNearlyZero(Scale.Y) ? 0.0 : 1.0 / Scale.Y,
-			FMath::IsNearlyZero(Scale.Z) ? 0.0 : 1.0 / Scale.Z);
-
-		const float SharpRef = 1.f - FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(Params.EdgeAngleDeg, 5.f, 170.f) * 0.5f));
-		const FVector Upwind = -Params.WearDir;
-		const double FeatureScale = FMath::Max<double>(Params.FeatureScale, 1.0);
-		const EGrungifySurfaceType DefaultSurface = Context.SlotSurfaces.Num() > 0 ? Context.SlotSurfaces[0] : EGrungifySurfaceType::Stone;
-
-		int32 SurfaceVotes[3] = { 0, 0, 0 };
-		bool bAnyLOD = false;
-
-		for (int32 LODIndex = 0; LODIndex < RenderData->LODResources.Num(); ++LODIndex)
+		const AActor* Owner = Component->GetOwner();
+		if (bHasActor && Rule.Actor.Get() != Owner)
 		{
-			const FStaticMeshLODResources& LOD = RenderData->LODResources[LODIndex];
-			const FPositionVertexBuffer& Positions = LOD.VertexBuffers.PositionVertexBuffer;
-			const FStaticMeshVertexBuffer& Attributes = LOD.VertexBuffers.StaticMeshVertexBuffer;
-			const int32 NumVerts = int32(LOD.GetNumVertices());
-
-			TArray<uint32> Indices;
-			LOD.IndexBuffer.GetCopy(Indices);
-
-			if (NumVerts == 0 || Indices.Num() < 3 || int32(Positions.GetNumVertices()) != NumVerts || int32(Attributes.GetNumVertices()) != NumVerts)
-			{
-				continue;
-			}
-
-			// World-space positions and normals.
-			TArray<FVector> WorldPos;
-			TArray<FVector> WorldNormal;
-			WorldPos.SetNumUninitialized(NumVerts);
-			WorldNormal.SetNumUninitialized(NumVerts);
-
-			// Weld split vertices (hard edges, UV seams) so edge detection sees the real topology.
-			TArray<int32> Weld;
-			Weld.SetNumUninitialized(NumVerts);
-			TMap<FIntVector, int32> WeldMap;
-			WeldMap.Reserve(NumVerts);
-			TArray<int32> WeldFirst;
-			WeldFirst.Reserve(NumVerts);
-
-			for (int32 V = 0; V < NumVerts; ++V)
-			{
-				const FVector3f L = Positions.VertexPosition(V);
-				const FVector4f N = Attributes.VertexTangentZ(V);
-				WorldPos[V] = Transform.TransformPosition(FVector(L.X, L.Y, L.Z));
-				WorldNormal[V] = Transform.TransformVectorNoScale(FVector(N.X, N.Y, N.Z) * InvScale).GetSafeNormal();
-
-				const FIntVector Key(FMath::RoundToInt(L.X * 20.f), FMath::RoundToInt(L.Y * 20.f), FMath::RoundToInt(L.Z * 20.f));
-				if (const int32* Found = WeldMap.Find(Key))
-				{
-					Weld[V] = *Found;
-				}
-				else
-				{
-					Weld[V] = WeldFirst.Num();
-					WeldMap.Add(Key, WeldFirst.Num());
-					WeldFirst.Add(V);
-				}
-			}
-
-			const int32 NumWelded = WeldFirst.Num();
-			const int32 NumTris = Indices.Num() / 3;
-
-			// Area-weighted average normal per welded vertex.
-			TArray<FVector> FaceNormal;
-			FaceNormal.SetNumZeroed(NumTris);
-			TArray<FVector> AvgNormal;
-			AvgNormal.Init(FVector::ZeroVector, NumWelded);
-
-			for (int32 T = 0; T < NumTris; ++T)
-			{
-				const uint32 I0 = Indices[T * 3 + 0];
-				const uint32 I1 = Indices[T * 3 + 1];
-				const uint32 I2 = Indices[T * 3 + 2];
-				if (I0 >= uint32(NumVerts) || I1 >= uint32(NumVerts) || I2 >= uint32(NumVerts))
-				{
-					continue;
-				}
-
-				FVector Cross = FVector::CrossProduct(WorldPos[I1] - WorldPos[I0], WorldPos[I2] - WorldPos[I0]);
-				if (Cross.SizeSquared() < UE_SMALL_NUMBER)
-				{
-					continue;
-				}
-				// Orient by the authored normals so winding / mirroring doesn't matter.
-				if (FVector::DotProduct(Cross, WorldNormal[I0] + WorldNormal[I1] + WorldNormal[I2]) < 0.0)
-				{
-					Cross = -Cross;
-				}
-				FaceNormal[T] = Cross.GetUnsafeNormal();
-
-				const int32 W0 = Weld[I0], W1 = Weld[I1], W2 = Weld[I2];
-				AvgNormal[W0] += Cross;
-				if (W1 != W0)
-				{
-					AvgNormal[W1] += Cross;
-				}
-				if (W2 != W0 && W2 != W1)
-				{
-					AvgNormal[W2] += Cross;
-				}
-			}
-			for (FVector& N : AvgNormal)
-			{
-				N = N.GetSafeNormal();
-			}
-
-			// Sharpness: how far the faces around a vertex bend away from its average normal.
-			// Side: whether the neighbours sit below (convex) or above (concave) the tangent plane.
-			TArray<float> Sharp;
-			Sharp.Init(0.f, NumWelded);
-			TArray<float> SideSum;
-			SideSum.Init(0.f, NumWelded);
-			TArray<int32> SideCount;
-			SideCount.Init(0, NumWelded);
-
-			for (int32 T = 0; T < NumTris; ++T)
-			{
-				if (FaceNormal[T].IsZero())
-				{
-					continue;
-				}
-				const int32 W[3] = { Weld[Indices[T * 3 + 0]], Weld[Indices[T * 3 + 1]], Weld[Indices[T * 3 + 2]] };
-				for (int32 K = 0; K < 3; ++K)
-				{
-					const int32 Wk = W[K];
-					Sharp[Wk] = FMath::Max(Sharp[Wk], float(1.0 - FVector::DotProduct(FaceNormal[T], AvgNormal[Wk])));
-
-					const FVector& Pk = WorldPos[WeldFirst[Wk]];
-					for (int32 J = 0; J < 3; ++J)
-					{
-						const int32 Wj = W[J];
-						if (Wj == Wk)
-						{
-							continue;
-						}
-						const FVector Dir = (WorldPos[WeldFirst[Wj]] - Pk).GetSafeNormal();
-						if (!Dir.IsZero())
-						{
-							SideSum[Wk] += float(FVector::DotProduct(AvgNormal[Wk], Dir));
-							++SideCount[Wk];
-						}
-					}
-				}
-			}
-
-			TArray<float> Convex;
-			TArray<float> Concave;
-			Convex.SetNumUninitialized(NumWelded);
-			Concave.SetNumUninitialized(NumWelded);
-			for (int32 Wi = 0; Wi < NumWelded; ++Wi)
-			{
-				const float SharpN = FMath::Clamp(Sharp[Wi] / SharpRef, 0.f, 1.f);
-				const float Side = SideCount[Wi] > 0 ? SideSum[Wi] / SideCount[Wi] : 0.f;
-				Convex[Wi] = SharpN * FMath::Clamp(-Side * 3.f, 0.f, 1.f);
-				Concave[Wi] = SharpN * FMath::Clamp(Side * 3.f, 0.f, 1.f);
-			}
-
-			// Surface type per vertex, from the material slot of the section it belongs to.
-			TArray<EGrungifySurfaceType> VertSurface;
-			VertSurface.Init(DefaultSurface, NumVerts);
-			for (const FStaticMeshSection& Section : LOD.Sections)
-			{
-				const EGrungifySurfaceType SectionSurface = Context.SlotSurfaces.IsValidIndex(Section.MaterialIndex) ? Context.SlotSurfaces[Section.MaterialIndex] : DefaultSurface;
-				const uint32 First = Section.FirstIndex;
-				const uint32 Last = FMath::Min<uint32>(First + Section.NumTriangles * 3, uint32(Indices.Num()));
-				for (uint32 Idx = First; Idx < Last; ++Idx)
-				{
-					if (Indices[Idx] < uint32(NumVerts))
-					{
-						VertSurface[Indices[Idx]] = SectionSurface;
-					}
-				}
-			}
-
-			const float HandSoft = FMath::Max((Params.HandMax - Params.HandMin) * 0.25f, 5.f);
-
-			TArray<FColor>& Colors = OutResult.LODColors[LODIndex];
-			Colors.SetNumUninitialized(NumVerts);
-
-			for (int32 V = 0; V < NumVerts; ++V)
-			{
-				const FVector& P = WorldPos[V];
-				const FVector& N = WorldNormal[V];
-				const int32 Wi = Weld[V];
-
-				const int32 SurfaceIndex = FMath::Clamp(int32(VertSurface[V]) - 1, 0, 2);
-				if (LODIndex == 0)
-				{
-					++SurfaceVotes[SurfaceIndex];
-				}
-
-				const float ZoneW = ZoneWeight(Params, P);
-				if (ZoneW <= 0.f)
-				{
-					Colors[V] = FColor(0, 0, 0, 0);
-					continue;
-				}
-
-				const FGrungifySurfaceProfile& Profile = Params.Profiles[SurfaceIndex];
-				const float Height = float(FMath::Max(0.0, P.Z - Params.Floor->FloorBelow(P)));
-				const FVector NP = P / FeatureScale;
-				const float NZ = float(N.Z);
-
-				// Handling: hands polish rails and, more lightly, edges at hand height.
-				const float Band = FMath::SmoothStep(Params.HandMin - HandSoft, Params.HandMin, Height)
-					* (1.f - FMath::SmoothStep(Params.HandMax, Params.HandMax + HandSoft, Height));
-				const float Top = FMath::Clamp(NZ * 0.7f + 0.5f, 0.f, 1.f);
-				float Handling = Context.bIsRail
-					? Top * (0.6f + 0.4f * Band)
-					: Band * Convex[Wi] * Params.GeneralHandling;
-				Handling *= FMath::Lerp(0.7f, 1.f, Fbm(NP * 0.5, Params.Seed + 11u)) * Params.HandlingIntensity * Profile.Handling;
-				Handling = FMath::Clamp(Handling, 0.f, 1.f);
-
-				// Dust: thick at the base of walls, on ledges and packed into creases.
-				const float UpFacing = FMath::Clamp((NZ - 0.6f) / 0.4f, 0.f, 1.f);
-				const bool bOnFloor = UpFacing > 0.5f && Height < 5.f;
-				float Dust = 1.f - FMath::SmoothStep(0.f, FMath::Max(Params.DustHeight, 1.f), Height);
-				Dust *= Dust;
-				if (bOnFloor)
-				{
-					Dust *= Params.FloorDust;
-				}
-				else
-				{
-					Dust = FMath::Max(Dust, UpFacing * Params.LedgeDust);
-				}
-				Dust = FMath::Max(Dust, Concave[Wi] * Params.CreviceDust);
-				Dust *= FMath::Lerp(0.6f, 1.f, Fbm(NP * 0.8, Params.Seed + 23u));
-				Dust *= FMath::Clamp(1.2f + NZ, 0.f, 1.f); // little on undersides
-				Dust *= 1.f - Handling * 0.8f;              // hands keep it clean
-				Dust *= Params.DustIntensity * Profile.Dust;
-
-				// Runoff: streaks down from vents, plus faint general streaking on walls.
-				float Runoff = 0.f;
-				for (const FGrungifyRunoffSource& Source : Params.Sources)
-				{
-					Runoff = FMath::Max(Runoff, RunoffFromSource(Source, P, N, Params));
-				}
-				if (Params.AmbientStreaks > 0.f)
-				{
-					const float Vertical = 1.f - FMath::Abs(NZ);
-					const FVector StreakP(NP.X * 3.0, NP.Y * 3.0, NP.Z * 0.2);
-					Runoff = FMath::Max(Runoff, Vertical * Params.AmbientStreaks * FMath::SmoothStep(0.45f, 0.8f, Fbm(StreakP, Params.Seed + 37u)));
-				}
-				Runoff *= FMath::Clamp(1.f + NZ * 1.5f, 0.f, 1.f) * Params.RunoffIntensity * Profile.Runoff;
-
-				// Edge chips: convex edges, more where they face into the wear direction or get kicked.
-				const float Exposure = FMath::Lerp(1.f, FMath::Clamp(0.25f + 0.75f * float(FVector::DotProduct(N, Upwind)), 0.f, 1.f), Params.WearInfluence);
-				const float Kick = (1.f - FMath::SmoothStep(0.f, FMath::Max(Params.FloorKickHeight, 1.f), Height)) * 0.5f;
-				float Chips = Convex[Wi] * FMath::Min(Exposure + Kick, 1.f);
-				Chips *= FMath::Lerp(0.35f, 1.f, Fbm(NP * 1.5, Params.Seed + 51u)) * Params.ChipIntensity * Profile.EdgeChips;
-
-				const float K = Params.Intensity * ZoneW;
-				Colors[V] = FColor(Quantize(Chips * K), Quantize(Dust * K), Quantize(Runoff * K), Quantize(Handling * K));
-			}
-
-			bAnyLOD = true;
+			return false;
 		}
 
-		int32 Best = 0;
-		for (int32 Index = 1; Index < 3; ++Index)
+		const UMaterialInterface* SlotMaterial = Component->GetMaterial(MaterialIndex);
+
+		if (bHasMaterial)
 		{
-			if (SurfaceVotes[Index] > SurfaceVotes[Best])
+			const UMaterialInterface* Wanted = Rule.Material.Get();
+			bool bFound = false;
+			for (const UMaterialInterface* It = SlotMaterial; It && !bFound; )
 			{
-				Best = Index;
+				bFound = Wanted ? It == Wanted : It->GetPathName() == Rule.Material.ToSoftObjectPath().ToString();
+				const UMaterialInstance* Instance = Cast<UMaterialInstance>(It);
+				It = Instance ? Instance->Parent.Get() : nullptr;
+			}
+			if (!bFound)
+			{
+				return false;
 			}
 		}
-		OutResult.DominantSurface = EGrungifySurfaceType(Best + 1);
-		return bAnyLOD;
+
+		if (bHasPattern)
+		{
+			TArray<FString> Names;
+			if (const UStaticMesh* Mesh = Component->GetStaticMesh())
+			{
+				const TArray<FStaticMaterial>& StaticMaterials = Mesh->GetStaticMaterials();
+				if (StaticMaterials.IsValidIndex(MaterialIndex))
+				{
+					Names.Add(StaticMaterials[MaterialIndex].MaterialSlotName.ToString());
+				}
+				Names.Add(Mesh->GetName());
+			}
+			for (const UMaterialInterface* It = SlotMaterial; It; )
+			{
+				Names.Add(It->GetName());
+				const UMaterialInstance* Instance = Cast<UMaterialInstance>(It);
+				It = Instance ? Instance->Parent.Get() : nullptr;
+			}
+			Names.Add(Component->GetName());
+			if (Owner)
+			{
+				Names.Add(Owner->GetActorLabel());
+			}
+
+			const bool bAny = Names.ContainsByPredicate([&Rule](const FString& Name) { return Name.MatchesWildcard(Rule.NamePattern, ESearchCase::IgnoreCase); });
+			if (!bAny)
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+}
+
+// ------------------------------------------------------------ Gate sampler
+
+bool FGrungifyGateSampler::Init(UTexture2D* Texture, FString& OutError)
+{
+	if (!Texture)
+	{
+		OutError = TEXT("no gate texture");
+		return false;
 	}
 
-	// ------------------------------------------------------- Writing / restoring
-
-	static void SetLODColors(UStaticMeshComponent* Component, int32 LODIndex, const TArray<FColor>& Colors)
+	FTextureSource& Source = Texture->Source;
+	const ETextureSourceFormat Format = Source.GetFormat();
+	if (Format == TSF_BGRA8)
 	{
-		FStaticMeshComponentLODInfo& Info = Component->LODData[LODIndex];
-		if (Info.OverrideVertexColors)
-		{
-			Info.ReleaseOverrideVertexColorsAndBlock();
-		}
-		Info.OverrideVertexColors = new FColorVertexBuffer;
-		Info.OverrideVertexColors->InitFromColorArray(Colors);
-		BeginInitResource(Info.OverrideVertexColors);
+		BytesPerPixel = 4;
+	}
+	else if (Format == TSF_G8)
+	{
+		BytesPerPixel = 1;
+	}
+	else
+	{
+		OutError = FString::Printf(TEXT("gate texture %s must have an 8-bit source (BGRA8 or G8)"), *Texture->GetName());
+		return false;
 	}
 
-	static void RemoveLODColors(UStaticMeshComponent* Component, int32 LODIndex)
+	if (!Source.GetMipData(Pixels, 0))
 	{
-		if (!Component->LODData.IsValidIndex(LODIndex))
-		{
-			return;
-		}
-		FStaticMeshComponentLODInfo& Info = Component->LODData[LODIndex];
-		if (Info.OverrideVertexColors)
-		{
-			Info.ReleaseOverrideVertexColorsAndBlock();
-		}
-#if WITH_EDITORONLY_DATA
-		Info.PaintedVertices.Empty();
-#endif
+		OutError = FString::Printf(TEXT("could not read source data of gate texture %s"), *Texture->GetName());
+		return false;
 	}
 
-	static void FinishVertexColorEdit(UStaticMeshComponent* Component, const FStaticMeshRenderData* RenderData)
+	Width = Source.GetSizeX();
+	Height = Source.GetSizeY();
+	if (Width <= 0 || Height <= 0 || Pixels.Num() < int64(Width) * Height * BytesPerPixel)
 	{
-#if WITH_EDITORONLY_DATA
-		// Lets the engine remap the colours if the mesh is reimported later.
-		Component->StaticMeshDerivedDataKey = RenderData->DerivedDataKey;
-#endif
-		Component->CachePaintedDataIfNecessary();
+		OutError = FString::Printf(TEXT("gate texture %s has unexpected source size"), *Texture->GetName());
+		return false;
+	}
+	return true;
+}
+
+float FGrungifyGateSampler::Sample(const FVector2f& UV, EGrungifyChannel Channel) const
+{
+	if (Width <= 0)
+	{
+		return 1.f;
 	}
 
-	static void EnsureLODData(UStaticMeshComponent* Component, int32 NumLODs)
+	const float U = UV.X - FMath::FloorToFloat(UV.X);
+	const float V = UV.Y - FMath::FloorToFloat(UV.Y);
+	const int32 X = FMath::Clamp(int32(U * Width), 0, Width - 1);
+	const int32 Y = FMath::Clamp(int32(V * Height), 0, Height - 1);
+	const uint8* Pixel = Pixels.GetData() + (int64(Y) * Width + X) * BytesPerPixel;
+
+	if (BytesPerPixel == 1)
 	{
-		if (Component->LODData.Num() < NumLODs)
-		{
-			Component->SetLODDataCount(uint32(NumLODs), uint32(NumLODs));
-		}
+		return Pixel[0] / 255.f;
 	}
 
-	void CaptureRecord(UStaticMeshComponent* Component, bool bCaptureMaterials, FGrungifyComponentRecord& OutRecord)
+	// BGRA byte order.
+	switch (Channel)
 	{
-		OutRecord = FGrungifyComponentRecord();
-		OutRecord.Component = Component;
-
-		const UStaticMesh* Mesh = Component->GetStaticMesh();
-		const FStaticMeshRenderData* RenderData = Mesh ? Mesh->GetRenderData() : nullptr;
-		const int32 NumLODs = RenderData ? RenderData->LODResources.Num() : 0;
-
-		OutRecord.LODs.SetNum(NumLODs);
-		for (int32 LODIndex = 0; LODIndex < NumLODs; ++LODIndex)
-		{
-			if (!Component->LODData.IsValidIndex(LODIndex))
-			{
-				continue;
-			}
-			const FColorVertexBuffer* Existing = Component->LODData[LODIndex].OverrideVertexColors;
-			if (Existing && Existing->GetNumVertices() > 0)
-			{
-				FGrungifyLODBackup& Backup = OutRecord.LODs[LODIndex];
-				Backup.bHadOverride = true;
-				Backup.Colors.SetNumUninitialized(Existing->GetNumVertices());
-				for (uint32 V = 0; V < Existing->GetNumVertices(); ++V)
-				{
-					Backup.Colors[V] = Existing->VertexColor(V);
-				}
-			}
-		}
-
-		const int32 Base = UGrungifySettings::Get()->CustomPrimitiveDataIndex;
-		const TArray<float>& Data = Component->GetDefaultCustomPrimitiveData().Data;
-		OutRecord.CustomData.SetNum(CPD_Count);
-		for (int32 Offset = 0; Offset < CPD_Count; ++Offset)
-		{
-			OutRecord.CustomData[Offset] = Data.IsValidIndex(Base + Offset) ? Data[Base + Offset] : 0.f;
-		}
-
-		OutRecord.bMaterialsSwapped = bCaptureMaterials;
-		if (bCaptureMaterials)
-		{
-			OutRecord.OverrideMaterials = Component->OverrideMaterials;
-		}
-	}
-
-	void RestoreRecord(const FGrungifyComponentRecord& Record)
-	{
-		UStaticMeshComponent* Component = Record.Component.Get();
-		if (!Component)
-		{
-			return;
-		}
-
-		const UStaticMesh* Mesh = Component->GetStaticMesh();
-		const FStaticMeshRenderData* RenderData = Mesh ? Mesh->GetRenderData() : nullptr;
-
-		Component->SetFlags(RF_Transactional);
-		Component->Modify();
-
-		{
-			FComponentReregisterContext Reregister(Component);
-			for (int32 LODIndex = 0; LODIndex < Record.LODs.Num(); ++LODIndex)
-			{
-				const FGrungifyLODBackup& Backup = Record.LODs[LODIndex];
-				const bool bCanRestore = Backup.bHadOverride && RenderData && RenderData->LODResources.IsValidIndex(LODIndex)
-					&& Backup.Colors.Num() == int32(RenderData->LODResources[LODIndex].GetNumVertices());
-				if (bCanRestore)
-				{
-					EnsureLODData(Component, LODIndex + 1);
-					SetLODColors(Component, LODIndex, Backup.Colors);
-				}
-				else
-				{
-					RemoveLODColors(Component, LODIndex);
-				}
-			}
-			if (RenderData)
-			{
-				FinishVertexColorEdit(Component, RenderData);
-			}
-		}
-
-		const int32 Base = UGrungifySettings::Get()->CustomPrimitiveDataIndex;
-		for (int32 Offset = 0; Offset < Record.CustomData.Num(); ++Offset)
-		{
-			Component->SetDefaultCustomPrimitiveDataFloat(Base + Offset, Record.CustomData[Offset]);
-		}
-
-		if (Record.bMaterialsSwapped)
-		{
-			const int32 NumSlots = FMath::Max(Component->GetNumMaterials(), Record.OverrideMaterials.Num());
-			for (int32 Slot = 0; Slot < NumSlots; ++Slot)
-			{
-				Component->SetMaterial(Slot, Record.OverrideMaterials.IsValidIndex(Slot) ? Record.OverrideMaterials[Slot].Get() : nullptr);
-			}
-		}
-
-		Component->MarkRenderStateDirty();
-	}
-
-	void WriteVertexColors(UStaticMeshComponent* Component, const TArray<TArray<FColor>>& LODColors)
-	{
-		const UStaticMesh* Mesh = Component->GetStaticMesh();
-		const FStaticMeshRenderData* RenderData = Mesh ? Mesh->GetRenderData() : nullptr;
-		if (!RenderData)
-		{
-			return;
-		}
-
-		Component->SetFlags(RF_Transactional);
-		Component->Modify();
-
-		FComponentReregisterContext Reregister(Component);
-		const int32 NumLODs = FMath::Min(LODColors.Num(), RenderData->LODResources.Num());
-		EnsureLODData(Component, NumLODs);
-		for (int32 LODIndex = 0; LODIndex < NumLODs; ++LODIndex)
-		{
-			const TArray<FColor>& Colors = LODColors[LODIndex];
-			if (Colors.Num() > 0 && Colors.Num() == int32(RenderData->LODResources[LODIndex].GetNumVertices()))
-			{
-				SetLODColors(Component, LODIndex, Colors);
-			}
-		}
-		FinishVertexColorEdit(Component, RenderData);
-	}
-
-	void WriteCustomData(UStaticMeshComponent* Component, const float (&Values)[CPD_Count])
-	{
-		const int32 Base = UGrungifySettings::Get()->CustomPrimitiveDataIndex;
-		for (int32 Offset = 0; Offset < CPD_Count; ++Offset)
-		{
-			Component->SetDefaultCustomPrimitiveDataFloat(Base + Offset, Values[Offset]);
-		}
-	}
-
-	void SwapMaterials(UStaticMeshComponent* Component, UMaterialInterface* Material)
-	{
-		for (int32 Slot = 0; Slot < Component->GetNumMaterials(); ++Slot)
-		{
-			Component->SetMaterial(Slot, Material);
-		}
+	case EGrungifyChannel::R: return Pixel[2] / 255.f;
+	case EGrungifyChannel::G: return Pixel[1] / 255.f;
+	case EGrungifyChannel::B: return Pixel[0] / 255.f;
+	default:                  return Pixel[3] / 255.f;
 	}
 }
 

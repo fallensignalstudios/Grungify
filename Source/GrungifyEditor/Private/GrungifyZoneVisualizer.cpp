@@ -9,6 +9,7 @@ namespace
 	const FLinearColor DustColor(0.85f, 0.7f, 0.45f);
 	const FLinearColor HandColor(0.3f, 0.9f, 0.4f);
 	const FLinearColor RunoffColor(0.3f, 0.55f, 1.f);
+	const FLinearColor LeakColor(0.2f, 0.9f, 1.f);
 
 	/** Horizontal rectangle across the zone at a height above its bottom face. */
 	void DrawLevel(FPrimitiveDrawInterface* PDI, const FTransform& Zone, const FVector& Extent, float HeightAboveBottom, const FLinearColor& Color)
@@ -44,17 +45,18 @@ void FGrungifyZoneVisualizer::DrawVisualization(const UActorComponent* Component
 	DrawLevel(PDI, ZoneTransform, Extent, Zone->HandHeightMinCm, HandColor);
 	DrawLevel(PDI, ZoneTransform, Extent, Zone->HandHeightMaxCm, HandColor);
 
-	const float Length = FMath::Max(Zone->RunoffLengthCm, 10.f);
 	for (const FGrungifyRunoffSource& Source : Zone->GetCachedRunoffSources())
 	{
+		const FLinearColor Color = Source.bManual ? LeakColor : RunoffColor;
+		const float Length = FMath::Max(Source.Length > 0.f ? Source.Length : Zone->RunoffLengthCm, 10.f);
 		const FVector Bottom = Source.Origin - FVector(0.0, 0.0, Length);
 		const double BottomRadius = Source.Radius * (1.0 + Zone->RunoffSpread);
 
-		DrawCircle(PDI, Source.Origin, FVector::ForwardVector, FVector::RightVector, RunoffColor, Source.Radius, 16, SDPG_World, 1.5f);
-		DrawCircle(PDI, Bottom, FVector::ForwardVector, FVector::RightVector, RunoffColor * 0.6f, BottomRadius, 16, SDPG_World, 1.f);
+		DrawCircle(PDI, Source.Origin, FVector::ForwardVector, FVector::RightVector, Color, Source.Radius, 16, SDPG_World, 1.5f);
+		DrawCircle(PDI, Bottom, FVector::ForwardVector, FVector::RightVector, Color * 0.6f, BottomRadius, 16, SDPG_World, 1.f);
 		for (const FVector& Side : { FVector::ForwardVector, -FVector::ForwardVector, FVector::RightVector, -FVector::RightVector })
 		{
-			PDI->DrawLine(Source.Origin + Side * Source.Radius, Bottom + Side * BottomRadius, RunoffColor, SDPG_World, 1.f);
+			PDI->DrawLine(Source.Origin + Side * Source.Radius, Bottom + Side * BottomRadius, Color, SDPG_World, 1.f);
 		}
 	}
 }
