@@ -200,9 +200,16 @@ namespace
 		UMaterialExpressionCustom* SurfaceNode = AddWeatheringCustom(Function, S, TEXT("Grungify Roughness Metallic"), CMOT_Float2, TEXT("return float2(R.Roughness, R.Metallic);"), -500, 500);
 
 		UMaterialExpressionComponentMask* RoughnessMask = AddToFunction<UMaterialExpressionComponentMask>(Function, -150, 450);
+		// The mask defaults are not all-off, so set every channel explicitly.
 		RoughnessMask->R = true;
+		RoughnessMask->G = false;
+		RoughnessMask->B = false;
+		RoughnessMask->A = false;
 		UMaterialExpressionComponentMask* MetallicMask = AddToFunction<UMaterialExpressionComponentMask>(Function, -150, 600);
+		MetallicMask->R = false;
 		MetallicMask->G = true;
+		MetallicMask->B = false;
+		MetallicMask->A = false;
 		Connect(SurfaceNode, TEXT(""), RoughnessMask, TEXT(""));
 		Connect(SurfaceNode, TEXT(""), MetallicMask, TEXT(""));
 

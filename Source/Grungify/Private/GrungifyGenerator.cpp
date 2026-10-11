@@ -5,6 +5,7 @@
 #include "CollisionQueryParams.h"
 #include "ComponentReregisterContext.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/StaticMeshComponentLODInfo.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
