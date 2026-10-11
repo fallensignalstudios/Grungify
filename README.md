@@ -470,6 +470,8 @@ These cases should be checked in-editor on a test level, never on production roo
       - per-instance custom data material expressions
       - the screenshot functional test options
       - render-target drawing in runtime wear
+      - World Partition actor descriptors in the commandlet (`ForEachActorDescInstance`, 5.4+ API), and map loading through `UEditorLoadingAndSavingUtils` inside a commandlet
+      - `UStaticMesh::NaniteSettings` access in the reference scene (switch to `Get/SetNaniteSettings` if it's private)
     - Then run `Automation RunTests Grungify` and check that the existing `Grungify.State`, `Grungify.Content` and `Grungify.Generation` tests still pass. The texture-bake conservation test should be unchanged, since every new feature defaults to off.
 14. **Reference scene and screenshots:**
     - Run *Tools → Grungify → Build Reference Scene*, then `Automation RunTests Project.Functional Tests` with the map open.
