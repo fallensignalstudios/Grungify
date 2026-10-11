@@ -36,6 +36,8 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
    - `BP_WeatheringZone`: the zone to drop into levels
    - `Materials/MF_GrungifyWeathering`: the material function that renders the wear
    - `Materials/MF_GrungifySubstrate`: the same for native Substrate materials
+   - `Materials/MF_GrungifyLandscape`: the same for landscape materials (world-projected masks)
+   - `Materials/MF_GrungifyDisplacement`: adds chip, crack and dust depth to Nanite displacement
    - `Materials/M_GrungifyMaskDebug`: shows the raw masks during preview
    - `Materials/M_GrungifyExample`: a minimal master material that already uses the function
    - `Materials/T_GrungifyNoMask`: the black default for the mask texture parameter
@@ -47,12 +49,12 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 
 ### Content versioning
 
-The generated material assets carry a marker of the form `[GrungifyContent v6 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
+The generated material assets carry a marker of the form `[GrungifyContent v7 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
 
 - **Tools → Grungify → Update Plugin Content** creates missing assets and rebuilds outdated ones.
 - **Rebuild Plugin Content** forces a rebuild of all the generated material assets.
 
-Every build checks graph connections, channel outputs and ownership gates, compiles the debug and example materials, and checks package saves. Failed validation prevents saving generated packages. Readiness requires a successful build and a `Saved/Grungify/ContentReady.txt` token matching the shader and all six saved packages. An interrupted or partial save remains eligible for repair. Results go to the Output Log and `Saved/Grungify/ContentReport.txt`, with a notification if anything failed.
+Every build checks graph connections, channel outputs and ownership gates, compiles the debug and example materials, and checks package saves. Failed validation prevents saving generated packages. Readiness requires a successful build and a `Saved/Grungify/ContentReady.txt` token matching the shader and all eight saved packages. An interrupted or partial save remains eligible for repair. Results go to the Output Log and `Saved/Grungify/ContentReport.txt`, with a notification if anything failed.
 
 ## Hook up your materials (once per master material)
 
@@ -294,6 +296,53 @@ The material function reads them when the component's mask mode is `503`. Detail
 - Existing per-instance custom data at our four slots is a conflict, so the component is skipped and reported.
 - Other per-instance data is preserved, and Clear restores the exact original float count and values.
 
+### Skeletal meshes (props and vehicles)
+
+With **Weather Skeletal Meshes** on (default), zones weather skeletal mesh components as well as static meshes.
+
+- The masks are baked into a texture from LOD0's reference pose, at the mesh's current placement.
+- They live in UV space, so they move and deform with the mesh. Skeletal meshes therefore skip the *Include Movable* filter.
+- The wear reflects where the mesh stood when the zone ran. Re-apply the zone after moving a vehicle somewhere very different.
+- **UVs:** a skeletal mesh needs a clean, non-overlapping UV channel. When the configured mask channel (UV1) is missing or fails validation but UV0 is clean, UV0 is used, and the zone sets `Grungify Use UV0` on the mesh's material instances. If neither works, the mesh is skipped and the report says why.
+- **Mesh only:** the bake uses the mesh, not the physics asset or animation.
+- **Not supported:** vertex-colour output (skeletal override colours aren't saved with the level) and scatter.
+
+### Landscape
+
+With **Weather Landscape** on (*Landscape*, default on), a zone also weathers the landscape under it:
+
+- dust, runoff along traced water, moisture, pools and moss, through the same rules and stone profile as meshes
+- plus **contact wear**: extra dust and damp where the terrain meets walls and props (**Contact Radius**, **Contact Strength**)
+
+How it's stored:
+
+- **Mask texture:** each landscape proxy under the zone gets one world-projected mask texture covering the zone, at **Landscape Texel Size** (default 25 cm, at most 2048 texels a side). The texture is stored inside the proxy, so it saves with it, including on World Partition maps.
+- **Material override:** each landscape component in the zone gets a material override, an instance of the landscape's own material with the mask bound.
+- **Undo:** Clear and Cancel Preview put the original overrides back.
+- **One zone per area:** a landscape component already weathered by another zone is left to that zone and reported. Landscapes have no Take Over.
+
+The landscape material needs `MF_GrungifyLandscape`. **Hook Up Materials In Level** adds it to landscape materials under your zones, and the right-click *Add Grungify* recognises landscape materials by their Landscape Layer nodes. It has the same four inputs and outputs as `MF_GrungifyWeathering`, so put it after your layer blend.
+
+Landscape limitations:
+
+- The mask debug displays don't apply to landscapes.
+- Substrate landscape materials aren't supported yet.
+- *Bake To Assets* keeps the landscape mask inside the proxy rather than as a separate asset.
+
+### Height blending and Nanite displacement
+
+**Height blending.** All three weathering functions have an optional **Height** input (0..1, 0.5 = mid). Connect your material's height map and raise `Grungify Height Blend` (0 by default, which changes nothing):
+
+- chips favour the raised parts (brick faces, raised trim)
+- dust, damp and moss settle in the low parts (mortar joints, recesses)
+
+**Displacement.** For real depth up close on Nanite meshes, use `MF_GrungifyDisplacement`. It takes your Displacement and returns it with chips and cracks cut in and dust slightly built up.
+
+- **Hookup:** the hookup tool routes Displacement through it automatically when a material already drives Displacement. Displacement is opt-in because Nanite tessellation has a cost.
+- **Setup:** enable Nanite tessellation on the mesh and material. The setting names and location vary between 5.x versions; see Epic's Nanite tessellation docs.
+- **Depth:** set `Grungify Displacement Depth` on the material or instance, in the material's displacement units, for example 0.1. At 0, the default, it adds nothing.
+- **Relief:** `Grungify Relief Strength` still works without tessellation, as a normal-only effect.
+
 ### Bake to assets (non-destructive)
 
 **Bake To Assets** (*Bake*) does what Apply does, but stores the result as standalone project assets in **Bake Folder** (default `/Game/Grungify/Baked`):
@@ -473,7 +522,11 @@ Backups made before v0.2.1 have no separate live-data snapshot. Restoring one us
 - **Scatter** is capped at 2000 pieces per zone and only placed on Apply and Bake.
 - **Runtime wear** needs texture output and complex-collision hits with UVs.
 - **Existing vertex colours are replaced** on meshes weathered with Vertex Color output. Clear restores them.
-- **Movable** meshes are skipped unless *Include Movable* is on.
+- **Movable** static meshes are skipped unless *Include Movable* is on. Skeletal meshes are always considered.
+- **Skeletal meshes** need a clean UV channel (UV1, or UV0 as a fallback), and their wear comes from the reference pose.
+- **Landscape** wear is per zone area at Landscape Texel Size, with one zone per landscape component. There's no Substrate landscape support or debug display yet.
+- **Height blending** needs the material's own height map connected to the functions' Height input.
+- **Displacement** only adds depth where Nanite tessellation is enabled and the material drives Displacement.
 - Weathered meshes must stay put: moving a mesh after Apply doesn't move its wear. Re-apply the zone.
 
 ## Native verification (UE 5.8.3, 2026-10-11)
@@ -497,7 +550,7 @@ Texture generation skips edge-distance queries and weathering evaluation when a 
 
 These cases should be checked in-editor on a test level, never on production rooms:
 
-1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v6 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
+1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v7 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
 2. **Channel masks:** in MF_GrungifyWeathering, the Roughness mask is R only and the Metallic mask is G only.
 3. **Exact restore:** on a mesh whose default custom primitive data is `[]`, run Preview → Cancel Preview, and separately Apply → Clear. The data is `[]` again. Repeat on a mesh with painted vertex colours, a mesh with only some material slots overridden, and a mesh whose CPD indices 0–4 are already in use (it should be reported as a conflict and left untouched).
 4. **Undo:** run Apply → Ctrl+Z and Clear → Ctrl+Z. Delete a zone while previewing, then Ctrl+Z.

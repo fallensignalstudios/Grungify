@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyWeatheringZone.h"
 
 #include "Components/ArrowComponent.h"
@@ -6,6 +8,7 @@
 
 #if WITH_EDITOR
 #include "Components/InstancedStaticMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/DecalComponent.h"
 #include "Components/LocalLightComponent.h"
 #include "Async/Async.h"
@@ -117,12 +120,12 @@ void AGrungifyWeatheringZone::UpdateWearArrow()
 #endif
 }
 
-const FGrungifyComponentRecord* AGrungifyWeatheringZone::FindAppliedRecord(const UStaticMeshComponent* Component) const
+const FGrungifyComponentRecord* AGrungifyWeatheringZone::FindAppliedRecord(const UMeshComponent* Component) const
 {
 	return AppliedRecords.FindByPredicate([Component](const FGrungifyComponentRecord& Record) { return Record.Component.Get() == Component; });
 }
 
-bool AGrungifyWeatheringZone::IsPreviewing(const UStaticMeshComponent* Component) const
+bool AGrungifyWeatheringZone::IsPreviewing(const UMeshComponent* Component) const
 {
 	return PreviewRecords.ContainsByPredicate([Component](const FGrungifyComponentRecord& Record) { return Record.Component.Get() == Component; });
 }
@@ -146,7 +149,7 @@ void AGrungifyWeatheringZone::Preview()
 	}
 
 	TArray<FGrungifyComponentResult> Results;
-	TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*> TakeOvers;
+	TMap<UMeshComponent*, AGrungifyWeatheringZone*> TakeOvers;
 	if (!GenerateResults(TEXT("Preview"), Results, TakeOvers))
 	{
 		FinishReport(Start);
@@ -185,7 +188,8 @@ void AGrungifyWeatheringZone::WritePreview(TArray<FGrungifyComponentResult>& Res
 		}
 	}
 
-	bPreviewActive = PreviewRecords.Num() > 0;
+	WriteLandscapes(PreviewLandscapeRecords);
+	bPreviewActive = PreviewRecords.Num() > 0 || PreviewLandscapeRecords.Num() > 0;
 	WritePhase.Finish();
 	FinishReport(StartSeconds);
 }
@@ -236,7 +240,7 @@ void AGrungifyWeatheringZone::ApplyInternal(const TCHAR* Operation)
 	}
 
 	TArray<FGrungifyComponentResult> Results;
-	TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*> TakeOvers;
+	TMap<UMeshComponent*, AGrungifyWeatheringZone*> TakeOvers;
 	if (!GenerateResults(Operation, Results, TakeOvers))
 	{
 		FinishReport(Start);
@@ -248,10 +252,13 @@ void AGrungifyWeatheringZone::ApplyInternal(const TCHAR* Operation)
 	FScopedSlowTask WriteTask(float(FMath::Max(Results.Num(), 1)), LOCTEXT("WritingApply", "Grungify: applying weathering..."));
 	WriteTask.MakeDialogDelayed(0.3f, /*bShowCancelButton*/ false);
 
+	// Landscape overrides are rebuilt from the originals on every Apply.
+	RestoreLandscapes(AppliedLandscapeRecords);
+
 	// Meshes this zone applied to before but no longer covers go back to their originals.
 	for (int32 Index = AppliedRecords.Num() - 1; Index >= 0; --Index)
 	{
-		const UStaticMeshComponent* Previous = AppliedRecords[Index].Component.Get();
+		const UMeshComponent* Previous = AppliedRecords[Index].Component.Get();
 		if (!Previous)
 		{
 			// Not loaded (e.g. an unloaded World Partition cell): keep its backup for a later Clear.
@@ -330,6 +337,7 @@ void AGrungifyWeatheringZone::ApplyInternal(const TCHAR* Operation)
 		}
 	}
 
+	WriteLandscapes(AppliedLandscapeRecords);
 	WritePhase.Finish();
 
 	// Scatter is part of the applied state: replace the previous pieces with this run's.
@@ -356,7 +364,9 @@ void AGrungifyWeatheringZone::Clear()
 	}
 	ClearScatteredActors();
 
-	int32 NumCleared = 0;
+	int32 NumCleared = AppliedLandscapeRecords.Num();
+	RestoreLandscapes(AppliedLandscapeRecords);
+	NumCleared -= AppliedLandscapeRecords.Num();
 	for (int32 Index = AppliedRecords.Num() - 1; Index >= 0; --Index)
 	{
 		// Meshes that aren't loaded keep their record so a later Clear can still restore them.
@@ -487,7 +497,7 @@ void AGrungifyWeatheringZone::DryRun()
 
 	const double Start = FPlatformTime::Seconds();
 	TArray<FGrungifyComponentResult> Results;
-	TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*> TakeOvers;
+	TMap<UMeshComponent*, AGrungifyWeatheringZone*> TakeOvers;
 	if (!GenerateResults(TEXT("DryRun"), Results, TakeOvers))
 	{
 		FinishReport(Start);
@@ -700,6 +710,8 @@ void AGrungifyWeatheringZone::ForgetRecords()
 	// A pasted or duplicated zone starts fresh: the meshes belong to the zone that weathered them.
 	PreviewRecords.Reset();
 	AppliedRecords.Reset();
+	PreviewLandscapeRecords.Reset();
+	AppliedLandscapeRecords.Reset();
 	bPreviewActive = false;
 	Status.Reset();
 }
@@ -772,7 +784,7 @@ void AGrungifyWeatheringZone::PostUnregisterAllComponents()
 
 void AGrungifyWeatheringZone::DiscardPreview(const TCHAR* Reason)
 {
-	if (!bPreviewActive && PreviewRecords.Num() == 0)
+	if (!bPreviewActive && PreviewRecords.Num() == 0 && PreviewLandscapeRecords.Num() == 0)
 	{
 		return;
 	}
@@ -784,7 +796,8 @@ void AGrungifyWeatheringZone::DiscardPreview(const TCHAR* Reason)
 			PreviewRecords.RemoveAt(Index);
 		}
 	}
-	bPreviewActive = PreviewRecords.Num() > 0;
+	RestoreLandscapes(PreviewLandscapeRecords);
+	bPreviewActive = PreviewRecords.Num() > 0 || PreviewLandscapeRecords.Num() > 0;
 
 	Status = bPreviewActive
 		? FString(TEXT("Preview restoration failed; backups retained. See Output Log."))
@@ -792,7 +805,7 @@ void AGrungifyWeatheringZone::DiscardPreview(const TCHAR* Reason)
 	UE_LOG(LogGrungify, Log, TEXT("%s: %s"), *GetActorNameOrLabel(), *Status);
 }
 
-bool AGrungifyWeatheringZone::ReleaseAppliedRecord(const UStaticMeshComponent* Component, FGrungifyComponentRecord& OutRecord)
+bool AGrungifyWeatheringZone::ReleaseAppliedRecord(const UMeshComponent* Component, FGrungifyComponentRecord& OutRecord)
 {
 	const int32 Index = AppliedRecords.IndexOfByPredicate([Component](const FGrungifyComponentRecord& Record) { return Record.Component.Get() == Component; });
 	if (Index == INDEX_NONE)
@@ -821,7 +834,8 @@ bool AGrungifyWeatheringZone::RestorePreview()
 			PreviewRecords.RemoveAt(Index);
 		}
 	}
-	bPreviewActive = PreviewRecords.Num() > 0;
+	RestoreLandscapes(PreviewLandscapeRecords);
+	bPreviewActive = PreviewRecords.Num() > 0 || PreviewLandscapeRecords.Num() > 0;
 	if (bPreviewActive)
 	{
 		Status = TEXT("Some preview state could not be restored; backups retained. See Output Log.");
@@ -983,16 +997,13 @@ void AGrungifyWeatheringZone::BuildParams(FGrungifyGenerationParams& P) const
 	P.MaskUVChannel = UGrungifySettings::Get()->MaskUVChannel;
 }
 
-void AGrungifyWeatheringZone::BuildContext(UStaticMeshComponent* Component, TMap<UTexture2D*, TUniquePtr<FGrungifyGateSampler>>& Samplers,
+void AGrungifyWeatheringZone::BuildContext(UMeshComponent* Component, TMap<UTexture2D*, TUniquePtr<FGrungifyGateSampler>>& Samplers,
 	FGrungifyComponentContext& OutContext, FGrungifyComponentReport& Report)
 {
 	FString ComponentRailSource;
 	const bool bComponentRail = Grungify::IsRail(Component, &ComponentRailSource);
 	const UEnum* SurfaceEnum = StaticEnum<EGrungifySurfaceType>();
-	const UStaticMesh* Mesh = Component->GetStaticMesh();
-	const FStaticMeshRenderData* RenderData = Mesh ? Mesh->GetRenderData() : nullptr;
-	const int32 NumUVChannels = (RenderData && RenderData->LODResources.Num() > 0)
-		? int32(RenderData->LODResources[0].VertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords()) : 0;
+	const int32 NumUVChannels = Grungify::NumUVChannelsOf(Component);
 	const int32 NumSlots = FMath::Max(Component->GetNumMaterials(), 1);
 	OutContext.Slots.SetNum(NumSlots);
 
@@ -1001,10 +1012,7 @@ void AGrungifyWeatheringZone::BuildContext(UStaticMeshComponent* Component, TMap
 		FGrungifySlotInfo& Info = OutContext.Slots[Slot];
 		FGrungifySlotReport& Detail = Report.SlotDetails.AddDefaulted_GetRef();
 		Detail.Slot = Slot;
-		if (Mesh && Mesh->GetStaticMaterials().IsValidIndex(Slot))
-		{
-			Detail.SlotName = Mesh->GetStaticMaterials()[Slot].MaterialSlotName.ToString();
-		}
+		Detail.SlotName = Grungify::SlotNameOf(Component, Slot);
 		const UMaterialInterface* Material = Component->GetMaterial(Slot);
 		Detail.Material = Material ? Material->GetName() : TEXT("(none)");
 
@@ -1207,7 +1215,7 @@ bool AGrungifyWeatheringZone::ShouldConsiderActor(const AActor* Actor, const FBo
 	return true;
 }
 
-const FGrungifyComponentRecord* AGrungifyWeatheringZone::FindOriginalRecord(const UStaticMeshComponent* Component) const
+const FGrungifyComponentRecord* AGrungifyWeatheringZone::FindOriginalRecord(const UMeshComponent* Component) const
 {
 	// Whether the slots are free is decided by the pre-Grungify values, not by values this or another zone wrote.
 	if (const FGrungifyComponentRecord* Own = FindAppliedRecord(Component))
@@ -1318,16 +1326,13 @@ namespace
 	}
 
 	/** Everything about one component that changes its masks, beyond the run-wide inputs. */
-	uint32 HashComponent(UStaticMeshComponent* Component, const FGrungifyComponentReport& Report)
+	uint32 HashComponent(UMeshComponent* Component, const FGrungifyComponentReport& Report)
 	{
 		FHasher H;
 		H.Add(Component->GetPathName());
-		const UStaticMesh* Mesh = Component->GetStaticMesh();
+		const UObject* Mesh = Grungify::MeshAssetOf(Component);
 		H.Add(Mesh ? Mesh->GetPathName() : FString());
-		if (const FStaticMeshRenderData* RenderData = Mesh ? Mesh->GetRenderData() : nullptr)
-		{
-			H.Add(RenderData->DerivedDataKey);
-		}
+		H.Add(Grungify::MeshBuildHash(Component));
 		const FTransform& Transform = Component->GetComponentTransform();
 		H.Add(Transform.GetLocation());
 		H.Add(Transform.GetRotation().Euler());
@@ -1387,10 +1392,10 @@ namespace
 		{
 			return true;
 		}
-		TInlineComponentArray<UStaticMeshComponent*> Meshes(Actor);
-		for (const UStaticMeshComponent* Mesh : Meshes)
+		TInlineComponentArray<UMeshComponent*> Meshes(Actor);
+		for (const UMeshComponent* Mesh : Meshes)
 		{
-			if (Mesh->ComponentHasTag(Settings->FireTag) || (Mesh->GetStaticMesh() && Grungify::NameMatches(Mesh->GetStaticMesh()->GetName(), Settings->FireKeywords)))
+			if (Mesh->ComponentHasTag(Settings->FireTag) || (Grungify::MeshAssetOf(Mesh) && Grungify::NameMatches(Grungify::MeshAssetOf(Mesh)->GetName(), Settings->FireKeywords)))
 			{
 				return true;
 			}
@@ -1398,12 +1403,12 @@ namespace
 		return false;
 	}
 
-	bool IsFastener(const UStaticMeshComponent* Component)
+	bool IsFastener(const UMeshComponent* Component)
 	{
 		const UGrungifySettings* Settings = UGrungifySettings::Get();
 		const AActor* Owner = Component->GetOwner();
 		return Component->ComponentHasTag(Settings->FastenerTag) || (Owner && Owner->ActorHasTag(Settings->FastenerTag))
-			|| (Component->GetStaticMesh() && Grungify::NameMatches(Component->GetStaticMesh()->GetName(), Settings->FastenerKeywords));
+			|| (Grungify::MeshAssetOf(Component) && Grungify::NameMatches(Grungify::MeshAssetOf(Component)->GetName(), Settings->FastenerKeywords));
 	}
 }
 
@@ -1415,15 +1420,19 @@ void FGrungifyGenerationJob::GenerateItem(FItem& Item)
 	}
 	const double Start = FPlatformTime::Seconds();
 	bool bOk = false;
-	if (UStaticMeshComponent* Component = Item.Component.Get())
+	if (UMeshComponent* Component = Item.Component.Get())
 	{
 		if (Item.bInstanced)
 		{
 			bOk = Grungify::GenerateInstanced(Cast<UInstancedStaticMeshComponent>(Component), Item.Context, Params, Item.Result);
 		}
-		else
+		else if (Item.bSkeletal)
 		{
-			bOk = Grungify::GenerateComponent(Component, Item.Context, Params, Item.Result);
+			bOk = Grungify::GenerateSkinned(Cast<USkeletalMeshComponent>(Component), Item.Context, Params, Item.Result);
+		}
+		else if (UStaticMeshComponent* Static = Cast<UStaticMeshComponent>(Component))
+		{
+			bOk = Grungify::GenerateComponent(Static, Item.Context, Params, Item.Result);
 		}
 	}
 	Item.Seconds = float(FPlatformTime::Seconds() - Start);
@@ -1483,8 +1492,8 @@ void AGrungifyWeatheringZone::GatherScene(FGrungifyGenerationJob& Job, const FBo
 			{
 				continue;
 			}
-			TInlineComponentArray<UStaticMeshComponent*> Meshes(Actor);
-			for (const UStaticMeshComponent* Mesh : Meshes)
+			TInlineComponentArray<UMeshComponent*> Meshes(Actor);
+			for (const UMeshComponent* Mesh : Meshes)
 			{
 				if (!Mesh || !IsFastener(Mesh))
 				{
@@ -1681,8 +1690,8 @@ bool AGrungifyWeatheringZone::PrepareJob(FGrungifyGenerationJob& Job, const TCHA
 	FGrungifyPhaseScope Phase(LastReport, TEXT("Scan"));
 
 	// Which meshes other zones already own (applied) or are previewing.
-	TMap<const UStaticMeshComponent*, AGrungifyWeatheringZone*> AppliedBy;
-	TMap<const UStaticMeshComponent*, AGrungifyWeatheringZone*> PreviewedBy;
+	TMap<const UMeshComponent*, AGrungifyWeatheringZone*> AppliedBy;
+	TMap<const UMeshComponent*, AGrungifyWeatheringZone*> PreviewedBy;
 	for (TActorIterator<AGrungifyWeatheringZone> It(World); It; ++It)
 	{
 		AGrungifyWeatheringZone* Other = *It;
@@ -1692,14 +1701,14 @@ bool AGrungifyWeatheringZone::PrepareJob(FGrungifyGenerationJob& Job, const TCHA
 		}
 		for (const FGrungifyComponentRecord& Record : Other->AppliedRecords)
 		{
-			if (const UStaticMeshComponent* Owned = Record.Component.Get())
+			if (const UMeshComponent* Owned = Record.Component.Get())
 			{
 				AppliedBy.Add(Owned, Other);
 			}
 		}
 		for (const FGrungifyComponentRecord& Record : Other->PreviewRecords)
 		{
-			if (const UStaticMeshComponent* Owned = Record.Component.Get())
+			if (const UMeshComponent* Owned = Record.Component.Get())
 			{
 				PreviewedBy.Add(Owned, Other);
 			}
@@ -1723,11 +1732,13 @@ bool AGrungifyWeatheringZone::PrepareJob(FGrungifyGenerationJob& Job, const TCHA
 			continue;
 		}
 
-		TInlineComponentArray<UStaticMeshComponent*> Components(Actor);
-		for (UStaticMeshComponent* Component : Components)
+		TInlineComponentArray<UMeshComponent*> Components(Actor);
+		for (UMeshComponent* Component : Components)
 		{
-			if (!Component || !Component->IsRegistered() || Component->IsEditorOnly() || !Component->GetStaticMesh()
-				|| !Component->Bounds.GetBox().Intersect(ZoneBox))
+			// Static and skeletal meshes; other mesh components (procedural, geometry collections...) aren't supported.
+			const bool bSkeletal = Component && Component->IsA<USkeletalMeshComponent>();
+			if (!Component || !Component->IsRegistered() || Component->IsEditorOnly() || !Grungify::MeshAssetOf(Component)
+				|| (!bSkeletal && !Component->IsA<UStaticMeshComponent>()) || !Component->Bounds.GetBox().Intersect(ZoneBox))
 			{
 				continue;
 			}
@@ -1735,7 +1746,12 @@ bool AGrungifyWeatheringZone::PrepareJob(FGrungifyGenerationJob& Job, const TCHA
 			FGrungifyComponentReport Report;
 			Report.Actor = Actor->GetActorNameOrLabel();
 			Report.Component = Component->GetName();
-			Report.Mesh = Component->GetStaticMesh()->GetName();
+			Report.Mesh = Grungify::MeshAssetOf(Component)->GetName();
+			if (bSkeletal && !bWeatherSkeletalMeshes)
+			{
+				Skip(Report, TEXT("skeletal mesh (enable Weather Skeletal Meshes)"));
+				continue;
+			}
 
 			if (Grungify::HasIgnoreTag(nullptr, Component))
 			{
@@ -1758,7 +1774,8 @@ bool AGrungifyWeatheringZone::PrepareJob(FGrungifyGenerationJob& Job, const TCHA
 				Skip(Report, TEXT("instanced mesh (enable Weather Instanced Meshes)"));
 				continue;
 			}
-			if (!bIncludeMovable && Component->Mobility == EComponentMobility::Movable)
+			// Skeletal masks live in UV space and move with the mesh, so movable props and vehicles are fine.
+			if (!bSkeletal && !bIncludeMovable && Component->Mobility == EComponentMobility::Movable)
 			{
 				Skip(Report, TEXT("movable (enable Include Movable)"));
 				continue;
@@ -1788,6 +1805,7 @@ bool AGrungifyWeatheringZone::PrepareJob(FGrungifyGenerationJob& Job, const TCHA
 			Item.Component = Component;
 			Item.Path = Component->GetPathName();
 			Item.bInstanced = bInstanced;
+			Item.bSkeletal = bSkeletal;
 			Item.TakeOverFrom = TakeOverFrom;
 			Item.Report = MoveTemp(Report);
 			BuildContext(Component, Job.Samplers, Item.Context, Item.Report);
@@ -1829,12 +1847,12 @@ bool AGrungifyWeatheringZone::PrepareJob(FGrungifyGenerationJob& Job, const TCHA
 	return true;
 }
 
-void AGrungifyWeatheringZone::CollectJob(FGrungifyGenerationJob& Job, TArray<FGrungifyComponentResult>& OutResults, TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers)
+void AGrungifyWeatheringZone::CollectJob(FGrungifyGenerationJob& Job, TArray<FGrungifyComponentResult>& OutResults, TMap<UMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers)
 {
 	const double Now = FPlatformTime::Seconds();
 	for (FGrungifyGenerationJob::FItem& Item : Job.Items)
 	{
-		UStaticMeshComponent* Component = Item.Component.Get();
+		UMeshComponent* Component = Item.Component.Get();
 		FGrungifyComponentReport& Report = Item.Report;
 		if (!Component || !Item.bGenerated || Item.bFailed)
 		{
@@ -1886,7 +1904,7 @@ void AGrungifyWeatheringZone::CollectJob(FGrungifyGenerationJob& Job, TArray<FGr
 	TrimCache();
 }
 
-bool AGrungifyWeatheringZone::GenerateResults(const TCHAR* Operation, TArray<FGrungifyComponentResult>& OutResults, TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers)
+bool AGrungifyWeatheringZone::GenerateResults(const TCHAR* Operation, TArray<FGrungifyComponentResult>& OutResults, TMap<UMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers)
 {
 	// Progress dialog with a Cancel button, shown only if the run takes noticeable time.
 	// Cancellation is honoured at every phase boundary and inside long phases; nothing is written before this returns.
@@ -1952,6 +1970,11 @@ bool AGrungifyWeatheringZone::GenerateResults(const TCHAR* Operation, TArray<FGr
 			}
 			Phase.Items += Item.bFromCache ? 0 : 1;
 		}
+	}
+
+	if (!GenerateLandscapes(Job, ShouldCancel))
+	{
+		return CancelDuringGeneration();
 	}
 
 	CollectJob(Job, OutResults, OutTakeOvers);
@@ -2061,8 +2084,10 @@ bool AGrungifyWeatheringZone::TickBackgroundJob(float DeltaTime)
 	}
 
 	TArray<FGrungifyComponentResult> Results;
-	TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*> TakeOvers;
+	TMap<UMeshComponent*, AGrungifyWeatheringZone*> TakeOvers;
 	CollectJob(*Job, Results, TakeOvers);
+	// Landscape traces need the game thread; they're quick next to mesh generation, and mostly cached while you tweak.
+	GenerateLandscapes(*Job, TFunction<bool()>());
 	Modify();
 	if (RestorePreview())
 	{
@@ -2241,7 +2266,7 @@ void AGrungifyWeatheringZone::ScatterFromResults(const TArray<FGrungifyComponent
 
 bool AGrungifyWeatheringZone::WriteResult(const FGrungifyComponentResult& Result, EGrungifyPreviewDisplay Display, const FGrungifyComponentRecord& OriginalState)
 {
-	UStaticMeshComponent* Component = Result.Component;
+	UMeshComponent* Component = Result.Component;
 	FGrungifyComponentReport& Entry = LastReport.Components[Result.ReportIndex];
 	auto Fail = [&Entry](const TCHAR* Reason)
 	{
@@ -2310,10 +2335,16 @@ bool AGrungifyWeatheringZone::WriteResult(const FGrungifyComponentResult& Result
 		{
 			return Fail(TEXT("texture or admitted material bindings could not be written"));
 		}
+		if (Result.MaskUVChannelUsed == 0 && UGrungifySettings::Get()->MaskUVChannel != 0)
+		{
+			Grungify::SetOwnedScalar(Component, TEXT("Grungify Use UV0"), 1.f);
+		}
 	}
 	else
 	{
-		if (!Grungify::WriteVertexColors(Component, Result.LODColors, &Result.MaterialSurfaces)
+		// Vertex-colour output only ever comes from static meshes.
+		UStaticMeshComponent* Static = Cast<UStaticMeshComponent>(Component);
+		if (!Static || !Grungify::WriteVertexColors(Static, Result.LODColors, &Result.MaterialSurfaces)
 			|| !Grungify::BindOwnedMaterials(Component, nullptr, Result.MaterialSurfaces, DebugMaterial, &Palette))
 		{
 			return Fail(TEXT("vertex masks or admitted material bindings could not be written"));
@@ -2357,7 +2388,7 @@ bool AGrungifyWeatheringZone::WriteResult(const FGrungifyComponentResult& Result
 
 bool AGrungifyWeatheringZone::WriteBakedAssets(const FGrungifyComponentResult& Result)
 {
-	UStaticMeshComponent* Component = Result.Component;
+	UMeshComponent* Component = Result.Component;
 	FString Folder = BakeFolder.Path.IsEmpty() ? FString(TEXT("/Game/Grungify/Baked")) : BakeFolder.Path;
 	Folder.RemoveFromEnd(TEXT("/"));
 	const AActor* Owner = Component->GetOwner();
@@ -2448,6 +2479,11 @@ bool AGrungifyWeatheringZone::WriteBakedAssets(const FGrungifyComponentResult& R
 			return false;
 		}
 		Grungify::ConfigureOwnedInstance(Instance, Parent, Texture, ExtendedTexture, Result.MaterialSurfaces[Slot], &Palette, Result.TexelSizeCm);
+		if (Result.MaskUVChannelUsed == 0 && UGrungifySettings::Get()->MaskUVChannel != 0)
+		{
+			Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Use UV0")), 1.f);
+			Instance->PostEditChange();
+		}
 		Instance->MarkPackageDirty();
 		Component->SetMaterial(Slot, Instance);
 	}
@@ -2461,15 +2497,17 @@ void AGrungifyWeatheringZone::FinishReport(double StartSeconds)
 	int32 NumVertex = 0;
 	int32 NumTexture = 0;
 	int32 NumInstanced = 0;
+	int32 NumLandscape = 0;
 	int32 NumConflicts = 0;
 	for (const FGrungifyComponentReport& Entry : LastReport.Components)
 	{
 		NumVertex += Entry.Result == TEXT("vertex") ? 1 : 0;
 		NumTexture += Entry.Result == TEXT("texture") ? 1 : 0;
 		NumInstanced += Entry.Result == TEXT("instanced") ? 1 : 0;
+		NumLandscape += Entry.Result == TEXT("landscape") ? 1 : 0;
 		NumConflicts += Entry.bCustomDataConflict ? 1 : 0;
 	}
-	LastReport.Weathered = NumVertex + NumTexture + NumInstanced;
+	LastReport.Weathered = NumVertex + NumTexture + NumInstanced + NumLandscape;
 	LastReport.Skipped = LastReport.Components.Num() - LastReport.Weathered;
 	if (NumConflicts > 0)
 	{
@@ -2504,6 +2542,10 @@ void AGrungifyWeatheringZone::FinishReport(double StartSeconds)
 		if (NumInstanced > 0)
 		{
 			Extras += FString::Printf(TEXT(", %d instanced"), NumInstanced);
+		}
+		if (NumLandscape > 0)
+		{
+			Extras += FString::Printf(TEXT(", %d landscape"), NumLandscape);
 		}
 		if (LastReport.CacheHits > 0)
 		{

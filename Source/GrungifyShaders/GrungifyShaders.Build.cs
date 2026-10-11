@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 using UnrealBuildTool;
 
 public class GrungifyShaders : ModuleRules

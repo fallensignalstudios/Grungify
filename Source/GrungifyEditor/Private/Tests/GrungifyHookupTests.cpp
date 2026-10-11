@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyMaterialHookup.h"
 
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS

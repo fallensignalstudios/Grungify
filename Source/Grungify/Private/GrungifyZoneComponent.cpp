@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyZoneComponent.h"
 
 #include "Engine/CollisionProfile.h"

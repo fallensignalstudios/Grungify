@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyLibraryBuilder.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -122,6 +124,58 @@ namespace
 
 		return Result;
 	}
+
+	/** Shared by Build and ConfigureLook so a preset made elsewhere matches the library's GP_<Look> field for field. */
+	void WriteLook(const FLook& Look, UGrungifyPreset& Preset)
+	{
+		// Start from defaults so overwriting a preset doesn't keep stale tweaks.
+		const UGrungifyPreset* Defaults = GetDefault<UGrungifyPreset>();
+#define GRUNGIFY_RESET_FIELD(Field) Preset.Field = Defaults->Field;
+		GRUNGIFY_PRESET_FIELDS(GRUNGIFY_RESET_FIELD)
+#undef GRUNGIFY_RESET_FIELD
+		Preset.Notes = Look.Notes;
+		Preset.bIncludeSeed = false;
+		Look.Configure(Preset);
+	}
+}
+
+TArray<FString> FGrungifyLibraryBuilder::LookNames()
+{
+	TArray<FString> Names;
+	for (const FLook& Look : Looks())
+	{
+		Names.Add(Look.Name);
+	}
+	return Names;
+}
+
+bool FGrungifyLibraryBuilder::ConfigureLook(const FString& LookName, UGrungifyPreset& Preset)
+{
+	for (const FLook& Look : Looks())
+	{
+		if (LookName.Equals(Look.Name, ESearchCase::IgnoreCase))
+		{
+			WriteLook(Look, Preset);
+			return true;
+		}
+	}
+	return false;
+}
+
+bool FGrungifyLibraryBuilder::GetLookColors(const FString& LookName, FGrungifyLookColors& OutColors)
+{
+	for (const FLook& Look : Looks())
+	{
+		if (LookName.Equals(Look.Name, ESearchCase::IgnoreCase))
+		{
+			OutColors.Stone = Look.Stone;
+			OutColors.Metal = Look.Metal;
+			OutColors.MetalMetallic = Look.MetalMetallic;
+			OutColors.Trim = Look.Trim;
+			return true;
+		}
+	}
+	return false;
 }
 
 bool FGrungifyLibraryBuilder::Build(bool bOverwrite, FString& OutMessage)
@@ -142,14 +196,7 @@ bool FGrungifyLibraryBuilder::Build(bool bOverwrite, FString& OutMessage)
 		if (UGrungifyPreset* Preset = FindOrCreate<UGrungifyPreset>(FString::Printf(TEXT("GP_%s"), Look.Name), bOverwrite, bCreated))
 		{
 			Preset->Modify();
-			// Start from defaults so overwriting a preset doesn't keep stale tweaks.
-			const UGrungifyPreset* Defaults = GetDefault<UGrungifyPreset>();
-#define GRUNGIFY_RESET_FIELD(Field) Preset->Field = Defaults->Field;
-			GRUNGIFY_PRESET_FIELDS(GRUNGIFY_RESET_FIELD)
-#undef GRUNGIFY_RESET_FIELD
-			Preset->Notes = Look.Notes;
-			Preset->bIncludeSeed = false;
-			Look.Configure(*Preset);
+			WriteLook(Look, *Preset);
 			Preset->MarkPackageDirty();
 			Packages.Add(Preset->GetPackage());
 			(bCreated ? Created : Updated) += 1;

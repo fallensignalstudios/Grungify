@@ -1,10 +1,15 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyGenerator.h"
 
 #if WITH_EDITOR
 
 #include "ComponentReregisterContext.h"
 #include "Components/InstancedStaticMeshComponent.h"
+#include "Components/SkinnedMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Engine/SkinnedAsset.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "StaticMeshComponentLODInfo.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
@@ -67,10 +72,46 @@ namespace Grungify
 		}
 	}
 
-	void CaptureRecord(UStaticMeshComponent* Component, FGrungifyComponentRecord& OutRecord)
+	namespace
+	{
+		/** What a slot shows with no override: the static or skeletal mesh asset's own material. */
+		UMaterialInterface* DefaultMaterialOf(const UMeshComponent* Component, int32 MaterialIndex)
+		{
+			if (const UStaticMeshComponent* Static = Cast<UStaticMeshComponent>(Component))
+			{
+				const UStaticMesh* Mesh = Static->GetStaticMesh();
+				return Mesh ? Mesh->GetMaterial(MaterialIndex) : nullptr;
+			}
+			if (const USkinnedMeshComponent* Skinned = Cast<USkinnedMeshComponent>(Component))
+			{
+				const USkinnedAsset* Asset = Skinned->GetSkinnedAsset();
+				return Asset && Asset->GetMaterials().IsValidIndex(MaterialIndex) ? Asset->GetMaterials()[MaterialIndex].MaterialInterface.Get() : nullptr;
+			}
+			return nullptr;
+		}
+	}
+
+	void CaptureStaticState(UStaticMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
+	void CaptureCommonState(UMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
+	void RestoreStaticState(UStaticMeshComponent* Component, const FGrungifyComponentRecord& Record, const FStaticMeshRenderData* RenderData);
+	bool RestoreRecordTail(UMeshComponent* Component, const FGrungifyComponentRecord& Record);
+
+	void CaptureRecord(UMeshComponent* Component, FGrungifyComponentRecord& OutRecord)
 	{
 		OutRecord = FGrungifyComponentRecord();
 		OutRecord.Component = Component;
+		OutRecord.MeshAsset = const_cast<UObject*>(MeshAssetOf(Component));
+
+		// Vertex colours, mesh paint and the derived-data key only exist on static meshes.
+		if (UStaticMeshComponent* Static = Cast<UStaticMeshComponent>(Component))
+		{
+			CaptureStaticState(Static, OutRecord);
+		}
+		CaptureCommonState(Component, OutRecord);
+	}
+
+	void CaptureStaticState(UStaticMeshComponent* Component, FGrungifyComponentRecord& OutRecord)
+	{
 		OutRecord.StaticMesh = Component->GetStaticMesh();
 		OutRecord.LODDataCount = Component->LODData.Num();
 		OutRecord.LODs.SetNum(OutRecord.LODDataCount);
@@ -105,6 +146,10 @@ namespace Grungify
 #if WITH_EDITORONLY_DATA
 		OutRecord.StaticMeshDerivedDataKey = Component->StaticMeshDerivedDataKey;
 #endif
+	}
+
+	void CaptureCommonState(UMeshComponent* Component, FGrungifyComponentRecord& OutRecord)
+	{
 		OutRecord.CustomData = Component->GetDefaultCustomPrimitiveData().Data;
 		OutRecord.LiveCustomData = Component->GetCustomPrimitiveData().Data;
 		OutRecord.bHasLiveCustomData = true;
@@ -121,9 +166,15 @@ namespace Grungify
 
 	bool RestoreRecord(const FGrungifyComponentRecord& Record, bool bTransactional)
 	{
-		UStaticMeshComponent* Component = Record.Component.Get();
+		UMeshComponent* Component = Record.Component.Get();
 		if (!IsValid(Component))
 		{
+			return false;
+		}
+		UStaticMeshComponent* Static = Cast<UStaticMeshComponent>(Component);
+		if (!Record.MeshAsset.IsNull() && Record.MeshAsset.Get() != MeshAssetOf(Component))
+		{
+			UE_LOG(LogGrungify, Error, TEXT("%s: mesh changed since capture; state and original backup retained."), *Component->GetPathName());
 			return false;
 		}
 
@@ -135,9 +186,9 @@ namespace Grungify
 			return false;
 		}
 
-		const UStaticMesh* Mesh = Component->GetStaticMesh();
+		const UStaticMesh* Mesh = Static ? Static->GetStaticMesh() : nullptr;
 		const FStaticMeshRenderData* RenderData = Mesh ? Mesh->GetRenderData() : nullptr;
-		if ((!Record.StaticMesh.IsNull() && Record.StaticMesh.Get() != Mesh)
+		if ((Static && !Record.StaticMesh.IsNull() && Record.StaticMesh.Get() != Mesh)
 			|| Record.LODs.ContainsByPredicate([RenderData](const FGrungifyLODBackup& Backup)
 				{ return Backup.bHadOverride && !RenderData; }))
 		{
@@ -165,6 +216,40 @@ namespace Grungify
 			// Render state must be torn down while buffers and the material array are swapped.
 			FComponentReregisterContext Reregister(Component);
 
+			if (Static)
+			{
+				RestoreStaticState(Static, Record, RenderData);
+			}
+
+			// Use the public material setter for renderer/physics/parameter-cache notifications.
+			// Null or absent original overrides resolve to the mesh default, then the raw assignment
+			// restores their exact null entries and array length without trimming overlay materials.
+			const int32 MaterialCount = FMath::Max(Component->OverrideMaterials.Num(), Record.OverrideMaterials.Num());
+			for (int32 MaterialIndex = 0; MaterialIndex < MaterialCount; ++MaterialIndex)
+			{
+				UMaterialInterface* OriginalMaterial = Record.OverrideMaterials.IsValidIndex(MaterialIndex)
+					? Record.OverrideMaterials[MaterialIndex].Get() : nullptr;
+				if (!OriginalMaterial)
+				{
+					OriginalMaterial = DefaultMaterialOf(Component, MaterialIndex);
+				}
+				Component->SetMaterial(MaterialIndex, OriginalMaterial);
+			}
+			Component->OverrideMaterials = Record.OverrideMaterials;
+
+			Defaults->Data = Record.CustomData;
+			Live->Data = Record.bHasLiveCustomData ? Record.LiveCustomData : Record.CustomData;
+			if (!Record.bHasLiveCustomData)
+			{
+				UE_LOG(LogGrungify, Warning, TEXT("%s: legacy backup has no live CPD snapshot; restoring live data from its original defaults."), *Component->GetPathName());
+			}
+		}
+		return RestoreRecordTail(Component, Record);
+	}
+
+	void RestoreStaticState(UStaticMeshComponent* Component, const FGrungifyComponentRecord& Record, const FStaticMeshRenderData* RenderData)
+	{
+		{
 			// Release anything we added beyond the original LOD count, then truncate back to it.
 			for (int32 LODIndex = Record.LODDataCount; LODIndex < Component->LODData.Num(); ++LODIndex)
 			{
@@ -216,31 +301,11 @@ namespace Grungify
 #if WITH_EDITORONLY_DATA
 			Component->StaticMeshDerivedDataKey = Record.StaticMeshDerivedDataKey;
 #endif
-
-			// Use the public material setter for renderer/physics/parameter-cache notifications.
-			// Null or absent original overrides resolve to the mesh default, then the raw assignment
-			// restores their exact null entries and array length without trimming overlay materials.
-			const int32 MaterialCount = FMath::Max(Component->OverrideMaterials.Num(), Record.OverrideMaterials.Num());
-			for (int32 MaterialIndex = 0; MaterialIndex < MaterialCount; ++MaterialIndex)
-			{
-				UMaterialInterface* OriginalMaterial = Record.OverrideMaterials.IsValidIndex(MaterialIndex)
-					? Record.OverrideMaterials[MaterialIndex].Get() : nullptr;
-				if (!OriginalMaterial && Mesh)
-				{
-					OriginalMaterial = Mesh->GetMaterial(MaterialIndex);
-				}
-				Component->SetMaterial(MaterialIndex, OriginalMaterial);
-			}
-			Component->OverrideMaterials = Record.OverrideMaterials;
-
-			Defaults->Data = Record.CustomData;
-			Live->Data = Record.bHasLiveCustomData ? Record.LiveCustomData : Record.CustomData;
-			if (!Record.bHasLiveCustomData)
-			{
-				UE_LOG(LogGrungify, Warning, TEXT("%s: legacy backup has no live CPD snapshot; restoring live data from its original defaults."), *Component->GetPathName());
-			}
 		}
+	}
 
+	bool RestoreRecordTail(UMeshComponent* Component, const FGrungifyComponentRecord& Record)
+	{
 		// Instanced meshes: put the per-instance custom data back exactly (count and values).
 		if (Record.bHasInstanceData)
 		{
@@ -402,7 +467,7 @@ namespace Grungify
 		return true;
 	}
 
-	bool WriteCustomData(UStaticMeshComponent* Component, const float (&Values)[CPD_Count])
+	bool WriteCustomData(UMeshComponent* Component, const float (&Values)[CPD_Count])
 	{
 		const int32 Base = UGrungifySettings::Get()->CustomPrimitiveDataIndex;
 		FCustomPrimitiveData* Defaults = FindCustomData(Component, Component->GetDefaultCustomPrimitiveData());
@@ -428,7 +493,7 @@ namespace Grungify
 		return true;
 	}
 
-	UTexture2D* CreateMaskTexture(UStaticMeshComponent* Component, int32 Size, const TArray<FColor>& Pixels)
+	UTexture2D* CreateMaskTexture(UMeshComponent* Component, int32 Size, const TArray<FColor>& Pixels)
 	{
 		if (Size <= 0 || Pixels.Num() != Size * Size)
 		{
@@ -510,6 +575,19 @@ namespace Grungify
 		Instance->PostEditChange();
 	}
 
+	void SetOwnedScalar(UMeshComponent* Component, FName Parameter, float Value)
+	{
+		for (int32 Slot = 0; Slot < Component->GetNumMaterials(); ++Slot)
+		{
+			UMaterialInstanceConstant* Instance = Cast<UMaterialInstanceConstant>(Component->GetMaterial(Slot));
+			if (Instance && Instance->GetOuter() == Component)
+			{
+				Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(Parameter), Value);
+				Instance->PostEditChange();
+			}
+		}
+	}
+
 	bool InstanceSlotsFree(const FGrungifyComponentRecord& OriginalState)
 	{
 		const int32 Base = UGrungifySettings::Get()->InstanceCustomDataIndex;
@@ -531,7 +609,7 @@ namespace Grungify
 		return true;
 	}
 
-	bool BindOwnedMaterials(UStaticMeshComponent* Component, UTexture2D* Texture,
+	bool BindOwnedMaterials(UMeshComponent* Component, UTexture2D* Texture,
 		const TArray<EGrungifySurfaceType>& MaterialSurfaces, UMaterialInterface* ParentOverride,
 		const FGrungifyPalette* Palette, UTexture2D* ExtendedTexture, float TexelSizeCm)
 	{

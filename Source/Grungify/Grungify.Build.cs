@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 using UnrealBuildTool;
 
 public class Grungify : ModuleRules
@@ -17,6 +19,8 @@ public class Grungify : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
+			// Landscape weathering (component material overrides, heights).
+			"Landscape",
 			"Json",
 			"JsonUtilities",
 			"RenderCore",

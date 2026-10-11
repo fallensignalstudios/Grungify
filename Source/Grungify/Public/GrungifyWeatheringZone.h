@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #pragma once
 
 #include "CoreMinimal.h"
@@ -11,8 +13,9 @@ class UDataLayerAsset;
 class UGrungifyPreset;
 struct FGrungifyCacheEntry;
 struct FGrungifyGenerationJob;
+struct FGrungifyLandscapeResult;
 class UGrungifyZoneComponent;
-class UStaticMeshComponent;
+class UMeshComponent;
 struct FGrungifyComponentContext;
 struct FGrungifyComponentResult;
 struct FGrungifyGenerationParams;
@@ -396,6 +399,35 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Filtering")
 	bool bWeatherInstancedMeshes = true;
 
+	/**
+	 * Weather skeletal meshes (props, vehicles) with a mask texture in their reference pose. Needs a non-overlapping
+	 * mask UV channel; UV0 is used when it's the only clean one. Movable skeletal meshes are included: the wear is in UV
+	 * space and moves with the mesh, but it's computed where the mesh stands now.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Filtering")
+	bool bWeatherSkeletalMeshes = true;
+
+	// -------------------------------------------------------------- Landscape
+
+	/**
+	 * Weather landscapes under the zone: dust, runoff, moisture and moss in a world-projected mask, plus extra dust and
+	 * damp where the terrain meets walls and props. The landscape material needs MF_GrungifyLandscape (Hook Up Materials
+	 * adds it). Each landscape component gets a material override, which Clear removes.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Landscape")
+	bool bWeatherLandscape = true;
+
+	/** Size of one landscape mask texel. Coarser than meshes: terrain wear is broad. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Landscape", meta = (ClampMin = "5", UIMax = "200", Units = "cm", EditCondition = "bWeatherLandscape"))
+	float LandscapeTexelSizeCm = 25.f;
+
+	/** How far from a wall or prop the terrain collects extra dust and damp. 0 turns contact wear off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Landscape", meta = (ClampMin = "0", UIMax = "300", Units = "cm", EditCondition = "bWeatherLandscape"))
+	float LandscapeContactRadiusCm = 80.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Landscape", meta = (ClampMin = "0", UIMax = "2", EditCondition = "bWeatherLandscape"))
+	float LandscapeContactStrength = 0.7f;
+
 	/** Actors this zone never touches (the Grungify.Ignore tag does the same). */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Grungify|Filtering")
 	TArray<TSoftObjectPtr<AActor>> ExcludedActors;
@@ -429,8 +461,8 @@ public:
 	virtual void BeginDestroy() override;
 
 	/** The record this zone holds for a component it has applied to, or null. */
-	const FGrungifyComponentRecord* FindAppliedRecord(const UStaticMeshComponent* Component) const;
-	bool IsPreviewing(const UStaticMeshComponent* Component) const;
+	const FGrungifyComponentRecord* FindAppliedRecord(const UMeshComponent* Component) const;
+	bool IsPreviewing(const UMeshComponent* Component) const;
 
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
@@ -451,7 +483,7 @@ public:
 	void RequestLivePreview();
 
 	/** Restores then hands over the original record; failed restoration retains ownership. */
-	bool ReleaseAppliedRecord(const UStaticMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
+	bool ReleaseAppliedRecord(const UMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
 #endif
 
 protected:
@@ -470,6 +502,14 @@ protected:
 	/** Components this zone has applied to, with what they looked like before the first Apply. Not copied when the zone is duplicated. */
 	UPROPERTY()
 	TArray<FGrungifyComponentRecord> AppliedRecords;
+
+	/** Landscape components showing this zone's preview, with their original material overrides. */
+	UPROPERTY()
+	TArray<FGrungifyLandscapeRecord> PreviewLandscapeRecords;
+
+	/** Landscape components this zone has applied to. */
+	UPROPERTY()
+	TArray<FGrungifyLandscapeRecord> AppliedLandscapeRecords;
 
 	/** Decals and meshes this zone scattered on Apply. */
 	UPROPERTY()
@@ -494,14 +534,14 @@ private:
 	bool RestorePreview();
 	bool CancelDependentPreviews();
 	void BuildParams(FGrungifyGenerationParams& OutParams) const;
-	void BuildContext(UStaticMeshComponent* Component, TMap<UTexture2D*, TUniquePtr<FGrungifyGateSampler>>& Samplers, FGrungifyComponentContext& OutContext, FGrungifyComponentReport& Report);
+	void BuildContext(UMeshComponent* Component, TMap<UTexture2D*, TUniquePtr<FGrungifyGateSampler>>& Samplers, FGrungifyComponentContext& OutContext, FGrungifyComponentReport& Report);
 	/** Returns false if the user cancelled; nothing has been written at that point. Shows a progress dialog for long runs. */
-	bool GenerateResults(const TCHAR* Operation, TArray<FGrungifyComponentResult>& OutResults, TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers);
+	bool GenerateResults(const TCHAR* Operation, TArray<FGrungifyComponentResult>& OutResults, TMap<UMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers);
 
 	/** Game-thread part of a run: floors, exposure, sources, flow, scan, contexts and cache lookups. False if cancelled. */
 	bool PrepareJob(FGrungifyGenerationJob& Job, const TCHAR* Operation, const TFunction<bool()>& ShouldCancel);
 	/** Turns finished job items into results and report entries (and fills the cache). */
-	void CollectJob(FGrungifyGenerationJob& Job, TArray<FGrungifyComponentResult>& OutResults, TMap<UStaticMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers);
+	void CollectJob(FGrungifyGenerationJob& Job, TArray<FGrungifyComponentResult>& OutResults, TMap<UMeshComponent*, AGrungifyWeatheringZone*>& OutTakeOvers);
 	void StartBackgroundPreview();
 	void CancelBackgroundJob();
 	bool TickBackgroundJob(float DeltaTime);
@@ -518,6 +558,15 @@ private:
 	/** Lights, fires, fasteners, stamps, traffic paths and traced water for this run. */
 	void GatherScene(FGrungifyGenerationJob& Job, const FBox& ZoneBox);
 
+	/** Landscape (GrungifyZoneLandscape.cpp): generate masks for every landscape proxy under the zone. Game thread. */
+	bool GenerateLandscapes(const FGrungifyGenerationJob& Job, const TFunction<bool()>& ShouldCancel);
+	/** Writes PendingLandscapes into OutRecords (preview or applied). */
+	void WriteLandscapes(TArray<FGrungifyLandscapeRecord>& OutRecords);
+	/** Puts landscape components back; returns false if any couldn't be restored (their records stay). */
+	bool RestoreLandscapes(TArray<FGrungifyLandscapeRecord>& Records);
+	TArray<TSharedPtr<FGrungifyLandscapeResult>> PendingLandscapes;
+	TMap<FString, TSharedPtr<FGrungifyLandscapeResult>> LandscapeCache;
+
 	bool bBakingToAssets = false;
 	TArray<UPackage*> BakedPackages;
 	/** OutReason is set when an actor inside the zone is filtered out by a zone setting or tag (for the report). */
@@ -525,7 +574,7 @@ private:
 	void CopyFromPreset(const UGrungifyPreset& Source);
 	/** Writes masks, custom data and materials only when both original CPD arrays leave our slots free. */
 	bool WriteResult(const FGrungifyComponentResult& Result, EGrungifyPreviewDisplay Display, const FGrungifyComponentRecord& OriginalState);
-	const FGrungifyComponentRecord* FindOriginalRecord(const UStaticMeshComponent* Component) const;
+	const FGrungifyComponentRecord* FindOriginalRecord(const UMeshComponent* Component) const;
 	void FinishReport(double StartSeconds);
 #endif
 };

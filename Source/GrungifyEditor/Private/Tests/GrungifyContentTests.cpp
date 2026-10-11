@@ -1,3 +1,4 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
 // This regression deliberately rebuilds generated plugin content in an isolated BuildPlugin HostProject.
 #include "GrungifyContentBuilder.h"
 

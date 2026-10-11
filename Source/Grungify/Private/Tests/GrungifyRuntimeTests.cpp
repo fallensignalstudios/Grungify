@@ -1,3 +1,4 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
 // Runs in packaged Development builds too (no editor APIs), to prove per-instance mask textures and owned
 // material instances survive cooking: -ExecCmds="Automation RunTests Grungify.Runtime"
 #include "CoreMinimal.h"

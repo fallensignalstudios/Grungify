@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyZoneVisualizer.h"
 
 #include "GrungifyWeatheringZone.h"

@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 using UnrealBuildTool;
 
 public class GrungifyEditor : ModuleRules
@@ -25,6 +27,7 @@ public class GrungifyEditor : ModuleRules
 			"RenderCore",
 			"ContentBrowser",
 			"AssetTools",
+			"Landscape",
 			"Grungify"
 		});
 	}

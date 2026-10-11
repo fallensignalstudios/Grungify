@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyRuntimeWear.h"
 
 #include "Components/StaticMeshComponent.h"

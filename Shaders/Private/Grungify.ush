@@ -1,3 +1,4 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
 // Grungify weathering shading.
 //
 // Included by the custom nodes in /Grungify/Materials/MF_GrungifyWeathering and M_GrungifyMaskDebug.
@@ -526,4 +527,67 @@ FGrungifyGrime GrungifyEvaluateGrime(
 	}
 
 	return G;
+}
+
+// ---------------------------------------------------------------- Height blending and displacement
+
+// Height-based blending: with the material's own height map (0..1, 0.5 = mid), chips favour the peaks (brick faces,
+// raised trim) and dust, moisture and moss settle in the low parts (mortar joints, recesses). Blend 0 returns the
+// masks exactly, so materials that don't connect a height are unchanged.
+float4 GrungifyHeightMasks(float4 Masks, float Height, float Blend)
+{
+	if (Blend <= 0.0)
+	{
+		return Masks;
+	}
+	const float H = saturate(Height) - 0.5;
+	Masks.r = saturate(Masks.r * max(0.0, 1.0 + 2.0 * Blend * H));
+	Masks.g = saturate(Masks.g * max(0.0, 1.0 - 2.0 * Blend * H));
+	return Masks;
+}
+
+float4 GrungifyHeightExtended(float4 Extended, float Height, float Blend)
+{
+	if (Blend <= 0.0)
+	{
+		return Extended;
+	}
+	const float Low = max(0.0, 1.0 - 2.0 * Blend * (saturate(Height) - 0.5));
+	Extended.r = saturate(Extended.r * Low);
+	Extended.a = saturate(Extended.a * Low);
+	return Extended;
+}
+
+// Nanite tessellation / displacement: chips and cracks cut in, dust builds up slightly. Added to the material's own
+// displacement; Depth is in the material's displacement units (0 = off, the default).
+float GrungifyDisplacementOffset(
+	float MaskMode, float4 VertexMasks, float4 TextureMasks, float4 InstanceMasks,
+	float3 WorldPos, float3 WorldNormal,
+	float SurfaceFromZone, float SurfaceOverride,
+	float FeatureScaleCm, float SeedOffset,
+	float Strength, float4 ChannelStrength, float CrackStrength, float Depth)
+{
+	if (!GrungifyHasValidMaskMode(MaskMode) || Depth == 0.0)
+	{
+		return 0.0;
+	}
+	const float4 Raw = GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks, InstanceMasks);
+	const float4 Masks = saturate(Raw * Strength * ChannelStrength);
+	const float3 P = GrungifyNoisePos(WorldPos, FeatureScaleCm, SeedOffset);
+	const FGrungifyLayers L = GrungifyLayers(Masks, P, WorldNormal.z);
+	float Offset = 0.35 * L.Dust - L.Chip;
+
+	const float Surface = SurfaceOverride >= 0.0 ? SurfaceOverride : SurfaceFromZone;
+	if (CrackStrength > 0.0 && (int)round(Surface) == 0)
+	{
+		const uint Seed = 2027u;
+		const float Where = saturate((Raw.r * 1.5 + Raw.b * 0.5) * Strength) * CrackStrength;
+		if (Where > 0.01)
+		{
+			const float Border = GrungifyCellBorder(P * 1.5, Seed);
+			const float Crack = (1.0 - smoothstep(0.0, 0.045, Border)) * smoothstep(0.3, 0.6, GrungifyFbm(P * 0.7, Seed + 3u) + Where * 0.5);
+			Offset -= Crack * saturate(Where) * 0.6;
+		}
+	}
+	return Offset * Depth;
 }

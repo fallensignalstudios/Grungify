@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyReferenceScene.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"

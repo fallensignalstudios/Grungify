@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #pragma once
 
 #include "CoreMinimal.h"
@@ -8,6 +10,7 @@
 class AActor;
 class UMaterialInterface;
 class UStaticMeshComponent;
+class UMeshComponent;
 class UStaticMesh;
 class UTexture2D;
 class UDataLayerAsset;
@@ -523,17 +526,35 @@ struct GRUNGIFY_API FGrungifyLODBackup
 };
 
 /** Everything needed to put a component back exactly the way it was. */
+/** What a landscape component looked like before a zone gave it a weathered material override. */
+USTRUCT()
+struct GRUNGIFY_API FGrungifyLandscapeRecord
+{
+	GENERATED_BODY()
+
+	/** The ULandscapeComponent (typed loosely so this header doesn't need the Landscape module). */
+	UPROPERTY()
+	TSoftObjectPtr<UPrimitiveComponent> Component;
+
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> OriginalOverride;
+};
+
 USTRUCT()
 struct GRUNGIFY_API FGrungifyComponentRecord
 {
 	GENERATED_BODY()
 
 	UPROPERTY()
-	TSoftObjectPtr<UStaticMeshComponent> Component;
+	TSoftObjectPtr<UMeshComponent> Component;
 
 	/** Refuse destructive restoration after the component's mesh has been replaced. */
 	UPROPERTY()
 	TSoftObjectPtr<UStaticMesh> StaticMesh;
+
+	/** The static or skeletal mesh asset at capture (empty in records from before 0.6). */
+	UPROPERTY()
+	TSoftObjectPtr<UObject> MeshAsset;
 
 	/** LODData.Num() before the zone touched it. */
 	UPROPERTY()
@@ -859,7 +880,7 @@ namespace Grungify
 	};
 
 	/** Bumped whenever the generated content changes; older assets are rebuilt in place. */
-	constexpr int32 ContentVersion = 6;
+	constexpr int32 ContentVersion = 7;
 	constexpr float MaskModeVertex = 501.f;
 	constexpr float MaskModeTexture = 502.f;
 	/** Instanced meshes: masks come from per-instance custom data. */
@@ -873,5 +894,7 @@ namespace Grungify
 	/** Physical size of one mask texel, stored on owned instances for runtime wear. */
 	inline FName MaskTexelSizeParameterName() { return FName(TEXT("Grungify Mask Texel Size")); }
 	inline FName ActiveParameterName() { return FName(TEXT("Grungify Active")); }
+	/** Landscape materials: world-space XY rectangle the landscape mask covers (min X, min Y, size X, size Y). */
+	inline FName LandscapeRectParameterName() { return FName(TEXT("Grungify Landscape Rect")); }
 	inline FName SurfaceOverrideParameterName() { return FName(TEXT("Grungify Surface Override")); }
 }

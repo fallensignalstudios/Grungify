@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #pragma once
 
 #include "CoreMinimal.h"

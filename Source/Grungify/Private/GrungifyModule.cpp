@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyTypes.h"
 #include "Modules/ModuleManager.h"
 

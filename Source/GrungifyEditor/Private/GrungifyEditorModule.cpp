@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "Editor.h"
 #include "Editor/UnrealEdEngine.h"
 #include "Engine/Level.h"
@@ -8,6 +10,7 @@
 #include "GrungifyLibraryBuilder.h"
 #include "GrungifyMaterialHookup.h"
 #include "GrungifyReferenceScene.h"
+#include "GrungifyShowcase.h"
 #include "GrungifySettings.h"
 #include "GrungifyWeatheringZone.h"
 #include "GrungifyZoneComponent.h"
@@ -103,6 +106,14 @@ namespace
 	{
 		FString Message;
 		const bool bOk = FGrungifyLibraryBuilder::Build(bOverwrite, Message);
+		UE_LOG(LogGrungify, Log, TEXT("%s"), *Message);
+		Notify(FText::FromString(TEXT("Grungify: ") + Message), !bOk);
+	}
+
+	void BuildShowcase()
+	{
+		FString Message;
+		const bool bOk = FGrungifyShowcase::Build(Message);
 		UE_LOG(LogGrungify, Log, TEXT("%s"), *Message);
 		Notify(FText::FromString(TEXT("Grungify: ") + Message), !bOk);
 	}
@@ -447,6 +458,11 @@ private:
 			LOCTEXT("ReferenceScene", "Build Reference Scene"),
 			LOCTEXT("ReferenceSceneTip", "Create /Game/Grungify/Reference/L_GrungifyReference with a fixed-seed zone and screenshot tests for visual regression checks."),
 			FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&BuildReferenceScene)));
+
+		Section.AddMenuEntry("GrungifyShowcase",
+			LOCTEXT("Showcase", "Build Showcase Map"),
+			LOCTEXT("ShowcaseTip", "Create or rebuild /Grungify/Showcase/L_GrungifyShowcase in the plugin's content: six lit bays (Before / After, the three library looks, Fire & Soot, Instanced & Stamps) with cameras and fixed-seed zones, for demos and store screenshots. Needs a writable plugin folder."),
+			FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&BuildShowcase)));
 	}
 };
 

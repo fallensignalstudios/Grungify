@@ -1,4 +1,9 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyGenerator.h"
+
+#include "Components/SkinnedMeshComponent.h"
+#include "Engine/SkinnedAsset.h"
 
 #if WITH_EDITOR
 
@@ -200,7 +205,26 @@ namespace Grungify
 		return EGrungifySurfaceType::Auto;
 	}
 
-	EGrungifySurfaceType ClassifySlot(const UStaticMeshComponent* Component, int32 MaterialIndex, EGrungifySurfaceType Override, FString* OutSource)
+	const UObject* MeshAssetOf(const UMeshComponent* Component)
+	{
+		if (const UStaticMeshComponent* Static = Cast<UStaticMeshComponent>(Component))
+		{
+			return Static->GetStaticMesh();
+		}
+		if (const USkinnedMeshComponent* Skinned = Cast<USkinnedMeshComponent>(Component))
+		{
+			return Skinned->GetSkinnedAsset();
+		}
+		return nullptr;
+	}
+
+	FString SlotNameOf(const UMeshComponent* Component, int32 MaterialIndex)
+	{
+		const TArray<FName> Names = Component ? Component->GetMaterialSlotNames() : TArray<FName>();
+		return Names.IsValidIndex(MaterialIndex) ? Names[MaterialIndex].ToString() : FString();
+	}
+
+	EGrungifySurfaceType ClassifySlot(const UMeshComponent* Component, int32 MaterialIndex, EGrungifySurfaceType Override, FString* OutSource)
 	{
 		auto Explain = [OutSource](const FString& Why)
 		{
@@ -267,12 +291,11 @@ namespace Grungify
 		}
 
 		// 3. Slot name, mesh name, actor label.
-		if (const UStaticMesh* Mesh = Component->GetStaticMesh())
+		if (const UObject* Mesh = MeshAssetOf(Component))
 		{
-			const TArray<FStaticMaterial>& StaticMaterials = Mesh->GetStaticMaterials();
-			if (StaticMaterials.IsValidIndex(MaterialIndex))
+			const FString SlotName = SlotNameOf(Component, MaterialIndex);
+			if (!SlotName.IsEmpty())
 			{
-				const FString SlotName = StaticMaterials[MaterialIndex].MaterialSlotName.ToString();
 				Result = SurfaceFromName(SlotName, Settings, &Keyword);
 				if (Result != EGrungifySurfaceType::Auto)
 				{
@@ -303,7 +326,7 @@ namespace Grungify
 		return Settings->FallbackSurfaceType == EGrungifySurfaceType::Auto ? EGrungifySurfaceType::Stone : Settings->FallbackSurfaceType;
 	}
 
-	bool IsRail(const UStaticMeshComponent* Component, FString* OutSource)
+	bool IsRail(const UMeshComponent* Component, FString* OutSource)
 	{
 		const UGrungifySettings* Settings = UGrungifySettings::Get();
 		const AActor* Owner = Component->GetOwner();
@@ -325,7 +348,7 @@ namespace Grungify
 		{
 			return Found(FString::Printf(TEXT("actor tag '%s'"), *Settings->RailTag.ToString()));
 		}
-		if (const UStaticMesh* Mesh = Component->GetStaticMesh())
+		if (const UObject* Mesh = MeshAssetOf(Component))
 		{
 			if (NameMatches(Mesh->GetName(), Settings->RailKeywords, &Keyword))
 			{
@@ -354,9 +377,9 @@ namespace Grungify
 			{
 				return true;
 			}
-			if (const UStaticMeshComponent* MeshComponent = Cast<UStaticMeshComponent>(Component))
+			if (const UMeshComponent* MeshComponent = Cast<UMeshComponent>(Component))
 			{
-				const UStaticMesh* Mesh = MeshComponent->GetStaticMesh();
+				const UObject* Mesh = MeshAssetOf(MeshComponent);
 				return Mesh && NameMatches(Mesh->GetName(), Settings->VentKeywords);
 			}
 		}
@@ -509,7 +532,7 @@ double FGrungifyFloorField::FloorBelow(const FVector& P) const
 
 namespace Grungify
 {
-	bool RuleMatchesSlot(const FGrungifySlotRule& Rule, const UStaticMeshComponent* Component, int32 MaterialIndex, FString* OutWhy)
+	bool RuleMatchesSlot(const FGrungifySlotRule& Rule, const UMeshComponent* Component, int32 MaterialIndex, FString* OutWhy)
 	{
 		const bool bHasActor = !Rule.Actor.IsNull();
 		const bool bHasPattern = !Rule.NamePattern.IsEmpty();
@@ -555,12 +578,12 @@ namespace Grungify
 		if (bHasPattern)
 		{
 			TArray<TPair<const TCHAR*, FString>> Names;
-			if (const UStaticMesh* Mesh = Component->GetStaticMesh())
+			if (const UObject* Mesh = MeshAssetOf(Component))
 			{
-				const TArray<FStaticMaterial>& StaticMaterials = Mesh->GetStaticMaterials();
-				if (StaticMaterials.IsValidIndex(MaterialIndex))
+				const FString SlotName = SlotNameOf(Component, MaterialIndex);
+				if (!SlotName.IsEmpty())
 				{
-					Names.Emplace(TEXT("slot name"), StaticMaterials[MaterialIndex].MaterialSlotName.ToString());
+					Names.Emplace(TEXT("slot name"), SlotName);
 				}
 				Names.Emplace(TEXT("mesh"), Mesh->GetName());
 			}

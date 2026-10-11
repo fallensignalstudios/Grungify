@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyTrafficPath.h"
 
 #include "Components/SplineComponent.h"

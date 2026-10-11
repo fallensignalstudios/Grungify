@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyBlueprintLibrary.h"
 
 #include "Components/PrimitiveComponent.h"

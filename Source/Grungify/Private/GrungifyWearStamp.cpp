@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyWearStamp.h"
 
 #include "Components/SphereComponent.h"

@@ -1,3 +1,4 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
 // Regression coverage uses isolated transient editor worlds, never the editor's current map.
 #include "GrungifyGenerator.h"
 

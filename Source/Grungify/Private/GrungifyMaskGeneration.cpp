@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyGenerator.h"
 
 #if WITH_EDITOR
@@ -7,6 +9,11 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "StaticMeshResources.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkinnedAsset.h"
+#include "Engine/SkeletalMesh.h"
+#include "Rendering/SkeletalMeshLODRenderData.h"
+#include "Rendering/SkeletalMeshRenderData.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Engine/Texture2D.h"
@@ -1704,6 +1711,251 @@ namespace Grungify
 				return false;
 			}
 		}
+
+		int32 Best = 0;
+		for (int32 Index = 1; Index < 3; ++Index)
+		{
+			if (SurfaceVotes[Index] > SurfaceVotes[Best])
+			{
+				Best = Index;
+			}
+		}
+		OutResult.DominantSurface = EGrungifySurfaceType(Best + 1);
+		return true;
+	}
+
+	namespace
+	{
+		/**
+		 * CPU copy of a skeletal mesh LOD as static LOD resources (reference pose, render-section materials), so the
+		 * static mesh texture bake runs on it unchanged. False if the render data's CPU copy isn't available.
+		 */
+		bool CopySkinnedLOD(const FSkeletalMeshLODRenderData& Source, const USkinnedAsset& Asset, FStaticMeshLODResources& LOD)
+		{
+			const FPositionVertexBuffer& Positions = Source.StaticVertexBuffers.PositionVertexBuffer;
+			const FStaticMeshVertexBuffer& Attributes = Source.StaticVertexBuffers.StaticMeshVertexBuffer;
+			const uint32 NumVerts = Positions.GetNumVertices();
+			if (NumVerts == 0 || !Positions.GetVertexData() || !Attributes.GetTangentData() || !Attributes.GetTexCoordData()
+				|| Attributes.GetNumVertices() != NumVerts)
+			{
+				return false;
+			}
+			TArray<uint32> Indices;
+			Source.MultiSizeIndexContainer.GetIndexBuffer(Indices);
+			if (Indices.Num() < 3)
+			{
+				return false;
+			}
+
+			const uint32 NumUVs = Attributes.GetNumTexCoords();
+			LOD.VertexBuffers.PositionVertexBuffer.Init(NumVerts);
+			FStaticMeshVertexBuffer& Copy = LOD.VertexBuffers.StaticMeshVertexBuffer;
+			Copy.SetUseFullPrecisionUVs(true);
+			Copy.Init(NumVerts, NumUVs);
+			for (uint32 V = 0; V < NumVerts; ++V)
+			{
+				LOD.VertexBuffers.PositionVertexBuffer.VertexPosition(V) = Positions.VertexPosition(V);
+				Copy.SetVertexTangents(V, Attributes.VertexTangentX(V), Attributes.VertexTangentY(V), Attributes.VertexTangentZ(V));
+				for (uint32 UV = 0; UV < NumUVs; ++UV)
+				{
+					Copy.SetVertexUV(V, UV, Attributes.GetVertexUV(V, UV));
+				}
+			}
+			LOD.IndexBuffer.SetIndices(Indices, EIndexBufferStride::Force32Bit);
+
+			// Render sections index the LOD's material map; LOD0 is normally identity.
+			const FSkeletalMeshLODInfo* Info = Asset.GetLODInfo(0);
+			for (int32 SectionIndex = 0; SectionIndex < Source.RenderSections.Num(); ++SectionIndex)
+			{
+				const FSkelMeshRenderSection& Section = Source.RenderSections[SectionIndex];
+				if (Section.bDisabled || Section.NumTriangles == 0)
+				{
+					continue;
+				}
+				FStaticMeshSection& Out = LOD.Sections.AddDefaulted_GetRef();
+				Out.MaterialIndex = Section.MaterialIndex;
+				if (Info && Info->LODMaterialMap.IsValidIndex(SectionIndex) && Info->LODMaterialMap[SectionIndex] != INDEX_NONE)
+				{
+					Out.MaterialIndex = Info->LODMaterialMap[SectionIndex];
+				}
+				Out.FirstIndex = Section.BaseIndex;
+				Out.NumTriangles = Section.NumTriangles;
+				Out.MinVertexIndex = Section.BaseVertexIndex;
+				Out.MaxVertexIndex = Section.BaseVertexIndex + FMath::Max<uint32>(Section.NumVertices, 1) - 1;
+			}
+			return LOD.Sections.Num() > 0;
+		}
+	}
+
+	int32 NumUVChannelsOf(const UMeshComponent* Component)
+	{
+		if (const UStaticMeshComponent* Static = Cast<UStaticMeshComponent>(Component))
+		{
+			const UStaticMesh* Mesh = Static->GetStaticMesh();
+			const FStaticMeshRenderData* RenderData = Mesh ? Mesh->GetRenderData() : nullptr;
+			return RenderData && RenderData->LODResources.Num() > 0 ? int32(RenderData->LODResources[0].VertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords()) : 0;
+		}
+		if (const USkinnedMeshComponent* Skinned = Cast<USkinnedMeshComponent>(Component))
+		{
+			const USkinnedAsset* Asset = Skinned->GetSkinnedAsset();
+			const FSkeletalMeshRenderData* RenderData = Asset ? Asset->GetResourceForRendering() : nullptr;
+			return RenderData && RenderData->LODRenderData.Num() > 0 ? int32(RenderData->LODRenderData[0].StaticVertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords()) : 0;
+		}
+		return 0;
+	}
+
+	uint32 MeshBuildHash(const UMeshComponent* Component)
+	{
+		if (const UStaticMeshComponent* Static = Cast<UStaticMeshComponent>(Component))
+		{
+			const UStaticMesh* Mesh = Static->GetStaticMesh();
+			const FStaticMeshRenderData* RenderData = Mesh ? Mesh->GetRenderData() : nullptr;
+			return RenderData ? GetTypeHash(RenderData->DerivedDataKey) : 0;
+		}
+		if (const USkinnedMeshComponent* Skinned = Cast<USkinnedMeshComponent>(Component))
+		{
+			const USkinnedAsset* Asset = Skinned->GetSkinnedAsset();
+			const FSkeletalMeshRenderData* RenderData = Asset ? Asset->GetResourceForRendering() : nullptr;
+			if (!RenderData || RenderData->LODRenderData.Num() == 0)
+			{
+				return 0;
+			}
+			// No public derived-data key for skeletal render data; its LOD0 shape changes whenever the mesh is rebuilt.
+			const FSkeletalMeshLODRenderData& LOD0 = RenderData->LODRenderData[0];
+			uint32 Hash = HashCombine(GetTypeHash(LOD0.GetNumVertices()), GetTypeHash(LOD0.GetTotalFaces()));
+			Hash = HashCombine(Hash, GetTypeHash(Asset->GetBounds().BoxExtent));
+			return HashCombine(Hash, GetTypeHash(LOD0.RenderSections.Num()));
+		}
+		return 0;
+	}
+
+	bool GenerateLandscapeMasks(FGrungifyLandscapeResult& InOut, const FGrungifySurfaceProfile& Profile, float ContactStrength, const FGrungifyGenerationParams& Params)
+	{
+		const int32 Count = InOut.SizeX * InOut.SizeY;
+		if (Count <= 0 || InOut.Positions.Num() != Count || InOut.Normals.Num() != Count || InOut.Contact.Num() != Count || InOut.Valid.Num() != Count)
+		{
+			return false;
+		}
+
+		// Terrain is a stone floor: no chips (no edges), no handling (nobody holds it).
+		FGrungifySlotInfo Slot;
+		Slot.Surface = EGrungifySurfaceType::Stone;
+		Slot.Profile = Profile;
+
+		InOut.Pixels.Init(FColor(0, 0, 0, 0), Count);
+		if (Params.bExtended)
+		{
+			InOut.ExtendedPixels.Init(FColor(0, 0, 0, 0), Count);
+		}
+		FLinearColor Sum = FLinearColor::Transparent;
+		InOut.Covered = 0;
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			if ((Index & 1023) == 0 && Params.CancelRequested())
+			{
+				InOut.bCancelled = true;
+				return false;
+			}
+			if (!InOut.Valid[Index])
+			{
+				continue;
+			}
+			FPointSample S;
+			S.P = InOut.Positions[Index];
+			S.N = FVector(InOut.Normals[Index]);
+			S.Convex = 0.f;
+			S.Concave = 0.15f;
+			S.Slot = &Slot;
+			FLinearColor Extended = FLinearColor::Transparent;
+			FLinearColor Masks = EvaluatePoint(S, Params, Params.bExtended ? &Extended : nullptr);
+			Masks.R = 0.f;
+			Masks.A = 0.f;
+
+			// Where terrain meets a wall or prop, dust and grit collect and the ground stays damp.
+			const float Contact = InOut.Contact[Index] * ContactStrength;
+			if (Contact > 0.f)
+			{
+				Masks.G = FMath::Clamp(Masks.G + Contact * 0.6f * FMath::Max(Params.DustIntensity, 0.f) * Params.Intensity, 0.f, 1.f);
+				if (Params.bExtended)
+				{
+					Extended.R = FMath::Clamp(Extended.R + Contact * 0.35f * Params.Extended.MoistureIntensity, 0.f, 1.f);
+					Extended.A = FMath::Clamp(Extended.A + Contact * 0.25f * Params.Extended.MossIntensity, 0.f, 1.f);
+				}
+			}
+			InOut.Pixels[Index] = ToColor(Masks);
+			if (Params.bExtended)
+			{
+				InOut.ExtendedPixels[Index] = ToColor(Extended);
+			}
+			Sum += Masks;
+			++InOut.Covered;
+		}
+		InOut.MeanMasks = InOut.Covered > 0 ? Sum / float(InOut.Covered) : FLinearColor::Transparent;
+		return true;
+	}
+
+	bool GenerateSkinned(USkeletalMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& InParams, FGrungifyComponentResult& OutResult)
+	{
+		const USkinnedAsset* Asset = Component ? Component->GetSkinnedAsset() : nullptr;
+		const FSkeletalMeshRenderData* RenderData = Asset ? Asset->GetResourceForRendering() : nullptr;
+		if (!RenderData || RenderData->LODRenderData.Num() == 0 || !InParams.Floor)
+		{
+			return false;
+		}
+
+		OutResult.Component = Component;
+		OutResult.bNanite = false;
+		FStaticMeshLODResources LOD(false); // Stack-owned CPU copy: no intrusive reference for its destructor to release.
+		if (!CopySkinnedLOD(RenderData->LODRenderData[0], *Asset, LOD))
+		{
+			OutResult.Notes += TEXT("LOD0 vertex data isn't readable on the CPU. ");
+			return false;
+		}
+
+		// The reference pose at the component's current placement: wear follows where the mesh stands now.
+		const FTransform& Transform = Component->GetComponentTransform();
+		const float SharpRef = 1.f - FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(InParams.EdgeAngleDeg, 5.f, 170.f) * 0.5f));
+		FTopology Topo;
+		if (!Topo.Build(LOD, Transform, SharpRef))
+		{
+			return false;
+		}
+
+		// Skeletal meshes have no per-instance vertex colours that survive saving, so masks always go into a texture.
+		// Many skinned meshes only have UV0; use it when the configured mask channel is missing or unusable and UV0 is clean.
+		FGrungifyGenerationParams Params = InParams;
+		const int32 NumUVs = int32(LOD.VertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords());
+		FGrungifyUVReport Report;
+		if (NumUVs > Params.MaskUVChannel)
+		{
+			Report = ValidateMaskUVs(LOD, Transform, Params.MaskUVChannel);
+		}
+		if ((NumUVs <= Params.MaskUVChannel || Report.Verdict == TEXT("failed")) && Params.MaskUVChannel != 0 && NumUVs > 0)
+		{
+			const FGrungifyUVReport UV0 = ValidateMaskUVs(LOD, Transform, 0);
+			if (UV0.Verdict != TEXT("failed"))
+			{
+				OutResult.Notes += FString::Printf(TEXT("UV%d %s; used UV0 for the mask texture. "), Params.MaskUVChannel,
+					NumUVs <= Params.MaskUVChannel ? TEXT("is missing") : TEXT("failed validation"));
+				Params.MaskUVChannel = 0;
+				Report = UV0;
+			}
+		}
+		OutResult.MaskUV = Report;
+		if (NumUVs <= Params.MaskUVChannel || Report.Verdict == TEXT("failed"))
+		{
+			OutResult.Notes += TEXT("No clean UV channel for a mask texture (skeletal meshes can't use vertex-colour masks); add a non-overlapping UV channel. ");
+			return false;
+		}
+		OutResult.MaskUVChannelUsed = Params.MaskUVChannel;
+
+		int32 SurfaceVotes[3] = { 0, 0, 0 };
+		OutResult.Output = EGrungifyMaskOutput::Texture;
+		if (!BakeTexture(LOD, Topo, Context, Params, OutResult, SurfaceVotes))
+		{
+			return false;
+		}
+		OutResult.Vertices = int32(LOD.GetNumVertices());
 
 		int32 Best = 0;
 		for (int32 Index = 1; Index < 3; ++Index)

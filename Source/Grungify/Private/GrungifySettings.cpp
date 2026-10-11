@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifySettings.h"
 
 #include "Materials/MaterialInterface.h"

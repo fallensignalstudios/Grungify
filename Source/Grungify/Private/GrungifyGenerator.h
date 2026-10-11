@@ -1,3 +1,5 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #pragma once
 
 #include "CoreMinimal.h"
@@ -13,6 +15,8 @@ class UActorComponent;
 class UMaterialInterface;
 class UPrimitiveComponent;
 class UStaticMeshComponent;
+class UMeshComponent;
+class USkeletalMeshComponent;
 class UTexture2D;
 class UMaterialInstanceConstant;
 class UInstancedStaticMeshComponent;
@@ -253,13 +257,16 @@ struct FGrungifyComponentContext
 
 struct FGrungifyComponentResult
 {
-	UStaticMeshComponent* Component = nullptr;
+	UMeshComponent* Component = nullptr;
 
 	/** VertexColor or Texture (never Auto). */
 	EGrungifyMaskOutput Output = EGrungifyMaskOutput::VertexColor;
 
 	/** One colour per render vertex, per LOD (vertex output). */
 	TArray<TArray<FColor>> LODColors;
+
+	/** UV channel the texture was baked in (skeletal meshes may fall back to UV0). */
+	int32 MaskUVChannelUsed = INDEX_NONE;
 
 	/** Square BGRA mask texture in the mask UV channel (texture output). */
 	int32 TextureSize = 0;
@@ -309,6 +316,36 @@ struct FGrungifyComponentResult
 	TArray<FScatterSample> ScatterSamples;
 };
 
+/**
+ * One landscape proxy's share of a zone: a grid over the zone's XY rectangle, traced on the game thread
+ * (height, normal, distance to the nearest wall or prop), then turned into masks by GenerateLandscapeMasks.
+ */
+struct FGrungifyLandscapeResult
+{
+	TWeakObjectPtr<AActor> Proxy;
+	FString ProxyPath;
+	uint32 Key = 0;
+	/** World-space XY rectangle covered by the textures. */
+	FVector2D Min = FVector2D::ZeroVector;
+	FVector2D Size = FVector2D::ZeroVector;
+	int32 SizeX = 0;
+	int32 SizeY = 0;
+
+	// Inputs (per texel, row-major). bValid is false where there's no landscape under the texel.
+	TArray<FVector> Positions;
+	TArray<FVector3f> Normals;
+	TArray<float> Contact;
+	TArray<bool> Valid;
+
+	// Outputs.
+	TArray<FColor> Pixels;
+	TArray<FColor> ExtendedPixels;
+	FLinearColor MeanMasks = FLinearColor::Transparent;
+	int32 Covered = 0;
+	float Seconds = 0.f;
+	bool bCancelled = false;
+};
+
 /** A cached per-component result and the inputs it was made from. */
 struct FGrungifyCacheEntry
 {
@@ -338,10 +375,11 @@ struct FGrungifyGenerationJob
 
 	struct FItem
 	{
-		TWeakObjectPtr<UStaticMeshComponent> Component;
+		TWeakObjectPtr<UMeshComponent> Component;
 		FString Path;
 		uint32 Key = 0;
 		bool bInstanced = false;
+		bool bSkeletal = false;
 		FGrungifyComponentContext Context;
 		FGrungifyComponentReport Report;
 		FGrungifyComponentResult Result;
@@ -379,14 +417,31 @@ namespace Grungify
 	bool NameMatches(const FString& Name, const TArray<FString>& Keywords, FString* OutKeyword = nullptr);
 
 	/** OutSource explains the decision (tag, physical material, keyword and where it was found, fallback...). */
-	EGrungifySurfaceType ClassifySlot(const UStaticMeshComponent* Component, int32 MaterialIndex, EGrungifySurfaceType Override, FString* OutSource = nullptr);
-	bool IsRail(const UStaticMeshComponent* Component, FString* OutSource = nullptr);
+	/** The static or skeletal mesh asset a component draws (null for other mesh components). */
+	const UObject* MeshAssetOf(const UMeshComponent* Component);
+	/** Material slot name, for static and skeletal meshes alike. */
+	FString SlotNameOf(const UMeshComponent* Component, int32 MaterialIndex);
+	/** UV channels of LOD0 (static or skeletal render data). */
+	int32 NumUVChannelsOf(const UMeshComponent* Component);
+	/** Changes when the mesh is rebuilt (derived-data key for static meshes, LOD0 shape for skeletal ones). */
+	uint32 MeshBuildHash(const UMeshComponent* Component);
+	/**
+	 * Landscape masks from a traced grid: dust, runoff, moisture and moss through the same evaluation as meshes (as a
+	 * stone floor with Profile), plus ContactStrength extra dust and damp where Contact is high.
+	 */
+	bool GenerateLandscapeMasks(FGrungifyLandscapeResult& InOut, const FGrungifySurfaceProfile& Profile, float ContactStrength, const FGrungifyGenerationParams& Params);
+
+	/** Skeletal meshes: texture masks baked from the reference pose of LOD0. */
+	bool GenerateSkinned(USkeletalMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult);
+
+	EGrungifySurfaceType ClassifySlot(const UMeshComponent* Component, int32 MaterialIndex, EGrungifySurfaceType Override, FString* OutSource = nullptr);
+	bool IsRail(const UMeshComponent* Component, FString* OutSource = nullptr);
 	/** Pass either an actor or a component. */
 	bool IsVent(const AActor* Actor, const UPrimitiveComponent* Component);
 	bool HasIgnoreTag(const AActor* Actor, const UActorComponent* Component);
 
 	/** True if the rule targets this slot. */
-	bool RuleMatchesSlot(const FGrungifySlotRule& Rule, const UStaticMeshComponent* Component, int32 MaterialIndex, FString* OutWhy = nullptr);
+	bool RuleMatchesSlot(const FGrungifySlotRule& Rule, const UMeshComponent* Component, int32 MaterialIndex, FString* OutWhy = nullptr);
 
 	/**
 	 * Checks the mask UV channel of a mesh LOD: presence, 0..1 range, overlapping islands, zero-area triangles,
@@ -410,7 +465,7 @@ namespace Grungify
 	float StampWeight(const FGrungifyStampData& Stamp, const FVector& P, float FeatureScale);
 
 	/** Snapshot of everything Grungify can change on a component. */
-	void CaptureRecord(UStaticMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
+	void CaptureRecord(UMeshComponent* Component, FGrungifyComponentRecord& OutRecord);
 	/** Puts the component back exactly as captured. Calls Modify() only when bTransactional. */
 	bool RestoreRecord(const FGrungifyComponentRecord& Record, bool bTransactional = true);
 
@@ -419,10 +474,10 @@ namespace Grungify
 	/** Both saved and live values must leave the complete requested range free. */
 	bool CustomDataSlotsFree(const TArray<float>& OriginalData, const TArray<float>& OriginalLiveData, int32 Base);
 	/** Updates only our fields in each array, preserving unrelated live-only values. */
-	bool WriteCustomData(UStaticMeshComponent* Component, const float (&Values)[CPD_Count]);
-	UTexture2D* CreateMaskTexture(UStaticMeshComponent* Component, int32 Size, const TArray<FColor>& Pixels);
+	bool WriteCustomData(UMeshComponent* Component, const float (&Values)[CPD_Count]);
+	UTexture2D* CreateMaskTexture(UMeshComponent* Component, int32 Size, const TArray<FColor>& Pixels);
 	/** Owns only admitted slots; Texture is null for vertex masks. Excluded material identities are retained. */
-	bool BindOwnedMaterials(UStaticMeshComponent* Component, UTexture2D* Texture,
+	bool BindOwnedMaterials(UMeshComponent* Component, UTexture2D* Texture,
 		const TArray<EGrungifySurfaceType>& MaterialSurfaces, UMaterialInterface* ParentOverride,
 		const FGrungifyPalette* Palette = nullptr, UTexture2D* ExtendedTexture = nullptr, float TexelSizeCm = 0.f);
 
@@ -431,6 +486,9 @@ namespace Grungify
 
 	/** True if none of the per-instance custom data floats Grungify uses hold another system's values. */
 	bool InstanceSlotsFree(const FGrungifyComponentRecord& OriginalState);
+
+	/** Sets a scalar on every material instance the component owns (the zone's per-slot instances). */
+	void SetOwnedScalar(UMeshComponent* Component, FName Parameter, float Value);
 
 	/** Shared setup of an owned or baked instance: textures, activation, surface, texel size, palette. */
 	void ConfigureOwnedInstance(UMaterialInstanceConstant* Instance, UMaterialInterface* Parent, UTexture2D* Texture, UTexture2D* ExtendedTexture,

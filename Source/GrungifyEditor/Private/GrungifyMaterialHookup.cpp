@@ -1,7 +1,10 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
 #include "GrungifyMaterialHookup.h"
 
 #include "AssetToolsModule.h"
 #include "ContentBrowserModule.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Editor.h"
 #include "EngineUtils.h"
@@ -13,6 +16,7 @@
 #include "GrungifyZoneComponent.h"
 #include "HAL/FileManager.h"
 #include "IContentBrowserSingleton.h"
+#include "LandscapeProxy.h"
 #include "MaterialEditingLibrary.h"
 #include "MaterialShared.h"
 #include "Materials/Material.h"
@@ -39,6 +43,8 @@ namespace
 {
 	const TCHAR* WeatheringFunctionPath = TEXT("/Grungify/Materials/MF_GrungifyWeathering.MF_GrungifyWeathering");
 	const TCHAR* SubstrateFunctionPath = TEXT("/Grungify/Materials/MF_GrungifySubstrate.MF_GrungifySubstrate");
+	const TCHAR* LandscapeFunctionPath = TEXT("/Grungify/Materials/MF_GrungifyLandscape.MF_GrungifyLandscape");
+	const TCHAR* DisplacementFunctionPath = TEXT("/Grungify/Materials/MF_GrungifyDisplacement.MF_GrungifyDisplacement");
 	const TCHAR* BackupRoot = TEXT("/Game/Grungify/Backups");
 
 	// Tags in the Desc of every node the tool inserts; Remove only ever touches tagged nodes.
@@ -46,6 +52,7 @@ namespace
 	const TCHAR* ConstantTag = TEXT("GrungifyHookup constant");
 	const TCHAR* UsedConstantTag = TEXT("GrungifyHookup constant (was Use Constant)");
 	const TCHAR* AttributesTag = TEXT("GrungifyHookup attributes");
+	const TCHAR* DisplacementTag = TEXT("GrungifyHookup displacement");
 
 	enum class EHookupPath : uint8 { Legacy, Attributes, Substrate };
 
@@ -66,7 +73,7 @@ namespace
 			return false;
 		}
 		const FString Path = Function->GetPathName();
-		return Path == WeatheringFunctionPath || Path == SubstrateFunctionPath;
+		return Path == WeatheringFunctionPath || Path == SubstrateFunctionPath || Path == LandscapeFunctionPath || Path == DisplacementFunctionPath;
 	}
 
 	bool IsTagged(const UMaterialExpression* Expression, const TCHAR* Tag)
@@ -430,6 +437,68 @@ namespace
 		return UMaterialEditingLibrary::ConnectMaterialProperty(Call, TEXT("Material"), MP_FrontMaterial);
 	}
 
+	/** Landscape materials use Landscape Layer nodes (Landscape module classes, matched by name to avoid the dependency). */
+	bool IsLandscapeMaterial(const UMaterial* Material)
+	{
+		for (const UMaterialExpression* Expression : Material->GetExpressions())
+		{
+			if (Expression && Expression->GetClass()->GetName().StartsWith(TEXT("MaterialExpressionLandscape")))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Nanite tessellation: when the material already drives Displacement, route it through MF_GrungifyDisplacement so
+	 * chips and cracks get real depth. Materials without displacement are left alone (tessellation is opt-in and costly).
+	 */
+	void InsertDisplacement(UMaterial* Material, UMaterialEditorOnlyData* Data, FGrungifyHookupResult& Result)
+	{
+		if (!Data->Displacement.IsConnected())
+		{
+			return;
+		}
+		UMaterialFunction* Function = LoadFunction(DisplacementFunctionPath);
+		UMaterialExpressionMaterialFunctionCall* Call = Function ? Cast<UMaterialExpressionMaterialFunctionCall>(
+			UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionMaterialFunctionCall::StaticClass(), Material->EditorX - 400, Material->EditorY + 600)) : nullptr;
+		if (!Call || !Call->SetMaterialFunction(Function))
+		{
+			Result.Notes += TEXT("; displacement left alone (MF_GrungifyDisplacement unavailable)");
+			return;
+		}
+		Call->Desc = DisplacementTag;
+		if (FExpressionInput* Input = FindCallInput(Call, TEXT("Displacement")))
+		{
+			CopyConnection(*Input, Data->Displacement);
+		}
+		if (UMaterialEditingLibrary::ConnectMaterialProperty(Call, TEXT("Displacement"), MP_Displacement))
+		{
+			Result.Notes += TEXT("; displacement routed through MF_GrungifyDisplacement (set Grungify Displacement Depth to use it)");
+		}
+	}
+
+	void RemoveDisplacement(UMaterial* Material, UMaterialEditorOnlyData* Data)
+	{
+		UMaterialExpression* Found = nullptr;
+		for (UMaterialExpression* Expression : Material->GetExpressions())
+		{
+			if (IsTagged(Expression, DisplacementTag)) { Found = Expression; break; }
+		}
+		UMaterialExpressionMaterialFunctionCall* Call = Cast<UMaterialExpressionMaterialFunctionCall>(Found);
+		if (!Call)
+		{
+			return;
+		}
+		if (Data->Displacement.Expression == Call)
+		{
+			const FExpressionInput* Source = FindCallInput(Call, TEXT("Displacement"));
+			Source ? CopyConnection(Data->Displacement, *Source) : Disconnect(Data->Displacement);
+		}
+		UMaterialEditingLibrary::DeleteMaterialExpression(Material, Call);
+	}
+
 	/** Undoes whatever the tool inserted. Returns false if nothing tagged was found. */
 	bool RemoveInserted(UMaterial* Material, FGrungifyHookupResult& Result)
 	{
@@ -439,6 +508,7 @@ namespace
 		{
 			return false;
 		}
+		RemoveDisplacement(Material, Data);
 
 		if (Call->Desc.Contains(TEXT("substrate")))
 		{
@@ -634,7 +704,18 @@ FGrungifyHookupResult UGrungifyMaterialHookup::AddGrungifyToMaterial(UMaterialIn
 	}
 	Result.Path = PathName(Path);
 
-	UMaterialFunction* Function = LoadFunction(Path == EHookupPath::Substrate ? SubstrateFunctionPath : WeatheringFunctionPath);
+	// Landscape materials read world-projected masks through their own function.
+	const bool bLandscape = IsLandscapeMaterial(Material);
+	if (bLandscape && Path == EHookupPath::Substrate)
+	{
+		return Skip(TEXT("Substrate landscape materials aren't supported yet; use legacy pins or Material Attributes for the landscape"));
+	}
+	if (bLandscape)
+	{
+		Result.Path += TEXT(" landscape");
+	}
+
+	UMaterialFunction* Function = LoadFunction(Path == EHookupPath::Substrate ? SubstrateFunctionPath : bLandscape ? LandscapeFunctionPath : WeatheringFunctionPath);
 	if (!Function)
 	{
 		Result.Outcome = TEXT("failed");
@@ -661,6 +742,10 @@ FGrungifyHookupResult UGrungifyMaterialHookup::AddGrungifyToMaterial(UMaterialIn
 	case EHookupPath::Legacy: bInserted = InsertLegacy(Material, Data, Function, Result); break;
 	case EHookupPath::Attributes: bInserted = InsertAttributes(Material, Data, Function, Result); break;
 	case EHookupPath::Substrate: bInserted = InsertSubstrate(Material, Data, Function, Result); break;
+	}
+	if (bInserted && !bLandscape)
+	{
+		InsertDisplacement(Material, Data, Result);
 	}
 
 	FString Errors;
@@ -737,12 +822,29 @@ TArray<UMaterial*> UGrungifyMaterialHookup::FindUnhookedMaterialsInLevel()
 		}
 	}
 
+	// Landscape materials under zones (or every landscape, without zones).
+	for (TActorIterator<ALandscapeProxy> It(World); It; ++It)
+	{
+		const FBox Box = It->GetComponentsBoundingBox(/*bNonColliding*/ true);
+		if (Zones.Num() > 0 && !Zones.ContainsByPredicate([&Box](const FBox& Zone) { return Zone.Intersect(Box); }))
+		{
+			continue;
+		}
+		UMaterial* Base = ResolveBase(It->GetLandscapeMaterial());
+		FString Why;
+		if (Base && !UsesGrungify(Base) && IsWritable(Base, Why))
+		{
+			Materials.AddUnique(Base);
+		}
+	}
+
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
-		TInlineComponentArray<UStaticMeshComponent*> Components(*It);
-		for (const UStaticMeshComponent* Component : Components)
+		TInlineComponentArray<UMeshComponent*> Components(*It);
+		for (const UMeshComponent* Component : Components)
 		{
-			if (!Component || !Component->IsRegistered())
+			// Static and skeletal meshes, as the zones weather them.
+			if (!Component || !Component->IsRegistered() || (!Component->IsA<UStaticMeshComponent>() && !Component->IsA<USkeletalMeshComponent>()))
 			{
 				continue;
 			}
