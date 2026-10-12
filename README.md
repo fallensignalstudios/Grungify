@@ -24,16 +24,18 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 > - **Skeletal meshes, landscape, height blending and Nanite displacement.**
 > - **Fab packaging:** a showcase map, build scripts and a readiness check, read-only installed content, engine-compatibility wrappers for 5.5–5.8, and copyright headers.
 >
-> **v0.8.0 has not been compiled yet.** It adds, from the pressure-hall trial feedback:
+> **v0.9.0 adds, not yet compiled natively:**
 > - **Weather Selected Actors:** select props, right-click, *Weather with Grungify*. It places a fitted zone, offers the material hookup, and previews (see [Quick start](#quick-start-one-minute)).
 > - **Shader code compiled offline in CI:** `Grungify.ush` and every generated custom node pass a real HLSL compiler (glslang), so shader typos fail on push, not in the editor.
+>
+> **v0.8.1 passed native UE 5.8.3 builds (Editor, Game and Shipping) and all 25 automation tests on D3D12**, including the eight-layer runtime GPU readback test. From the pressure-hall trial feedback, 0.8 adds:
 > - **Runtime wear on all eight layers**, Handling and Moss included. Strokes change only their channel, verified by GPU readback (see [Runtime wear](#runtime-wear-gameplay)).
 > - **Portable bakes**, with recorded compatibility (see [Bake to assets](#bake-to-assets-non-destructive)).
 > - **Material hookup that keeps your edits** on Remove.
 > - **Background previews from immutable snapshots**, restarted when a mesh changes mid-run.
 > - **Landscape wear clipped to the zone**, and real compile checks for the landscape and displacement functions.
 >
-> v0.7.0 (also uncompiled) added:
+> v0.7.0 added:
 > - **Art-direction controls**, independent of Feature Scale: chip scale, coverage, width and breakup; surface protection; grime breakup; and recess roughness variation (see [Art direction](#art-direction)).
 > - **A Dry Coated Ceramic library look.**
 > - **Per-slot physical coverage** in reports.
@@ -76,7 +78,7 @@ From Python: `unreal.GrungifyEditorLibrary.weather_actors(actors, True)` does th
 
 ### Content versioning
 
-The generated material assets carry a marker of the form `[GrungifyContent v11 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
+The generated material assets carry a marker of the form `[GrungifyContent v12 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
 
 - **Tools → Grungify → Update Plugin Content** creates missing assets and rebuilds outdated ones.
 - **Rebuild Plugin Content** forces a rebuild of all the generated material assets.
@@ -694,7 +696,7 @@ Texture generation skips edge-distance queries and weathering evaluation when a 
 
 These cases should be checked in-editor on a test level, never on production rooms:
 
-1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v11 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
+1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v12 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
 2. **Channel masks:** in MF_GrungifyWeathering, the Roughness mask is R only and the Metallic mask is G only.
 3. **Exact restore:** on a mesh whose default custom primitive data is `[]`, run Preview → Cancel Preview, and separately Apply → Clear. The data is `[]` again. Repeat on a mesh with painted vertex colours, a mesh with only some material slots overridden, and a mesh whose CPD indices 0–4 are already in use (it should be reported as a conflict and left untouched).
 4. **Undo:** run Apply → Ctrl+Z and Clear → Ctrl+Z. Delete a zone while previewing, then Ctrl+Z.
