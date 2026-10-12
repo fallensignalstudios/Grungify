@@ -7,6 +7,7 @@
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "GrungifyMaterialHookup.generated.h"
 
+class AActor;
 class UMaterial;
 class UMaterialInterface;
 
@@ -107,6 +108,12 @@ public:
 	/** The base materials used by static meshes in the editor level (inside zones, if there are any) that don't use Grungify yet. */
 	UFUNCTION(BlueprintCallable, Category = "Grungify|Materials", meta = (DevelopmentOnly))
 	static TArray<UMaterial*> FindUnhookedMaterialsInLevel();
+
+	/** The base materials used by these actors' static and skeletal meshes that don't use Grungify yet. */
+	static TArray<UMaterial*> FindUnhookedMaterialsOn(const TArray<AActor*>& Actors);
+
+	/** Hooks up each material (with a backup) behind a progress dialog, then reports the outcome like Hook Up Materials In Level. */
+	static void HookUpMaterials(const TArray<UMaterial*>& Materials);
 
 	// Menu actions: run on the Content Browser selection or the level, with a progress bar, notification and report file.
 	static void AddToSelectedAssets();

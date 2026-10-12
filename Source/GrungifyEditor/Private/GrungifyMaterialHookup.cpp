@@ -1040,6 +1040,37 @@ FGrungifyHookupResult UGrungifyMaterialHookup::RemoveGrungifyFromMaterial(UMater
 	return Result;
 }
 
+namespace
+{
+	/** Static and skeletal mesh materials on Actor (inside one of Zones, when there are any) that could take Grungify. */
+	void AddUnhookedMeshMaterials(const AActor* Actor, const TArray<FBox>& Zones, TArray<UMaterial*>& Materials)
+	{
+		TInlineComponentArray<UMeshComponent*> Components(Actor);
+		for (const UMeshComponent* Component : Components)
+		{
+			// Static and skeletal meshes, as the zones weather them.
+			if (!Component || !Component->IsRegistered() || (!Component->IsA<UStaticMeshComponent>() && !Component->IsA<USkeletalMeshComponent>()))
+			{
+				continue;
+			}
+			const FBox Box = Component->Bounds.GetBox();
+			if (Zones.Num() > 0 && !Zones.ContainsByPredicate([&Box](const FBox& Zone) { return Zone.Intersect(Box); }))
+			{
+				continue;
+			}
+			for (int32 Slot = 0; Slot < Component->GetNumMaterials(); ++Slot)
+			{
+				UMaterial* Base = ResolveBase(Component->GetMaterial(Slot));
+				FString Why;
+				if (Base && !UGrungifyMaterialHookup::UsesGrungify(Base) && IsWritable(Base, Why) && Base->MaterialDomain == MD_Surface && !Base->GetShadingModels().IsUnlit())
+				{
+					Materials.AddUnique(Base);
+				}
+			}
+		}
+	}
+}
+
 TArray<UMaterial*> UGrungifyMaterialHookup::FindUnhookedMaterialsInLevel()
 {
 	TArray<UMaterial*> Materials;
@@ -1076,31 +1107,27 @@ TArray<UMaterial*> UGrungifyMaterialHookup::FindUnhookedMaterialsInLevel()
 
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
-		TInlineComponentArray<UMeshComponent*> Components(*It);
-		for (const UMeshComponent* Component : Components)
+		AddUnhookedMeshMaterials(*It, Zones, Materials);
+	}
+	return Materials;
+}
+
+TArray<UMaterial*> UGrungifyMaterialHookup::FindUnhookedMaterialsOn(const TArray<AActor*>& Actors)
+{
+	TArray<UMaterial*> Materials;
+	for (const AActor* Actor : Actors)
+	{
+		if (Actor)
 		{
-			// Static and skeletal meshes, as the zones weather them.
-			if (!Component || !Component->IsRegistered() || (!Component->IsA<UStaticMeshComponent>() && !Component->IsA<USkeletalMeshComponent>()))
-			{
-				continue;
-			}
-			const FBox Box = Component->Bounds.GetBox();
-			if (Zones.Num() > 0 && !Zones.ContainsByPredicate([&Box](const FBox& Zone) { return Zone.Intersect(Box); }))
-			{
-				continue;
-			}
-			for (int32 Slot = 0; Slot < Component->GetNumMaterials(); ++Slot)
-			{
-				UMaterial* Base = ResolveBase(Component->GetMaterial(Slot));
-				FString Why;
-				if (Base && !UsesGrungify(Base) && IsWritable(Base, Why) && Base->MaterialDomain == MD_Surface && !Base->GetShadingModels().IsUnlit())
-				{
-					Materials.AddUnique(Base);
-				}
-			}
+			AddUnhookedMeshMaterials(Actor, {}, Materials);
 		}
 	}
 	return Materials;
+}
+
+void UGrungifyMaterialHookup::HookUpMaterials(const TArray<UMaterial*>& Materials)
+{
+	RunBatch(Materials, /*bAdd*/ true);
 }
 
 void UGrungifyMaterialHookup::AddToSelectedAssets()

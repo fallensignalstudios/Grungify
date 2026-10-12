@@ -9,6 +9,7 @@
 #include "GrungifyContentBuilder.h"
 #include "GrungifyLibraryBuilder.h"
 #include "GrungifyMaterialHookup.h"
+#include "GrungifyQuickStart.h"
 #include "GrungifyReferenceScene.h"
 #include "GrungifyShowcase.h"
 #include "GrungifySettings.h"
@@ -374,6 +375,11 @@ private:
 		UToolMenu* Menu = UToolMenus::Get()->ExtendMenu("LevelEditor.MainMenu.Tools");
 		FToolMenuSection& Section = Menu->FindOrAddSection("Grungify", LOCTEXT("Section", "Grungify"));
 
+		Section.AddMenuEntry("GrungifyWeatherSelected",
+			LOCTEXT("WeatherSelected", "Weather Selected Actors"),
+			LOCTEXT("WeatherSelectedTip", "Place a weathering zone fitted to the selected actors (and only them), offer to hook up their materials, and preview. One undo step."),
+			FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&FGrungifyQuickStart::WeatherSelected)));
+
 		Section.AddMenuEntry("GrungifyZonesPanel",
 			LOCTEXT("ZonesPanel", "Weathering Zones Panel"),
 			LOCTEXT("ZonesPanelTip", "List every weathering zone in the level with its status, and run actions on one or all of them."),
@@ -393,6 +399,16 @@ private:
 			LOCTEXT("UnhookSelected", "Remove Grungify from Selected Materials"),
 			LOCTEXT("UnhookSelectedTip", "Put back the original wiring of materials Grungify was added to by Add Grungify or Hook Up Materials."),
 			FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&UGrungifyMaterialHookup::RemoveFromSelectedAssets)));
+
+		// Right-click on actors in the viewport or World Outliner.
+		{
+			UToolMenu* ActorMenu = UToolMenus::Get()->ExtendMenu("LevelEditor.ActorContextMenu");
+			FToolMenuSection& ActorSection = ActorMenu->FindOrAddSection("Grungify", LOCTEXT("ActorSection", "Grungify"));
+			ActorSection.AddMenuEntry("GrungifyWeatherSelectedContext",
+				LOCTEXT("WeatherSelectedContext", "Weather with Grungify"),
+				LOCTEXT("WeatherSelectedContextTip", "Place a weathering zone fitted to the selected actors, offer to hook up their materials, and preview."),
+				FSlateIcon(), FUIAction(FExecuteAction::CreateStatic(&FGrungifyQuickStart::WeatherSelected)));
+		}
 
 		// Right-click on materials and material instances in the Content Browser.
 		for (const TCHAR* MenuName : { TEXT("ContentBrowser.AssetContextMenu.Material"), TEXT("ContentBrowser.AssetContextMenu.MaterialInstanceConstant") })

@@ -15,6 +15,8 @@ Related files:
   warning, and produce the upload zips.
 - `Scripts/CheckFabReadiness.py`: static checks (copyright lines, descriptor, prebuilt content and which engine saved
   it, icon, hygiene, Build.cs).
+- `Scripts/CheckShaders.py`: compiles `Grungify.ush` and every generated custom-node body with glslang's HLSL front
+  end, without the engine. `.github/workflows/checks.yml` runs it on every push.
 
 ---
 

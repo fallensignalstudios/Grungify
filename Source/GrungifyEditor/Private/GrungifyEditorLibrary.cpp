@@ -2,7 +2,9 @@
 
 #include "GrungifyEditorLibrary.h"
 
+#include "Editor.h"
 #include "GrungifyLibraryBuilder.h"
+#include "GrungifyQuickStart.h"
 #include "GrungifyReferenceScene.h"
 
 bool UGrungifyEditorLibrary::BuildReferenceScene(FString& OutMessage)
@@ -13,4 +15,10 @@ bool UGrungifyEditorLibrary::BuildReferenceScene(FString& OutMessage)
 bool UGrungifyEditorLibrary::BuildMaterialLibrary(bool bOverwrite, FString& OutMessage)
 {
 	return FGrungifyLibraryBuilder::Build(bOverwrite, OutMessage);
+}
+
+AGrungifyWeatheringZone* UGrungifyEditorLibrary::WeatherActors(const TArray<AActor*>& Actors, bool bPreview, FString& OutMessage)
+{
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	return FGrungifyQuickStart::WeatherActors(World, Actors, bPreview, OutMessage);
 }

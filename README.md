@@ -25,6 +25,8 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 > - **Fab packaging:** a showcase map, build scripts and a readiness check, read-only installed content, engine-compatibility wrappers for 5.5–5.8, and copyright headers.
 >
 > **v0.8.0 has not been compiled yet.** It adds, from the pressure-hall trial feedback:
+> - **Weather Selected Actors:** select props, right-click, *Weather with Grungify*. It places a fitted zone, offers the material hookup, and previews (see [Quick start](#quick-start-one-minute)).
+> - **Shader code compiled offline in CI:** `Grungify.ush` and every generated custom node pass a real HLSL compiler (glslang), so shader typos fail on push, not in the editor.
 > - **Runtime wear on all eight layers**, Handling and Moss included. Strokes change only their channel, verified by GPU readback (see [Runtime wear](#runtime-wear-gameplay)).
 > - **Portable bakes**, with recorded compatibility (see [Bake to assets](#bake-to-assets-non-destructive)).
 > - **Material hookup that keeps your edits** on Remove.
@@ -40,6 +42,17 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 > See the [Verification checklist](#verification-checklist).
 
 ---
+
+## Quick start (one minute)
+
+1. Install the plugin (below) and open your level.
+2. Select the props, walls or vehicles you want weathered.
+3. Right-click them and choose **Weather with Grungify** (or *Tools → Grungify → Weather Selected Actors*).
+   - If their materials don't use Grungify yet, you're offered to hook them up (backed up first, reversible).
+   - A zone is placed around the selection, limited to exactly those actors, and previewed. One undo step reverts all of it.
+4. Tweak the zone in the Details panel (Seed, Strength, a library look), then press **Apply**.
+
+From Python: `unreal.GrungifyEditorLibrary.weather_actors(actors, True)` does the same without the dialogs.
 
 ## Install
 
@@ -146,6 +159,8 @@ Compare the two on the reference scene if you mix legacy and Substrate materials
 The content build always creates `MF_GrungifySubstrate`. In a project with Substrate enabled, it also compiles a throwaway Substrate material that uses the function, to prove it works. In a project without Substrate, the report notes that this compile check was skipped.
 
 ## Using a zone
+
+*Weather Selected Actors* (see [Quick start](#quick-start-one-minute)) places and sizes a zone for you. By hand:
 
 1. Drag `BP_WeatheringZone` into the level and scale or size its box over the area.
 2. Adjust settings. With **Live Preview** on, the result regenerates whenever you release a slider or finish moving the zone.
@@ -771,6 +786,9 @@ These cases should be checked in-editor on a test level, never on production roo
 37. **Runtime wear:**
     - `Grungify.RuntimeWear.SelectedChannelAccumulationGPU` passes on a rendering RHI (D3D12, Vulkan, Metal). It paints all eight layers over nonzero masks and checks every channel by readback.
     - In PIE, footsteps with Handling and Moss show up, and the other layers don't change.
+
+38. **Quick start:** `Grungify.QuickStart.WeatherSelectedActors` passes. In a level, select three props, right-click → *Weather with Grungify*, accept the hookup. The props preview weathered and their neighbours don't. A single Ctrl+Z removes the zone.
+39. **Shaders offline:** `python3 Scripts/CheckShaders.py` (needs `glslang-tools`) prints `SHADERS OK`. CI runs it on every push.
 
 ## Packaging for Fab (5.5–5.8)
 
