@@ -23,8 +23,8 @@ jobs:
   fab-readiness:
     name: Fab readiness (informational)
     runs-on: ubuntu-24.04
-    # Fails until the prebuilt content, descriptor URLs and icon art exist; see Docs/Fab.md.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - run: python3 Scripts/CheckFabReadiness.py
+      # Not ready until the prebuilt content, descriptor URLs and icon art exist (Docs/Fab.md), so this reports a
+      # warning annotation instead of failing the PR.
+      - run: python3 Scripts/CheckFabReadiness.py || echo "::warning title=Fab readiness::Not ready for Fab yet; see the log and Docs/Fab.md"
