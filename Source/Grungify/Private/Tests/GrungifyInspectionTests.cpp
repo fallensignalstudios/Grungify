@@ -12,6 +12,7 @@
 #include "GrungifyWeatheringZone.h"
 #include "GrungifyZoneComponent.h"
 #include "Misc/AutomationTest.h"
+#include "UObject/Package.h"
 
 namespace
 {
@@ -32,6 +33,12 @@ namespace
 				Component->SetMobility(EComponentMobility::Static);
 				Component->SetStaticMesh(Mesh);
 				Component->RegisterComponent();
+			}
+			if (World)
+			{
+				// CreateWorld(Editor, false) creates a saveable package, not RF_Transient.
+				// Mark only the completed fixture's ancestor so inheritance is tested.
+				World->SetFlags(RF_Transient);
 			}
 		}
 
@@ -87,6 +94,27 @@ bool FGrungifyInspectionTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Untouched state"), Clean.State, FString(TEXT("none")));
 	TestEqual(TEXT("Untouched mode"), Clean.MaskModeName, FString(TEXT("none")));
 	TestTrue(TEXT("Transient fixture is reported as transient"), Clean.bTransient);
+	TestTrue(TEXT("Fixture world is explicitly transient"), Fixture.World->HasAnyFlags(RF_Transient));
+	TestFalse(TEXT("Component has no direct transient flag"), Fixture.Component->HasAnyFlags(RF_Transient));
+	AActor* Owner = Fixture.Component->GetOwner();
+	TestFalse(TEXT("Actor has no direct transient flag"), Owner->HasAnyFlags(RF_Transient));
+	const UPackage* FixturePackage = Fixture.Component->GetPackage();
+	TestTrue(TEXT("Fixture package is saveable; world ancestor supplies transience"),
+		FixturePackage && FixturePackage != GetTransientPackage() && !FixturePackage->HasAnyFlags(RF_Transient));
+
+	// An unsaved editor package alone does not mean its objects cannot be saved.
+	Fixture.World->ClearFlags(RF_Transient);
+	TestFalse(TEXT("Unflagged saveable hierarchy is not reported transient"),
+		UGrungifyInspectionLibrary::InspectComponent(Fixture.Component).bTransient);
+	Owner->SetFlags(RF_Transient);
+	TestTrue(TEXT("Transient actor ancestor is reported even with an unflagged component"),
+		UGrungifyInspectionLibrary::InspectComponent(Fixture.Component).bTransient);
+	TestTrue(TEXT("Inspection retains actor transient flag"), Owner->HasAnyFlags(RF_Transient));
+	Owner->ClearFlags(RF_Transient);
+	Fixture.World->SetFlags(RF_Transient);
+	TestTrue(TEXT("Transient world ancestor is reported after flags are restored"),
+		UGrungifyInspectionLibrary::InspectComponent(Fixture.Component).bTransient);
+	TestFalse(TEXT("Inspection never marks the component transient"), Fixture.Component->HasAnyFlags(RF_Transient));
 	TestEqual(TEXT("One slot inspected"), Clean.Slots.Num(), Fixture.Component->GetNumMaterials());
 
 	// Applied.

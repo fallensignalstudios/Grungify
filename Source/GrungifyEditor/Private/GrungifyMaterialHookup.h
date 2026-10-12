@@ -9,6 +9,7 @@
 
 class AActor;
 class UMaterial;
+class UMaterialExpression;
 class UMaterialInterface;
 
 /** What happened to one material. */
