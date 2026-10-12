@@ -11,18 +11,27 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "GrungifySettings.h"
+#include "MaterialEditingLibrary.h"
 #include "MaterialDomain.h"
 #include "Materials/Material.h"
-#include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialExpressionLinearInterpolate.h"
+#include "Materials/MaterialExpressionMultiply.h"
+#include "Materials/MaterialExpressionScalarParameter.h"
+#include "Materials/MaterialExpressionTextureCoordinate.h"
+#include "Materials/MaterialExpressionTextureSampleParameter2D.h"
+#include "Materials/MaterialInstanceConstant.h"
 #include "MeshDescription.h"
 #include "Misc/App.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/ScopeExit.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "PhysicsEngine/PhysicsSettings.h"
+#include "RenderingThread.h"
 #include "StaticMeshAttributes.h"
+#include "StaticMeshResources.h"
 #include "TextureResource.h"
 #include "UObject/Package.h"
+#include "UObject/StrongObjectPtr.h"
 
 namespace GrungifyRuntimeHitTests
 {
@@ -60,7 +69,7 @@ namespace GrungifyRuntimeHitTests
 		Description.CreateTriangle(Group, TArray<FVertexInstanceID>{ Corners[0], Corners[3], Corners[2] });
 
 		UStaticMesh* Mesh = NewObject<UStaticMesh>(GetTransientPackage(), NAME_None, RF_Transient);
-		Mesh->GetStaticMaterials().Add(FStaticMaterial(nullptr, FName(TEXT("Slot0")), FName(TEXT("Slot0"))));
+		Mesh->GetStaticMaterials().Add(FStaticMaterial(UMaterial::GetDefaultMaterial(MD_Surface), FName(TEXT("Slot0")), FName(TEXT("Slot0"))));
 		UStaticMesh::FBuildMeshDescriptionsParams Params;
 		Params.bBuildSimpleCollision = false;
 		Params.bAllowCpuAccess = true;
@@ -90,6 +99,81 @@ namespace GrungifyRuntimeHitTests
 		Mip.BulkData.Unlock();
 		Texture->UpdateResource();
 		return Texture;
+	}
+
+	/** A declared, connected material and constant instance: a MID cannot parent the runtime's new MID. */
+	UMaterialInstanceConstant* MakeMaterial(UObject* Outer, UTexture2D* Mask, FAutomationTestBase& Test)
+	{
+		UMaterial* Parent = NewObject<UMaterial>(GetTransientPackage(), NAME_None, RF_Transient);
+		TStrongObjectPtr<UMaterial> ParentGuard(Parent);
+		auto Scalar = [Parent](FName Name, float Default)
+		{
+			UMaterialExpressionScalarParameter* Node = CastChecked<UMaterialExpressionScalarParameter>(
+				UMaterialEditingLibrary::CreateMaterialExpression(Parent, UMaterialExpressionScalarParameter::StaticClass()));
+			Node->ParameterName = Name;
+			Node->DefaultValue = Default;
+			return Node;
+		};
+		UMaterialExpressionScalarParameter* Active = Scalar(Grungify::ActiveParameterName(), 0.f);
+		UMaterialExpressionScalarParameter* TexelSize = Scalar(Grungify::MaskTexelSizeParameterName(), 1.f);
+		UMaterialExpressionScalarParameter* UseUV0 = Scalar(TEXT("Grungify Use UV0"), 0.f);
+		UMaterialExpressionTextureSampleParameter2D* Texture = CastChecked<UMaterialExpressionTextureSampleParameter2D>(
+			UMaterialEditingLibrary::CreateMaterialExpression(Parent, UMaterialExpressionTextureSampleParameter2D::StaticClass()));
+		Texture->ParameterName = Grungify::MaskTextureParameterName();
+		Texture->Texture = Mask;
+		Texture->SamplerType = SAMPLERTYPE_LinearColor;
+		UMaterialExpressionTextureCoordinate* UV0 = CastChecked<UMaterialExpressionTextureCoordinate>(
+			UMaterialEditingLibrary::CreateMaterialExpression(Parent, UMaterialExpressionTextureCoordinate::StaticClass()));
+		UMaterialExpressionTextureCoordinate* UV1 = CastChecked<UMaterialExpressionTextureCoordinate>(
+			UMaterialEditingLibrary::CreateMaterialExpression(Parent, UMaterialExpressionTextureCoordinate::StaticClass()));
+		UV0->CoordinateIndex = 0;
+		UV1->CoordinateIndex = 1;
+		UMaterialExpressionLinearInterpolate* Coordinates = CastChecked<UMaterialExpressionLinearInterpolate>(
+			UMaterialEditingLibrary::CreateMaterialExpression(Parent, UMaterialExpressionLinearInterpolate::StaticClass()));
+		UMaterialExpressionMultiply* Color = CastChecked<UMaterialExpressionMultiply>(
+			UMaterialEditingLibrary::CreateMaterialExpression(Parent, UMaterialExpressionMultiply::StaticClass()));
+		auto Connect = [&Test](UMaterialExpression* From, const TCHAR* Output, UMaterialExpression* To, const TCHAR* Input)
+		{
+			const bool bConnected = UMaterialEditingLibrary::ConnectMaterialExpressions(From, Output, To, Input);
+			if (!bConnected)
+			{
+				const TArray<FString> Inputs = UMaterialEditingLibrary::GetMaterialExpressionInputNames(To);
+				Test.AddError(FString::Printf(TEXT("Fixture connection failed: %s.%s -> %s.%s; available inputs: [%s]"),
+					*From->GetClass()->GetName(), Output, *To->GetClass()->GetName(), Input, *FString::Join(Inputs, TEXT(", "))));
+			}
+			return bConnected;
+		};
+		auto Property = [&Test](UMaterialExpression* From, EMaterialProperty Which, const TCHAR* Name)
+		{
+			const bool bConnected = UMaterialEditingLibrary::ConnectMaterialProperty(From, TEXT(""), Which);
+			if (!bConnected)
+			{
+				Test.AddError(FString::Printf(TEXT("Fixture property connection failed: %s -> %s"), *From->GetClass()->GetName(), Name));
+			}
+			return bConnected;
+		};
+		bool bConnected = Connect(UV1, TEXT(""), Coordinates, TEXT("A"));
+		bConnected &= Connect(UV0, TEXT(""), Coordinates, TEXT("B"));
+		bConnected &= Connect(UseUV0, TEXT(""), Coordinates, TEXT("Alpha"));
+		// MaterialEditingLibrary compares editor pin names: GetShortenPinName maps Coordinates to UVs.
+		bConnected &= Connect(Coordinates, TEXT(""), Texture, TEXT("UVs"));
+		bConnected &= Connect(Texture, TEXT("RGB"), Color, TEXT("A"));
+		bConnected &= Connect(Active, TEXT(""), Color, TEXT("B"));
+		bConnected &= Property(Color, MP_BaseColor, TEXT("BaseColor"));
+		bConnected &= Property(TexelSize, MP_Roughness, TEXT("Roughness"));
+		if (!bConnected)
+		{
+			return nullptr;
+		}
+		Parent->PostEditChange();
+		UMaterialEditingLibrary::RecompileMaterial(Parent);
+		UMaterialInstanceConstant* Material = NewObject<UMaterialInstanceConstant>(Outer, NAME_None, RF_Transient);
+		Material->SetParentEditorOnly(Parent, false);
+		Material->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(Grungify::ActiveParameterName()), 1.f);
+		Material->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(Grungify::MaskTexelSizeParameterName()), 1.f);
+		Material->SetTextureParameterValueEditorOnly(FMaterialParameterInfo(Grungify::MaskTextureParameterName()), Mask);
+		Material->PostEditChange();
+		return Material;
 	}
 
 	/** The painted texel with the most green (Dust), and the total number of painted texels. */
@@ -129,9 +213,34 @@ bool FGrungifyRuntimeHitPathTest::RunTest(const FString& Parameters)
 
 	UStaticMesh* Mesh = MakeQuad();
 	UTexture2D* Mask = MakeMask(TA_Wrap, TA_Clamp);
+	TStrongObjectPtr<UStaticMesh> MeshGuard(Mesh);
+	TStrongObjectPtr<UTexture2D> MaskGuard(Mask);
 	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false);
-	ON_SCOPE_EXIT { if (World) { World->DestroyWorld(false); } };
+	ON_SCOPE_EXIT
+	{
+		if (World)
+		{
+			World->DestroyWorld(false);
+			// Retire this isolated world's scene while its transient mesh and texture are still rooted.
+			FlushRenderingCommands();
+		}
+	};
 	if (!TestNotNull(TEXT("Quad fixture"), Mesh) || !TestNotNull(TEXT("Mask fixture"), Mask) || !TestNotNull(TEXT("World"), World))
+	{
+		return false;
+	}
+	const FStaticMeshRenderData* RenderData = Mesh->GetRenderData();
+	if (!TestNotNull(TEXT("Quad has built render data"), RenderData)
+		|| !TestEqual(TEXT("Quad has one material slot named Slot0"), Mesh->GetMaterialIndex(TEXT("Slot0")), 0)
+		|| !TestEqual(TEXT("Quad has one render LOD"), RenderData->LODResources.Num(), 1))
+	{
+		return false;
+	}
+	const FStaticMeshLODResources& LOD = RenderData->LODResources[0];
+	if (!TestEqual(TEXT("Quad has one render section"), LOD.Sections.Num(), 1)
+		|| !TestEqual(TEXT("Quad section uses material index zero"), LOD.Sections[0].MaterialIndex, 0)
+		|| !TestEqual(TEXT("Quad contains two triangles"), int32(LOD.GetNumTriangles()), 2)
+		|| !TestEqual(TEXT("Quad contains both collision UV channels"), int32(LOD.VertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords()), 2))
 	{
 		return false;
 	}
@@ -142,10 +251,11 @@ bool FGrungifyRuntimeHitPathTest::RunTest(const FString& Parameters)
 	Component->SetStaticMesh(Mesh);
 	Component->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 	Component->SetCollisionResponseToAllChannels(ECR_Block);
-	UMaterialInstanceDynamic* Material = UMaterialInstanceDynamic::Create(UMaterial::GetDefaultMaterial(MD_Surface), Component);
-	Material->SetScalarParameterValue(Grungify::ActiveParameterName(), 1.f);
-	Material->SetScalarParameterValue(Grungify::MaskTexelSizeParameterName(), 1.f);
-	Material->SetTextureParameterValue(Grungify::MaskTextureParameterName(), Mask);
+	UMaterialInstanceConstant* Material = MakeMaterial(Component, Mask, *this);
+	if (!TestNotNull(TEXT("Declared material with a constant-instance parent fixture"), Material))
+	{
+		return false;
+	}
 	Component->SetMaterial(0, Material);
 	Component->SetCustomPrimitiveDataFloat(Grungify::CPD_MaskMode, Grungify::MaskModeTexture);
 	Component->RegisterComponent();
@@ -180,7 +290,8 @@ bool FGrungifyRuntimeHitPathTest::RunTest(const FString& Parameters)
 	};
 
 	// 1. Effective channel UV0, U beyond 1 on a wrapping axis: X = 175 cm is UV0 U = 1.25, which samples texel U 0.25.
-	Material->SetScalarParameterValue(TEXT("Grungify Use UV0"), 1.f);
+	Material->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Use UV0")), 1.f);
+	Material->PostEditChange();
 	TArray<FColor> Pixels;
 	int32 Painted = 0;
 	if (PaintAt(175., 100., TEXT("Wrap X"), Pixels))
@@ -207,7 +318,8 @@ bool FGrungifyRuntimeHitPathTest::RunTest(const FString& Parameters)
 	Subsystem->ResetRuntimeWear(Component);
 
 	// 3. The settings channel (UV1) when Use UV0 is off: X = Y = 50 cm is UV1 (0.25, 0.25), UV0 (0, 0).
-	Material->SetScalarParameterValue(TEXT("Grungify Use UV0"), 0.f);
+	Material->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Use UV0")), 0.f);
+	Material->PostEditChange();
 	if (PaintAt(50., 50., TEXT("UV1"), Pixels))
 	{
 		const FIntPoint Texel = Peak(Pixels, Painted);
@@ -217,7 +329,8 @@ bool FGrungifyRuntimeHitPathTest::RunTest(const FString& Parameters)
 	Subsystem->ResetRuntimeWear(Component);
 
 	// 4. A blend, as the material computes it: Use UV0 0.5 at (50, 50) is UV (0.125, 0.125).
-	Material->SetScalarParameterValue(TEXT("Grungify Use UV0"), .5f);
+	Material->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Use UV0")), .5f);
+	Material->PostEditChange();
 	if (PaintAt(50., 50., TEXT("Blend"), Pixels))
 	{
 		const FIntPoint Texel = Peak(Pixels, Painted);

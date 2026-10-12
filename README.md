@@ -24,7 +24,7 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 > - **Skeletal meshes, landscape, height blending and Nanite displacement.**
 > - **Fab packaging:** a showcase map, build scripts and a readiness check, read-only installed content, engine-compatibility wrappers for 5.5–5.8, and copyright headers.
 >
-> **v0.10.0 has not been compiled yet.** It answers the 0.9.1 pressure-hall trial:
+> **v0.10.0 passed strict UE 5.8.3 Win64 Editor, Development and Shipping builds and all 31 native automation tests on D3D12 (28 plain successes, 3 expected warning cases).** Six fixed reference cameras rendered successfully; approved image baselines and packaged game rendering remain unverified. It answers the 0.9.1 pressure-hall trial:
 > - **Chip width independent of intensity:** the band is narrowed geometrically before damage intensity, so light damage still chips. There's also a new **Chip Opacity**, a **Fine Coated Stone** look, and a fixed-camera **coffer comparison** in the reference scene. Relief is unchanged (see [Art direction](#art-direction)).
 > - **Local trials** (`weather_component_slots`): private master clones, selected-slot scope, an artist permission gate, outcome counts from the final report, and one-step Undo. Weather Selected Actors now offers private copies first (see [Local trials](#local-trials-on-chosen-slots)).
 > - **Runtime hit path:** the slot material's effective mask UV (`Grungify Use UV0`), and per-axis wrap, clamp or mirror. Verified with real complex traces.

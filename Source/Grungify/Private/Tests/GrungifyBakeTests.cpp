@@ -15,6 +15,7 @@
 #include "GrungifyZoneComponent.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -228,7 +229,7 @@ bool FGrungifyBakeRefusesUnrelatedTest::RunTest(const FString& Parameters)
 		Zone->BakeToAssets();
 		Refused(TEXT("Both taken"));
 		TestTrue(TEXT("Both taken: the texture's bytes are unchanged"), Bytes(Texture) == Before);
-		TestEqual(TEXT("Both taken: the texture is still 4x4"), Texture->Source.GetSizeX(), 4);
+		TestEqual(TEXT("Both taken: the texture is still 4x4"), Texture->Source.GetSizeX(), int64(4));
 		TestNull(TEXT("Both taken: no bake record was added to the texture"), Texture->GetAssetUserDataOfClass(UGrungifyBakeRecord::StaticClass()));
 		float Value = 0.f;
 		TestTrue(TEXT("Both taken: the instance keeps its parent and value"), Instance->Parent == UMaterial::GetDefaultMaterial(MD_Surface)
