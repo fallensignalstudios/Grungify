@@ -12,6 +12,7 @@
 #include "GrungifyZoneComponent.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/ScopeExit.h"
+#include "UObject/Class.h"
 
 namespace
 {
@@ -87,9 +88,35 @@ bool FGrungifyWeatherSelectedTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Neighbour inside the box left alone"), Previewed.Contains(Neighbour->FindComponentByClass<UStaticMeshComponent>()));
 	Zone->CancelPreview();
 
+	// Include every nearby fixture: false means neither writes nor a queued background job.
+	struct FQuietState
+	{
+		UStaticMeshComponent* Component;
+		TArray<TObjectPtr<UMaterialInterface>> Materials;
+		TArray<float> Defaults;
+		TArray<float> Live;
+	};
+	TArray<FQuietState> BeforeQuiet;
+	for (AActor* Actor : { A, B, Neighbour })
+	{
+		UStaticMeshComponent* Component = Actor->FindComponentByClass<UStaticMeshComponent>();
+		BeforeQuiet.Add({ Component, Component->OverrideMaterials, Component->GetDefaultCustomPrimitiveData().Data, Component->GetCustomPrimitiveData().Data });
+	}
+
 	// Without preview: the zone exists, nothing is touched.
 	AGrungifyWeatheringZone* Quiet = FGrungifyQuickStart::WeatherActors(World, { Neighbour }, /*bPreview*/ false, Message);
 	TestTrue(TEXT("No-preview zone touches nothing"), Quiet && Quiet->GetPreviewCount() == 0 && Quiet->FindAppliedRecord(Neighbour->FindComponentByClass<UStaticMeshComponent>()) == nullptr);
+	if (Quiet)
+	{
+		TestFalse(TEXT("No-preview zone has no queued background generation"), Quiet->IsGeneratingInBackground());
+		TestEqual(TEXT("Live-preview flag is restored to its creation default"), Quiet->bLivePreview, Quiet->GetClass()->GetDefaultObject<AGrungifyWeatheringZone>()->bLivePreview);
+	}
+	for (const FQuietState& State : BeforeQuiet)
+	{
+		TestTrue(TEXT("No-preview keeps every nearby raw material override array exact"), State.Component->OverrideMaterials == State.Materials);
+		TestTrue(TEXT("No-preview keeps every nearby saved CPD array exact"), State.Component->GetDefaultCustomPrimitiveData().Data == State.Defaults);
+		TestTrue(TEXT("No-preview keeps every nearby live CPD array exact"), State.Component->GetCustomPrimitiveData().Data == State.Live);
+	}
 	return true;
 }
 

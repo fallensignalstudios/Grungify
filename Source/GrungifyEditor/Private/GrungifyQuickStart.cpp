@@ -95,6 +95,10 @@ AGrungifyWeatheringZone* FGrungifyQuickStart::WeatherActors(UWorld* World, const
 		return nullptr;
 	}
 
+	// SetActorLabel sends PostEditChangeProperty. Do not generate with an empty selection filter.
+	// Restore the prior live-preview flag on return so subsequent artist edits retain their usual behaviour.
+	TGuardValue<bool> LivePreviewGuard(Zone->bLivePreview, false);
+
 	const FString First = Targets[0]->GetActorLabel();
 	Zone->SetActorLabel(Targets.Num() == 1 ? FString::Printf(TEXT("Grungify_%s"), *First)
 		: FString::Printf(TEXT("Grungify_%s_and_%d_more"), *First, Targets.Num() - 1));
