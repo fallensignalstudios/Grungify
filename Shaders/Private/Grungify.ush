@@ -689,3 +689,13 @@ float4 GrungifyContrast(float4 Masks, float Contrast)
 	}
 	return pow(saturate(Masks), 1.0 / Contrast);
 }
+
+// Landscape masks cover the zone's rectangle only: outside 0..1 the clamped border texels would smear wear outward.
+float GrungifyInsideRect(float2 UV, float ClampToRect)
+{
+	if (ClampToRect < 0.5)
+	{
+		return 1.0;
+	}
+	return all(UV >= 0.0) && all(UV <= 1.0) ? 1.0 : 0.0;
+}

@@ -274,16 +274,19 @@ namespace
 		TEXT("MoistureStrength"), TEXT("SootStrength"), TEXT("ScorchStrength"), TEXT("MossStrength"), TEXT("CrackStrength"),
 		TEXT("Height"), TEXT("HeightBlend"), TEXT("Contrast"),
 		TEXT("ChipScale"), TEXT("ChipCoverage"), TEXT("ChipWidth"), TEXT("ChipBreakup"),
-		TEXT("SurfaceProtection"), TEXT("GrimeBreakup"), TEXT("RoughnessVariation") };
+		TEXT("SurfaceProtection"), TEXT("GrimeBreakup"), TEXT("RoughnessVariation"),
+		TEXT("MaskUV"), TEXT("ClampToRect") };
 
 	const TCHAR* CommonCode =
+		// Landscape masks are projected over the zone's rectangle: outside it, clamped border texels must not extend wear.
+		TEXT("const float Inside = GrungifyInsideRect(MaskUV, ClampToRect);\n")
 		// Height blending reshapes the stored masks before anything reads them (exactly unchanged at blend 0).
 		// Contrast then reshapes how boldly faint wear reads (also exactly unchanged at 1).
 		TEXT("const float4 VM = GrungifyContrast(GrungifyHeightMasks(float4(MaskR, MaskG, MaskB, MaskA), Height, HeightBlend), Contrast);\n")
-		TEXT("const float4 TM = GrungifyContrast(GrungifyHeightMasks(float4(TexR, TexG, TexB, TexA), Height, HeightBlend), Contrast);\n")
+		TEXT("const float4 TM = GrungifyContrast(GrungifyHeightMasks(float4(TexR, TexG, TexB, TexA) * Inside, Height, HeightBlend), Contrast);\n")
 		TEXT("const float4 CS = float4(ChipStrength, DustStrength, RunoffStrength, HandlingStrength);\n")
 		TEXT("const float4 IM = GrungifyContrast(GrungifyHeightMasks(float4(InstR, InstG, InstB, InstA), Height, HeightBlend), Contrast);\n")
-		TEXT("const float4 EM = GrungifyContrast(GrungifyHeightExtended(float4(ExtR, ExtG, ExtB, ExtA), Height, HeightBlend), Contrast);\n")
+		TEXT("const float4 EM = GrungifyContrast(GrungifyHeightExtended(float4(ExtR, ExtG, ExtB, ExtA) * Inside, Height, HeightBlend), Contrast);\n")
 		TEXT("const float4 ES = float4(MoistureStrength, SootStrength, ScorchStrength, MossStrength);\n")
 		// Art direction (chip size/coverage/width/breakup, protected centres, local grime, recess roughness).
 		TEXT("const FGrungifyArt Art = GrungifyMakeArt(FeatureScale, ChipScale, ChipCoverage, ChipWidth, ChipBreakup, SurfaceProtection, GrimeBreakup, RoughnessVariation);\n");
@@ -428,6 +431,10 @@ namespace
 			Ctx.Connect(UseFirst, TEXT(""), PickUV, TEXT("Alpha"));
 			MaskUV = PickUV;
 		}
+		S.Add(TEXT("MaskUV"), MaskUV);
+		UMaterialExpressionConstant* ClampToRect = AddToFunction<UMaterialExpressionConstant>(Function, -1700, 900);
+		ClampToRect->R = bLandscape ? 1.f : 0.f;
+		S.Add(TEXT("ClampToRect"), ClampToRect);
 		UMaterialExpressionTextureSampleParameter2D* MaskTexture = AddToFunction<UMaterialExpressionTextureSampleParameter2D>(Function, -1400, 760);
 		MaskTexture->ParameterName = Grungify::MaskTextureParameterName();
 		MaskTexture->Group = TEXT("Grungify");
@@ -1072,16 +1079,58 @@ namespace
 		const TCHAR* Description;
 	};
 
-	void NoCompileCheck(UMaterialFunction*, FGrungifyContentReport&) {}
+	/** A throwaway surface material that runs a four-output weathering function (landscape) into the legacy pins. */
+	void CompileCheckLandscape(UMaterialFunction* Function, FGrungifyContentReport& Report)
+	{
+		UMaterial* Probe = NewObject<UMaterial>(GetTransientPackage(), NAME_None, RF_Transient);
+		FBuildContext Ctx{ Report, TEXT("MF_GrungifyLandscape (compile check)") };
+		UMaterialExpressionMaterialFunctionCall* Call = AddToMaterial<UMaterialExpressionMaterialFunctionCall>(Probe, -300, 0);
+		if (!Call || !Call->SetMaterialFunction(Function))
+		{
+			Report.Errors.Add(TEXT("MF_GrungifyLandscape: could not call the function from a test material"));
+			return;
+		}
+		Ctx.ConnectProperty(Call, TEXT("BaseColor"), MP_BaseColor, TEXT("Base Color"));
+		Ctx.ConnectProperty(Call, TEXT("Roughness"), MP_Roughness, TEXT("Roughness"));
+		Ctx.ConnectProperty(Call, TEXT("Metallic"), MP_Metallic, TEXT("Metallic"));
+		Ctx.ConnectProperty(Call, TEXT("Normal"), MP_Normal, TEXT("Normal"));
+		CompileAndCheck(Probe, Report);
+	}
+
+	/**
+	 * A throwaway material with Nanite tessellation explicitly enabled (when this engine has the setting) that drives
+	 * Displacement through the function. Engines without the setting compile it as an ordinary material.
+	 */
+	void CompileCheckDisplacement(UMaterialFunction* Function, FGrungifyContentReport& Report)
+	{
+		UMaterial* Probe = NewObject<UMaterial>(GetTransientPackage(), NAME_None, RF_Transient);
+		if (FBoolProperty* Tessellation = FindFProperty<FBoolProperty>(UMaterial::StaticClass(), TEXT("bEnableTessellation")))
+		{
+			Tessellation->SetPropertyValue_InContainer(Probe, true);
+		}
+		else
+		{
+			Report.Notes.Add(TEXT("MF_GrungifyDisplacement: this engine has no material tessellation setting; compiled without it"));
+		}
+		FBuildContext Ctx{ Report, TEXT("MF_GrungifyDisplacement (compile check)") };
+		UMaterialExpressionMaterialFunctionCall* Call = AddToMaterial<UMaterialExpressionMaterialFunctionCall>(Probe, -300, 0);
+		if (!Call || !Call->SetMaterialFunction(Function))
+		{
+			Report.Errors.Add(TEXT("MF_GrungifyDisplacement: could not call the function from a test material"));
+			return;
+		}
+		Ctx.ConnectProperty(Call, TEXT("Displacement"), MP_Displacement, TEXT("Displacement"));
+		CompileAndCheck(Probe, Report);
+	}
 
 	TArray<FExtraFunction> ExtraFunctions()
 	{
 		return {
 			{ SubstrateFunctionPath, &PopulateSubstrateFunction, &ValidateSubstrateGraph, &CompileCheckSubstrate,
 				TEXT("Substrate version of MF_GrungifyWeathering: mixes one grime slab over your Substrate material. Inactive owned-material gate gives zero coverage. ") },
-			{ LandscapeFunctionPath, &PopulateLandscapeFunction, &ValidateLandscapeGraph, &NoCompileCheck,
+			{ LandscapeFunctionPath, &PopulateLandscapeFunction, &ValidateLandscapeGraph, &CompileCheckLandscape,
 				TEXT("Landscape version of MF_GrungifyWeathering: masks projected by world XY from the zone's landscape mask. Inactive gate passes inputs through. ") },
-			{ DisplacementFunctionPath, &PopulateDisplacementFunction, &ValidateDisplacementGraph, &NoCompileCheck,
+			{ DisplacementFunctionPath, &PopulateDisplacementFunction, &ValidateDisplacementGraph, &CompileCheckDisplacement,
 				TEXT("Adds Grungify depth to Nanite displacement: chips and cracks cut in, dust builds up (Grungify Displacement Depth, 0 = off). ") },
 		};
 	}
