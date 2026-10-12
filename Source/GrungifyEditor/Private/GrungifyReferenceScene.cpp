@@ -24,6 +24,8 @@
 #include "GameFramework/WorldSettings.h"
 #include "GrungifySettings.h"
 #include "GrungifyCompat.h"
+#include "GrungifyLibraryBuilder.h"
+#include "GrungifyPreset.h"
 #include "GrungifyTypes.h"
 #include "GrungifyWeatheringZone.h"
 #include "GrungifyZoneComponent.h"
@@ -216,6 +218,78 @@ namespace
 			Settings.bOverride_BloomIntensity = true;
 			Settings.BloomIntensity = 0.f;
 		}
+	}
+
+	/**
+	 * One wall coffer: a recessed back plate inside a projecting frame of four beams, facing -Y towards the camera,
+	 * centred at (X, CofferY, CofferZ). Five actors, so every frame edge is a real convex feature edge.
+	 */
+	bool SpawnCoffer(UWorld* World, const FString& Name, double X, UStaticMesh* Mesh, UMaterialInterface* Material, TArray<AActor*>& OutActors)
+	{
+		constexpr double CofferY = -800.;
+		constexpr double CofferZ = 120.;
+		const FName StoneTag = UGrungifySettings::Get()->StoneTag;
+		const struct { const TCHAR* Part; FVector Location; FVector Scale; } Parts[] = {
+			{ TEXT("Plate"), FVector(X, CofferY, CofferZ), FVector(1.2, 0.06, 1.2) },
+			{ TEXT("Top"), FVector(X, CofferY - 9., CofferZ + 52.5), FVector(1.2, 0.12, 0.15) },
+			{ TEXT("Bottom"), FVector(X, CofferY - 9., CofferZ - 52.5), FVector(1.2, 0.12, 0.15) },
+			{ TEXT("Left"), FVector(X - 52.5, CofferY - 9., CofferZ), FVector(0.15, 0.12, 0.9) },
+			{ TEXT("Right"), FVector(X + 52.5, CofferY - 9., CofferZ), FVector(0.15, 0.12, 0.9) },
+		};
+		for (const auto& Part : Parts)
+		{
+			AStaticMeshActor* Actor = SpawnMesh(World, *FString::Printf(TEXT("Coffer_%s_%s"), *Name, Part.Part), Mesh, Material,
+				FTransform(FRotator::ZeroRotator, Part.Location, Part.Scale), { StoneTag });
+			if (!Actor)
+			{
+				return false;
+			}
+			OutActors.Add(Actor);
+		}
+		return true;
+	}
+
+	/**
+	 * A zone over exactly one coffer, configured from a library look (or the standard look when LookName is empty),
+	 * then applied. The preset is transient and unassigned afterwards, so the saved map doesn't reference it.
+	 */
+	int32 ApplyCofferZone(UWorld* World, UClass* ZoneClass, const FString& Name, const FString& LookName, double X, const TArray<AActor*>& Coffer, FString& OutError)
+	{
+		AGrungifyWeatheringZone* Zone = World->SpawnActor<AGrungifyWeatheringZone>(ZoneClass, FVector(X, -805., 120.), FRotator::ZeroRotator, SpawnParams());
+		if (!Zone || !Zone->GetZoneComponent())
+		{
+			OutError = TEXT("could not spawn a coffer zone");
+			return 0;
+		}
+		Zone->bLivePreview = false;
+		Zone->SetActorLabel(FString::Printf(TEXT("WeatheringZone_Coffer_%s"), *Name));
+		if (!LookName.IsEmpty())
+		{
+			UGrungifyPreset* Preset = NewObject<UGrungifyPreset>(GetTransientPackage());
+			if (!FGrungifyLibraryBuilder::ConfigureLook(LookName, *Preset))
+			{
+				OutError = FString::Printf(TEXT("the material library has no look named %s"), *LookName);
+				return 0;
+			}
+			Preset->bIncludeSeed = false;
+			Zone->Preset = Preset;
+			Zone->LoadPreset();
+			Zone->Preset = nullptr;
+		}
+		// Same seed, output and box for every coffer: only the look differs.
+		Zone->Seed = ReferenceSeed;
+		Zone->MaskOutput = EGrungifyMaskOutput::Texture;
+		Zone->GetZoneComponent()->SetBoxExtent(FVector(90., 60., 90.));
+		for (AActor* Actor : Coffer)
+		{
+			Zone->IncludeOnlyActors.Add(Actor);
+		}
+		Zone->Apply();
+		if (Zone->GetAppliedCount() == 0)
+		{
+			OutError = FString::Printf(TEXT("the %s coffer zone weathered nothing (%s)"), *Name, *Zone->Status);
+		}
+		return Zone->GetAppliedCount();
 	}
 
 	bool PlaceScreenshotTest(UWorld* World, const TCHAR* Label, const FVector& Location, const FVector& Target)
@@ -439,10 +513,40 @@ bool FGrungifyReferenceScene::Build(FString& OutMessage)
 	Zone->Leaks.Add(Leak);
 
 	Zone->Apply();
-	const int32 Weathered = Zone->GetAppliedCount();
+	int32 Weathered = Zone->GetAppliedCount();
 	if (Weathered == 0)
 	{
 		return Fail(FString::Printf(TEXT("Apply weathered no meshes (%s)"), *Zone->Status));
+	}
+
+	// ------------------------------------------------ Coffer comparison row
+	// Three identical stone coffers outside the main zone, same seed and camera: the standard look, Dry Coated
+	// Ceramic and Fine Coated Stone. Only the chip band, coverage, opacity and grime settings differ.
+	// Untagged: it stays unweathered (Grungify.Runtime.ReferenceSceneCooked expects every tagged mesh to be weathered).
+	if (!SpawnMesh(World, TEXT("Floor_CofferRow"), Cube, Floor,
+		FTransform(FRotator::ZeroRotator, FVector(0., -800., -10.), FVector(6., 2., 0.2)), {}))
+	{
+		return Fail(TEXT("could not spawn the coffer row floor"));
+	}
+	const struct { const TCHAR* Name; const TCHAR* Look; double X; } Coffers[] = {
+		{ TEXT("Standard"), TEXT(""), -160. },
+		{ TEXT("DryCoatedCeramic"), TEXT("DryCoatedCeramic"), 0. },
+		{ TEXT("FineCoatedStone"), TEXT("FineCoatedStone"), 160. },
+	};
+	for (const auto& Coffer : Coffers)
+	{
+		TArray<AActor*> Parts;
+		if (!SpawnCoffer(World, Coffer.Name, Coffer.X, NaniteCube, Stone, Parts))
+		{
+			return Fail(FString::Printf(TEXT("could not spawn the %s coffer"), Coffer.Name));
+		}
+		FString CofferError;
+		const int32 CofferWeathered = ApplyCofferZone(World, ZoneClass, Coffer.Name, Coffer.Look, Coffer.X, Parts, CofferError);
+		if (CofferWeathered == 0)
+		{
+			return Fail(CofferError);
+		}
+		Weathered += CofferWeathered;
 	}
 
 	// ---------------------------------------------------- Screenshot tests
@@ -451,7 +555,10 @@ bool FGrungifyReferenceScene::Build(FString& OutMessage)
 		PlaceScreenshotTest(World, TEXT("Screenshot_WallRailRunoff"), FVector(-200., -150., 160.), FVector(-200., 250., 150.))
 		&& PlaceScreenshotTest(World, TEXT("Screenshot_SparseQuadWall"), FVector(300., -50., 150.), FVector(300., 250., 150.))
 		&& PlaceScreenshotTest(World, TEXT("Screenshot_NaniteCoffer"), FVector(210., -340., 130.), FVector(50., -180., 30.))
-		&& PlaceScreenshotTest(World, TEXT("Screenshot_Overview"), FVector(0., -650., 450.), FVector(-50., 150., 100.));
+		&& PlaceScreenshotTest(World, TEXT("Screenshot_Overview"), FVector(0., -650., 450.), FVector(-50., 150., 100.))
+		// Fixed cameras for the coffer comparison: all three side by side, and the fine coated stone up close.
+		&& PlaceScreenshotTest(World, TEXT("Screenshot_CofferComparison"), FVector(0., -1150., 130.), FVector(0., -800., 120.))
+		&& PlaceScreenshotTest(World, TEXT("Screenshot_CofferFineCoatedStone"), FVector(160., -960., 135.), FVector(160., -810., 120.));
 	if (!bScreenshots)
 	{
 		return Fail(TEXT("could not place or configure the screenshot functional tests"));
@@ -469,7 +576,7 @@ bool FGrungifyReferenceScene::Build(FString& OutMessage)
 	// Undo would otherwise step back through the half-built scene after it was saved.
 	GEditor->ResetTransaction(LOCTEXT("ResetTransaction", "Grungify reference scene built"));
 
-	OutMessage = FString::Printf(TEXT("Grungify reference scene: built %s (now open), weathered %d mesh(es) with seed %d, placed 4 screenshot tests."),
+	OutMessage = FString::Printf(TEXT("Grungify reference scene: built %s (now open), weathered %d mesh(es) with seed %d, placed 6 screenshot tests."),
 		*MapPackage, Weathered, ReferenceSeed);
 	UE_LOG(LogGrungify, Log, TEXT("%s"), *OutMessage);
 	return true;

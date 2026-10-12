@@ -78,7 +78,7 @@ From Python: `unreal.GrungifyEditorLibrary.weather_actors(actors, True)` does th
 
 ### Content versioning
 
-The generated material assets carry a marker of the form `[GrungifyContent v12 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
+The generated material assets carry a marker of the form `[GrungifyContent v13 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
 
 - **Tools → Grungify → Update Plugin Content** creates missing assets and rebuilds outdated ones.
 - **Rebuild Plugin Content** forces a rebuild of all the generated material assets.
@@ -209,11 +209,14 @@ Feature Scale sets the size of everything at once. On real assets that's not eno
 |---|---|---|
 | `Grungify Chip Scale` (cm) | 0 | Size of chip clusters. 0 follows half the Feature Scale; set it, for example to 1.5 cm, for fine chips on a coarse Feature Scale. |
 | `Grungify Chip Coverage` | 0.5 | How much of a worn edge is chipped. Lower values keep edges mostly intact with occasional chips. |
-| `Grungify Chip Width` | 1 | How much of the edge-wear band can chip. Lower values (around 0.3–0.5) give a narrow worn edge rather than a broad outline. |
+| Chip Width (palette) | 1 | How much of the edge-wear band can chip, as a fraction of *Edge Wear Width*. Lower values (around 0.3–0.5) give a narrow worn edge rather than a broad outline. It's applied to the edge geometry while masks are generated, before any intensity, so light damage in a narrow band still chips (see below). |
+| `Grungify Chip Opacity` | 1 | How strongly chips read in colour, roughness and metallic. Lower values give subtle marks. It doesn't move chips or change relief. |
 | `Grungify Chip Breakup` | 0 | Breaks the outline with intact gaps, and mixes small chip clusters in with the medium ones. |
 | `Grungify Surface Protection` | 0 | Removes low-level dust, runoff and handling below this level. Surface centres stay intact and grime stays local, which removes "continuous base coverage". |
 | `Grungify Grime Breakup` | 0 | Turns continuous dust and handling grime into local patches. |
 | `Grungify Roughness Variation` | 0 | Varies roughness across grimy recesses, from packed and dull to smeared and slicker, instead of a uniform matte. |
+
+**Three independent chip controls (0.10).** Where chips can be (Chip Width, geometric), how much of that band chips (Chip Coverage) and how strongly a chip reads (Chip Opacity) no longer affect one another. Before 0.10, Chip Width thresholded the chip mask after damage intensity had been multiplied in: on lightly damaged edges, narrowing could remove the chips altogether. The material parameter `Grungify Chip Width` still exists with that old threshold behaviour, for hand-made instances. A zone palette that sets Chip Width now narrows the band geometrically and leaves the material parameter at 1, so the two never compound. Relief and displacement are unchanged.
 
 Raising Strength makes everything heavier, including broad flat areas, which is what produces coarse dark plates. To make wear read without that, use these controls instead:
 
@@ -229,7 +232,14 @@ Raising Strength makes everything heavier, including broad flat areas, which is 
 - restrained dust, handling and runoff
 - Contrast 1.1
 
-Tune it on the real asset. It isn't an approved look.
+**Fine Coated Stone** (library look, 0.10) is for sealed or coated stone seen up close: coffers, plinths and cast panels.
+
+- **Feature and chips:** Feature Scale 8 cm and Edge Wear Width 3 cm. Chip Scale 1 cm, Width 0.5 (a 1.5 cm band), Coverage 0.3, Breakup 0.6 and Opacity 0.85: sparse fine chips at the very edge.
+- **Contact wear:** handling at hand height only (no general rubbing), and a 25 cm kick zone.
+- **Surfaces and grime:** Surface Protection 0.3, Grime Breakup 0.5, Roughness Variation 0.15.
+- **Relief:** left at 0. Judge relief on its own, on the real asset.
+
+Tune either look on the real asset. Neither is an approved look. The reference scene (*Build Reference Scene*) has a **coffer comparison row**: the same stone coffer three times, with the same seed under one fixed camera (`Screenshot_CofferComparison`), showing the standard look, Dry Coated Ceramic and Fine Coated Stone. A close-up camera (`Screenshot_CofferFineCoatedStone`) shows the fine look.
 
 ### Progress and cancelling
 
@@ -696,7 +706,7 @@ Texture generation skips edge-distance queries and weathering evaluation when a 
 
 These cases should be checked in-editor on a test level, never on production rooms:
 
-1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v12 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
+1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v13 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
 2. **Channel masks:** in MF_GrungifyWeathering, the Roughness mask is R only and the Metallic mask is G only.
 3. **Exact restore:** on a mesh whose default custom primitive data is `[]`, run Preview → Cancel Preview, and separately Apply → Clear. The data is `[]` again. Repeat on a mesh with painted vertex colours, a mesh with only some material slots overridden, and a mesh whose CPD indices 0–4 are already in use (it should be reported as a conflict and left untouched).
 4. **Undo:** run Apply → Ctrl+Z and Clear → Ctrl+Z. Delete a zone while previewing, then Ctrl+Z.

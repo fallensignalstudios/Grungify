@@ -167,6 +167,49 @@ namespace
 			},
 			FLinearColor(0.72f, 0.70f, 0.66f), FLinearColor(0.30f, 0.30f, 0.31f), 0.9f, FLinearColor(0.78f, 0.75f, 0.68f) });
 
+		Result.Add({ TEXT("FineCoatedStone"),
+			TEXT("Coated or sealed stone (coffers, plinths, cast panels) seen up close: sparse fine chips confined to a narrow band at the very edge, ")
+			TEXT("light contact wear at hand height, faces left intact. Chip Width is geometric, so light damage still chips; Chip Opacity keeps marks subtle. ")
+			TEXT("Relief is left at zero: judge relief separately on the real asset."),
+			[](UGrungifyPreset& P)
+			{
+				P.Intensity = 1.f;
+				P.FeatureScaleCm = 8.f;
+				P.DustIntensity = 0.35f;
+				P.LedgeDust = 0.3f;
+				P.CreviceDust = 0.35f;
+				P.FloorDust = 0.15f;
+				P.RunoffIntensity = 0.15f;
+				P.AmbientStreaks = 0.03f;
+				// Controlled contact wear: hands at rail height, a light kick zone, no general rubbing.
+				P.HandlingIntensity = 0.35f;
+				P.GeneralHandling = 0.f;
+				P.FloorKickHeightCm = 25.f;
+				P.ChipIntensity = 0.8f;
+				P.EdgeWearWidthCm = 3.f;
+				P.Palette.bOverrideChipScaleCm = true;
+				P.Palette.ChipScaleCm = 1.f;
+				P.Palette.bOverrideChipCoverage = true;
+				P.Palette.ChipCoverage = 0.3f;
+				P.Palette.bOverrideChipWidth = true;
+				P.Palette.ChipWidth = 0.5f;
+				P.Palette.bOverrideChipBreakup = true;
+				P.Palette.ChipBreakup = 0.6f;
+				P.Palette.bOverrideChipOpacity = true;
+				P.Palette.ChipOpacity = 0.85f;
+				P.Palette.bOverrideDustStrength = true;
+				P.Palette.DustStrength = 0.4f;
+				P.Palette.bOverrideHandlingStrength = true;
+				P.Palette.HandlingStrength = 0.5f;
+				P.Palette.bOverrideSurfaceProtection = true;
+				P.Palette.SurfaceProtection = 0.3f;
+				P.Palette.bOverrideGrimeBreakup = true;
+				P.Palette.GrimeBreakup = 0.5f;
+				P.Palette.bOverrideRoughnessVariation = true;
+				P.Palette.RoughnessVariation = 0.15f;
+			},
+			FLinearColor(0.66f, 0.64f, 0.60f), FLinearColor(0.30f, 0.30f, 0.31f), 0.9f, FLinearColor(0.74f, 0.71f, 0.65f) });
+
 		return Result;
 	}
 

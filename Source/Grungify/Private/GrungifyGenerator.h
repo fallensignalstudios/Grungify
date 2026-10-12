@@ -202,6 +202,8 @@ struct FGrungifyGenerationParams
 	float ChipIntensity = 1.f;
 	float EdgeAngleDeg = 60.f;
 	float EdgeWearWidth = 8.f;
+	/** Fraction of the edge band that can chip (palette Chip Width), applied to edge geometry before any intensity. */
+	float ChipBandWidth = 1.f;
 	float FloorKickHeight = 30.f;
 
 	EGrungifyMaskOutput MaskOutput = EGrungifyMaskOutput::Auto;

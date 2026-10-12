@@ -550,7 +550,10 @@ namespace Grungify
 		Scalar(Palette.bOverrideContrast, TEXT("Grungify Contrast"), Palette.Contrast);
 		Scalar(Palette.bOverrideChipScaleCm, TEXT("Grungify Chip Scale"), Palette.ChipScaleCm);
 		Scalar(Palette.bOverrideChipCoverage, TEXT("Grungify Chip Coverage"), Palette.ChipCoverage);
-		Scalar(Palette.bOverrideChipWidth, TEXT("Grungify Chip Width"), Palette.ChipWidth);
+		// Chip Width narrows the edge band geometrically during generation; the material's legacy threshold (which
+		// also cut light damage) stays neutral so the two never compound.
+		Scalar(Palette.bOverrideChipWidth, TEXT("Grungify Chip Width"), 1.f);
+		Scalar(Palette.bOverrideChipOpacity, TEXT("Grungify Chip Opacity"), Palette.ChipOpacity);
 		Scalar(Palette.bOverrideChipBreakup, TEXT("Grungify Chip Breakup"), Palette.ChipBreakup);
 		Scalar(Palette.bOverrideSurfaceProtection, TEXT("Grungify Surface Protection"), Palette.SurfaceProtection);
 		Scalar(Palette.bOverrideGrimeBreakup, TEXT("Grungify Grime Breakup"), Palette.GrimeBreakup);

@@ -279,9 +279,21 @@ struct GRUNGIFY_API FGrungifyPalette
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (InlineEditConditionToggle))
 	bool bOverrideChipWidth = false;
 
-	/** How much of the edge-wear band can chip: 1 = all of it, lower = only the part nearest the edge (a narrow worn edge). */
+	/**
+	 * Width of the band that can chip, as a fraction of Edge Wear Width: 1 = the whole band, 0.4 = only the 40% nearest
+	 * the edge (a narrow worn edge). Applied to the edge geometry while the masks are generated, before any intensity,
+	 * so narrowing never removes chips just because the damage is light. Coverage decides how much of the band chips,
+	 * Chip Opacity how strongly chips read.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (EditCondition = "bOverrideChipWidth", ClampMin = "0.02", ClampMax = "1"))
 	float ChipWidth = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (InlineEditConditionToggle))
+	bool bOverrideChipOpacity = false;
+
+	/** How strongly chips read in colour, roughness and metallic: 1 = standard, lower = subtle marks. Doesn't change where chips are, or relief. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (EditCondition = "bOverrideChipOpacity", ClampMin = "0", ClampMax = "1"))
+	float ChipOpacity = 1.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (InlineEditConditionToggle))
 	bool bOverrideChipBreakup = false;
@@ -977,7 +989,7 @@ namespace Grungify
 	};
 
 	/** Bumped whenever the generated content changes; older assets are rebuilt in place. */
-	constexpr int32 ContentVersion = 12;
+	constexpr int32 ContentVersion = 13;
 	constexpr float MaskModeVertex = 501.f;
 	constexpr float MaskModeTexture = 502.f;
 	/** Instanced meshes: masks come from per-instance custom data. */

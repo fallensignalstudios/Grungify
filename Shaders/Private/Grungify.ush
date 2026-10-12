@@ -115,7 +115,8 @@ struct FGrungifyArt
 	float FeatureScaleCm;     // the mesh's feature scale, so chip scale can be given in cm
 	float ChipScaleCm;        // size of chip clusters; 0 = follow Feature Scale (half of it)
 	float ChipCoverage;       // 0..1, how much of a worn edge is chipped (0.5 = standard)
-	float ChipWidth;          // 0..1, 1 = the whole edge-wear band, lower = only the part nearest the edge
+	float ChipWidth;          // 0..1, legacy threshold on the (intensity-scaled) chip mask; zones narrow the band geometrically instead
+	float ChipOpacity;        // 0..1, how strongly a chip reads in colour, roughness and metallic (not where chips are, not relief)
 	float ChipBreakup;        // 0..1, gaps along the edge and small clusters among the medium ones
 	float SurfaceProtection;  // 0..1, low-level dust/runoff/handling below this is removed (keeps centres intact)
 	float GrimeBreakup;       // 0..1, continuous grime becomes local patches
@@ -123,7 +124,7 @@ struct FGrungifyArt
 };
 
 FGrungifyArt GrungifyMakeArt(float FeatureScaleCm, float ChipScaleCm, float ChipCoverage, float ChipWidth, float ChipBreakup,
-	float SurfaceProtection, float GrimeBreakup, float RoughnessVariation)
+	float SurfaceProtection, float GrimeBreakup, float RoughnessVariation, float ChipOpacity)
 {
 	FGrungifyArt Art;
 	Art.FeatureScaleCm = FeatureScaleCm > 0.5 ? FeatureScaleCm : 25.0;
@@ -134,12 +135,13 @@ FGrungifyArt GrungifyMakeArt(float FeatureScaleCm, float ChipScaleCm, float Chip
 	Art.SurfaceProtection = clamp(SurfaceProtection, 0.0, 0.95);
 	Art.GrimeBreakup = saturate(GrimeBreakup);
 	Art.RoughnessVariation = saturate(RoughnessVariation);
+	Art.ChipOpacity = saturate(ChipOpacity);
 	return Art;
 }
 
 FGrungifyArt GrungifyDefaultArt()
 {
-	return GrungifyMakeArt(25.0, 0.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0);
+	return GrungifyMakeArt(25.0, 0.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0);
 }
 
 // Narrow edge band and protected surface centres, applied to the masks before the layers read them.
@@ -261,26 +263,27 @@ FGrungifyResult GrungifyEvaluate(
 		R.Roughness = lerp(R.Roughness, R.Roughness * 0.85, L.Runoff);
 	}
 
-	// Edge chips.
+	// Edge chips. Opacity scales how strongly they read; where they are (and relief) comes from L.Chip alone.
+	const float Chip = L.Chip * Art.ChipOpacity;
 	if (SurfaceId == 1)
 	{
 		// Paint chips back to bare metal.
-		R.BaseColor = lerp(R.BaseColor, float3(0.62, 0.62, 0.64), L.Chip);
-		R.Metallic = lerp(R.Metallic, 1.0, L.Chip);
-		R.Roughness = lerp(R.Roughness, 0.35, L.Chip);
+		R.BaseColor = lerp(R.BaseColor, float3(0.62, 0.62, 0.64), Chip);
+		R.Metallic = lerp(R.Metallic, 1.0, Chip);
+		R.Roughness = lerp(R.Roughness, 0.35, Chip);
 	}
 	else if (SurfaceId == 2)
 	{
 		// Trim chips through to its substrate.
-		R.BaseColor = lerp(R.BaseColor, ChipColor, L.Chip);
-		R.Metallic = lerp(R.Metallic, 0.0, L.Chip);
-		R.Roughness = lerp(R.Roughness, 0.8, L.Chip);
+		R.BaseColor = lerp(R.BaseColor, ChipColor, Chip);
+		R.Metallic = lerp(R.Metallic, 0.0, Chip);
+		R.Roughness = lerp(R.Roughness, 0.8, Chip);
 	}
 	else
 	{
 		// Fresh, lighter stone where the weathered face broke away.
-		R.BaseColor = lerp(R.BaseColor, saturate(R.BaseColor * 1.35 + 0.06), L.Chip);
-		R.Roughness = lerp(R.Roughness, min(R.Roughness + 0.15, 1.0), L.Chip);
+		R.BaseColor = lerp(R.BaseColor, saturate(R.BaseColor * 1.35 + 0.06), Chip);
+		R.Roughness = lerp(R.Roughness, min(R.Roughness + 0.15, 1.0), Chip);
 	}
 
 	// Dust sits on top of everything.
@@ -560,7 +563,7 @@ FGrungifyGrime GrungifyEvaluateGrime(
 	{
 		GrungifyGrimeOver(G, L.Handling * 0.5, Black, float3(0.7, 0.7, 0.7), 0.15);
 		GrungifyGrimeOver(G, L.Runoff * 0.9, RunoffColor * float3(1.6, 1.1, 0.8), Dielectric, 0.85);
-		GrungifyGrimeOver(G, L.Chip, Black, float3(0.62, 0.62, 0.64), 0.35);
+		GrungifyGrimeOver(G, L.Chip * Art.ChipOpacity, Black, float3(0.62, 0.62, 0.64), 0.35);
 	}
 	else
 	{
@@ -568,11 +571,11 @@ FGrungifyGrime GrungifyEvaluateGrime(
 		GrungifyGrimeOver(G, L.Runoff * 0.9, RunoffColor, Dielectric, 0.7);
 		if (SurfaceId == 2)
 		{
-			GrungifyGrimeOver(G, L.Chip, ChipColor, Dielectric, 0.8);
+			GrungifyGrimeOver(G, L.Chip * Art.ChipOpacity, ChipColor, Dielectric, 0.8);
 		}
 		else
 		{
-			GrungifyGrimeOver(G, L.Chip * 0.6, StoneChipColor, Dielectric, 0.85);
+			GrungifyGrimeOver(G, L.Chip * Art.ChipOpacity * 0.6, StoneChipColor, Dielectric, 0.85);
 		}
 	}
 	GrungifyGrimeOver(G, L.Dust * 0.95, DustColor, Dielectric, 0.92);

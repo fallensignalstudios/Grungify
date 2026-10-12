@@ -275,7 +275,7 @@ namespace
 		TEXT("MoistureStrength"), TEXT("SootStrength"), TEXT("ScorchStrength"), TEXT("MossStrength"), TEXT("CrackStrength"),
 		TEXT("Height"), TEXT("HeightBlend"), TEXT("Contrast"),
 		TEXT("ChipScale"), TEXT("ChipCoverage"), TEXT("ChipWidth"), TEXT("ChipBreakup"),
-		TEXT("SurfaceProtection"), TEXT("GrimeBreakup"), TEXT("RoughnessVariation"),
+		TEXT("SurfaceProtection"), TEXT("GrimeBreakup"), TEXT("RoughnessVariation"), TEXT("ChipOpacity"),
 		TEXT("MaskUV"), TEXT("ClampToRect"),
 		TEXT("BakedMaskMode"), TEXT("BakedFeatureScale"), TEXT("BakedSeedOffset"), TEXT("BakedSurfaceType") };
 
@@ -294,7 +294,7 @@ namespace
 		TEXT("const float4 EM = GrungifyContrast(GrungifyHeightExtended(float4(ExtR, ExtG, ExtB, ExtA) * Inside, Height, HeightBlend), Contrast);\n")
 		TEXT("const float4 ES = float4(MoistureStrength, SootStrength, ScorchStrength, MossStrength);\n")
 		// Art direction (chip size/coverage/width/breakup, protected centres, local grime, recess roughness).
-		TEXT("const FGrungifyArt Art = GrungifyMakeArt(FeatureScale, ChipScale, ChipCoverage, ChipWidth, ChipBreakup, SurfaceProtection, GrimeBreakup, RoughnessVariation);\n");
+		TEXT("const FGrungifyArt Art = GrungifyMakeArt(FeatureScale, ChipScale, ChipCoverage, ChipWidth, ChipBreakup, SurfaceProtection, GrimeBreakup, RoughnessVariation, ChipOpacity);\n");
 
 	const TCHAR* EvaluateCode =
 		TEXT("FGrungifyResult R = GrungifyEvaluateFull(BaseColor, Roughness, Metallic, MaskMode, VM, TM, IM, EM, WorldPos, WorldNormal, ")
@@ -530,6 +530,7 @@ namespace
 		S.Add(TEXT("SurfaceProtection"), AddScalar(Function, TEXT("Grungify Surface Protection"), 0.f, 5600));
 		S.Add(TEXT("GrimeBreakup"), AddScalar(Function, TEXT("Grungify Grime Breakup"), 0.f, 5700));
 		S.Add(TEXT("RoughnessVariation"), AddScalar(Function, TEXT("Grungify Roughness Variation"), 0.f, 5800));
+		S.Add(TEXT("ChipOpacity"), AddScalar(Function, TEXT("Grungify Chip Opacity"), 1.f, 5900));
 	}
 
 	UMaterialExpressionFunctionInput* AddHeightInput(UMaterialFunction* Function, int32 Sort)

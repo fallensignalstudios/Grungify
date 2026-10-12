@@ -1034,6 +1034,7 @@ void AGrungifyWeatheringZone::BuildParams(FGrungifyGenerationParams& P) const
 	P.ChipIntensity = ChipIntensity;
 	P.EdgeAngleDeg = EdgeAngleDegrees;
 	P.EdgeWearWidth = EdgeWearWidthCm;
+	P.ChipBandWidth = Palette.bOverrideChipWidth ? FMath::Clamp(Palette.ChipWidth, 0.02f, 1.f) : 1.f;
 	P.FloorKickHeight = FloorKickHeightCm;
 
 	P.MaskOutput = MaskOutput;
@@ -1314,7 +1315,7 @@ namespace
 		H.Add(P.Seed);
 		for (const float Value : { P.Intensity, P.FeatureScale, P.ZoneFalloff, P.WearInfluence, P.DustIntensity, P.DustHeight, P.LedgeDust,
 			P.CreviceDust, P.FloorDust, P.RunoffIntensity, P.RunoffLength, P.RunoffSpread, P.AmbientStreaks, P.HandlingIntensity, P.HandMin,
-			P.HandMax, P.GeneralHandling, P.ChipIntensity, P.EdgeAngleDeg, P.EdgeWearWidth, P.FloorKickHeight, P.MaskTexelSize, P.SkyInfluence,
+			P.HandMax, P.GeneralHandling, P.ChipIntensity, P.EdgeAngleDeg, P.EdgeWearWidth, P.ChipBandWidth, P.FloorKickHeight, P.MaskTexelSize, P.SkyInfluence,
 			P.ScatterDensity })
 		{
 			H.Add(Value);

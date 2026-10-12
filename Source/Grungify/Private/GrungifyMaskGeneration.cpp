@@ -130,6 +130,8 @@ namespace Grungify
 			FVector N;
 			float Convex = 0.f;
 			float Concave = 0.f;
+			/** Convex edge proximity within the (possibly narrower) chip band; negative = derive it from Convex. */
+			float ChipConvex = -1.f;
 			const FGrungifySlotInfo* Slot = nullptr;
 			FVector2f GateUV = FVector2f::ZeroVector;
 		};
@@ -290,7 +292,15 @@ namespace Grungify
 				Exposure *= FMath::Lerp(1.f, 0.4f + 0.6f * Sky, Params.SkyInfluence);
 			}
 			const float Kick = (1.f - FMath::SmoothStep(0.f, FMath::Max(Params.FloorKickHeight, 1.f), Height)) * 0.5f;
-			float Chips = S.Convex * FMath::Min(Exposure + Kick, 1.f);
+			// The chip band is pure geometry (edge proximity), narrowed before any intensity or noise multiplies in,
+			// so a narrow band keeps its chips however light the damage is.
+			float EdgeBand = S.ChipConvex;
+			if (EdgeBand < 0.f)
+			{
+				const float W = FMath::Clamp(Params.ChipBandWidth, 0.02f, 1.f);
+				EdgeBand = W < 1.f ? FMath::Clamp((S.Convex - (1.f - W)) / W, 0.f, 1.f) : S.Convex;
+			}
+			float Chips = EdgeBand * FMath::Min(Exposure + Kick, 1.f);
 			Chips *= FMath::Lerp(0.35f, 1.f, Fbm(NP * 1.5, Params.Seed + 51u)) * Params.ChipIntensity * Profile.EdgeChips;
 
 			// Traffic scuffs: floors along paths get polished (and swept of dust), wall bottoms beside them get kicked.
@@ -615,9 +625,10 @@ namespace Grungify
 		class FEdgeField
 		{
 		public:
-			void Build(const FTopology& Topo, float EdgeAngleDeg, float InWidth)
+			void Build(const FTopology& Topo, float EdgeAngleDeg, float InWidth, float ChipBandFraction = 1.f)
 			{
 				Width = FMath::Max(InWidth, 0.5f);
+				ChipWidth = FMath::Max(Width * FMath::Clamp(ChipBandFraction, 0.02f, 1.f), 0.25f);
 				CellSize = Width;
 				const float BendRef = 1.f - FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(EdgeAngleDeg, 5.f, 170.f)));
 
@@ -679,10 +690,14 @@ namespace Grungify
 				}
 			}
 
-			void Query(const FVector& P, float& OutConvex, float& OutConcave) const
+			void Query(const FVector& P, float& OutConvex, float& OutConcave, float* OutChipConvex = nullptr) const
 			{
 				OutConvex = 0.f;
 				OutConcave = 0.f;
+				if (OutChipConvex)
+				{
+					*OutChipConvex = 0.f;
+				}
 				const TArray<int32>* List = Cells.Find(CellOf(P));
 				if (!List)
 				{
@@ -699,6 +714,12 @@ namespace Grungify
 					const float Value = Edge.Strength * (1.f - FMath::SmoothStep(Width * 0.35f, Width, Dist));
 					float& Target = Edge.bConvex ? OutConvex : OutConcave;
 					Target = FMath::Max(Target, Value);
+					if (OutChipConvex && Edge.bConvex && Dist < ChipWidth)
+					{
+						// Same profile over a narrower distance: the chip band is measured in centimetres from the edge.
+						const float ChipValue = Edge.Strength * (1.f - FMath::SmoothStep(ChipWidth * 0.35f, ChipWidth, Dist));
+						*OutChipConvex = FMath::Max(*OutChipConvex, ChipValue);
+					}
 				}
 			}
 
@@ -715,6 +736,7 @@ namespace Grungify
 			TMap<FIntVector, TArray<int32>> Cells;
 			double CellSize = 8.0;
 			float Width = 8.f;
+			float ChipWidth = 8.f;
 
 			FIntVector CellOf(const FVector& P) const
 			{
@@ -1103,7 +1125,7 @@ namespace Grungify
 			}
 
 			FEdgeField Edges;
-			Edges.Build(Topo, Params.EdgeAngleDeg, Params.EdgeWearWidth);
+			Edges.Build(Topo, Params.EdgeAngleDeg, Params.EdgeWearWidth, Params.ChipBandWidth);
 
 			// Pass 2 (parallel over rows): retain ownership of inactive texels, but avoid their edge queries.
 			Out.TexturePixels.Init(FColor(0, 0, 0, 0), NumPixels);
@@ -1169,7 +1191,7 @@ namespace Grungify
 							continue;
 						}
 					}
-					Edges.Query(S.P, S.Convex, S.Concave);
+					Edges.Query(S.P, S.Convex, S.Concave, &S.ChipConvex);
 #if WITH_DEV_AUTOMATION_TESTS
 					if (OutEdgeQueriesPerRow)
 					{
@@ -1778,6 +1800,9 @@ namespace Grungify
 				S.P = Instance.TransformPosition(Probe.Local);
 				S.N = Instance.TransformVectorNoScale(Probe.Normal).GetSafeNormal();
 				S.Convex = 0.35f;
+				// A per-instance average, not edge geometry: the band (placed in the shader by the instance's own
+				// edges) has nothing to narrow here.
+				S.ChipConvex = 0.35f;
 				S.Concave = 0.1f;
 				S.Slot = Slot;
 				const FLinearColor M = EvaluatePoint(S, Params);
@@ -2398,6 +2423,102 @@ namespace Grungify
 		MeasureSlotCoverage(LOD, Topo, 1, Vertex);
 		TestTrue(TEXT("Vertex dust covers the slot"), Vertex.SlotCoverage.Num() == 1 && FMath::IsNearlyEqual(Vertex.SlotCoverage[0].Covered[1], 1.0, 1e-6));
 		TestEqual(TEXT("Vertex output has no chips"), Vertex.SlotCoverage.Num() == 1 ? Vertex.SlotCoverage[0].Covered[0] : -1.0, 0.0);
+		return true;
+	}
+
+	IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGrungifyChipBandTest, "Grungify.Generation.ChipBandIndependentOfIntensity",
+		EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+	bool FGrungifyChipBandTest::RunTest(const FString& Parameters)
+	{
+		// One convex 90-degree feature edge along X = 100, Z = 100: a 1 m top face meeting a 1 m side face.
+		FTopology Topo;
+		Topo.Pos = { FVector(0, 0, 100), FVector(100, 0, 100), FVector(100, 100, 100), FVector(0, 100, 100), FVector(100, 100, 0), FVector(100, 0, 0) };
+		Topo.Indices = { 0, 1, 2, 0, 2, 3, 1, 5, 4, 1, 4, 2 };
+		Topo.FaceN = { FVector::UpVector, FVector::UpVector, FVector::ForwardVector, FVector::ForwardVector };
+		Topo.Weld = { 0, 1, 2, 3, 4, 5 };
+		Topo.WeldFirst = { 0, 1, 2, 3, 4, 5 };
+		Topo.TriSlot = { 0, 0, 0, 0 };
+		Topo.Convex.Init(0.f, 6);
+		Topo.Concave.Init(0.f, 6);
+
+		constexpr float WidthCm = 8.f;
+		FEdgeField Full;
+		FEdgeField Narrow;
+		Full.Build(Topo, 60.f, WidthCm, 1.f);
+		Narrow.Build(Topo, 60.f, WidthCm, 0.4f);
+
+		// The band is geometry: full width keeps the old profile, 0.4 stops at 3.2 cm and never changes Convex itself.
+		for (float Distance : { 0.25f, 1.f, 2.f, 3.f, 3.5f, 5.f, 7.5f })
+		{
+			const FVector P(100.0 - Distance, 50.0, 100.0);
+			float Convex = 0.f, Concave = 0.f, FullChip = 0.f, NarrowConvex = 0.f, NarrowChip = 0.f;
+			Full.Query(P, Convex, Concave, &FullChip);
+			Narrow.Query(P, NarrowConvex, Concave, &NarrowChip);
+			TestTrue(FString::Printf(TEXT("%.2f cm: edge found"), Distance), Convex > 0.f);
+			TestEqual(FString::Printf(TEXT("%.2f cm: full band equals the edge profile"), Distance), FullChip, Convex);
+			TestEqual(FString::Printf(TEXT("%.2f cm: narrowing leaves edge wear (handling, relief) alone"), Distance), NarrowConvex, Convex);
+			if (Distance < WidthCm * 0.4f * 0.35f)
+			{
+				TestTrue(FString::Printf(TEXT("%.2f cm: inside the narrow band at full strength"), Distance), FMath::IsNearlyEqual(NarrowChip, Convex, 1e-4f));
+			}
+			if (Distance >= WidthCm * 0.4f)
+			{
+				TestEqual(FString::Printf(TEXT("%.2f cm: outside the narrow band"), Distance), NarrowChip, 0.f);
+			}
+		}
+
+		// Through EvaluatePoint: the chip channel's extent depends on the band only, never on intensity.
+		FGrungifyFloorField Floor;
+		Floor.BuildFlat(0.0);
+		FGrungifyComponentContext Context;
+		Context.Slots.AddDefaulted();
+		FGrungifyGenerationParams Params;
+		Params.Floor = &Floor;
+		Params.ZoneExtent = FVector(500.0, 500.0, 500.0);
+		auto ChipAt = [&](float Distance, float Intensity, const FEdgeField& Edges)
+		{
+			FPointSample S;
+			S.P = FVector(100.0 - Distance, 50.0, 100.0);
+			S.N = FVector::UpVector;
+			S.Slot = &Context.Slots[0];
+			Edges.Query(S.P, S.Convex, S.Concave, &S.ChipConvex);
+			Params.ChipIntensity = Intensity;
+			return EvaluatePoint(S, Params).R;
+		};
+		int32 Compared = 0;
+		for (float Distance = 0.1f; Distance < WidthCm; Distance += 0.1f)
+		{
+			const float Strong = ChipAt(Distance, 1.f, Narrow);
+			const float Light = ChipAt(Distance, 0.3f, Narrow);
+			TestEqual(FString::Printf(TEXT("%.1f cm: light damage chips exactly where heavy damage does"), Distance), Light > 0.f, Strong > 0.f);
+			if (Strong > 0.f && Strong < 1.f)
+			{
+				TestTrue(FString::Printf(TEXT("%.1f cm: intensity scales the chip mask, nothing else"), Distance), FMath::IsNearlyEqual(Light, Strong * 0.3f, 1e-4f));
+				++Compared;
+			}
+			if (Distance >= WidthCm * 0.4f)
+			{
+				TestEqual(FString::Printf(TEXT("%.1f cm: no chips outside the narrow band"), Distance), Strong, 0.f);
+			}
+		}
+		TestTrue(TEXT("The narrow band has chip texels to compare"), Compared > 5);
+		TestTrue(TEXT("Light damage in a narrow band still chips at the edge"), ChipAt(0.5f, 0.3f, Narrow) > 0.f);
+
+		// Vertex output has no distance to the edge: the band narrows the edge profile instead, still before intensity.
+		FPointSample V;
+		V.P = FVector(100.0, 50.0, 100.0);
+		V.N = FVector::UpVector;
+		V.Slot = &Context.Slots[0];
+		V.Convex = 0.5f;
+		Params.ChipBandWidth = 0.4f;
+		Params.ChipIntensity = 1.f;
+		TestEqual(TEXT("Vertex: a weak edge outside the narrow band doesn't chip"), EvaluatePoint(V, Params).R, 0.f);
+		V.Convex = 0.9f;
+		const float VertexStrong = EvaluatePoint(V, Params).R;
+		Params.ChipIntensity = 0.3f;
+		TestTrue(TEXT("Vertex: inside the band, light damage still chips in proportion"), VertexStrong > 0.f
+			&& FMath::IsNearlyEqual(EvaluatePoint(V, Params).R, FMath::Min(VertexStrong, 1.f) * 0.3f, 1e-4f));
 		return true;
 	}
 
