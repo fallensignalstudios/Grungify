@@ -455,6 +455,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Targeting")
 	TArray<FGrungifySlotRule> SlotRules;
 
+	/** Weather only slots an enabled, non-excluding Slot Rule matches; every other slot is left untouched. For local, selected-slot trials. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Targeting")
+	bool bOnlySlotsMatchedByRules = false;
+
 	/** What to do with meshes another zone has already weathered. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Targeting")
 	EGrungifyOverlapPolicy OverlapPolicy = EGrungifyOverlapPolicy::SkipOwned;

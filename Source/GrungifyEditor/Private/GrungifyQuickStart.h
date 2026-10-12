@@ -4,7 +4,10 @@
 
 #include "CoreMinimal.h"
 
+struct FGrungifyLocalWeatherOptions;
+struct FGrungifyLocalWeatherResult;
 class AActor;
+class UMeshComponent;
 class AGrungifyWeatheringZone;
 class UWorld;
 
@@ -19,6 +22,9 @@ struct FGrungifyQuickStart
 	 * One undo step. Returns null (and why, in OutMessage) when none of the actors has a static or skeletal mesh.
 	 */
 	static AGrungifyWeatheringZone* WeatherActors(UWorld* World, const TArray<AActor*>& Actors, bool bPreview, FString& OutMessage);
+
+	/** See UGrungifyEditorLibrary::WeatherComponentSlots. */
+	static FGrungifyLocalWeatherResult WeatherComponentSlots(UMeshComponent* Component, const FGrungifyLocalWeatherOptions& Options);
 
 	/** The menu action: the level selection, an offer to hook up its materials, then WeatherActors and select the zone. */
 	static void WeatherSelected();

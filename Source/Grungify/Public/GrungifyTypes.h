@@ -193,6 +193,14 @@ struct GRUNGIFY_API FGrungifySlotRule
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Match")
 	TSoftObjectPtr<UMaterialInterface> Material;
 
+	/** Only the component with this name on the matched actor (None = any component). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Match")
+	FName ComponentName;
+
+	/** Only this material slot index (-1 = any). With Actor, picks one slot of one asset, e.g. a hero coffer's slot 0. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Match", meta = (ClampMin = "-1"))
+	int32 SlotIndex = -1;
+
 	/** Leave matching slots completely untouched. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Effect")
 	bool bExclude = false;
@@ -920,8 +928,17 @@ struct GRUNGIFY_API FGrungifyRunReport
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	int32 Weathered = 0;
 
+	/** Components left alone on purpose: excluded, filtered, custom-data conflicts, owned by another zone. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	int32 Skipped = 0;
+
+	/** Components Grungify tried to write and couldn't (see each component's Notes). Not counted as Skipped. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	int32 Failed = 0;
+
+	/** Components whose masks were generated but not written because the run was cancelled. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	int32 Cancelled = 0;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	TArray<FGrungifyComponentReport> Components;

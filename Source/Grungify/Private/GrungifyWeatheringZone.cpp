@@ -1175,6 +1175,11 @@ void AGrungifyWeatheringZone::BuildContext(UMeshComponent* Component, TMap<UText
 			}
 			Detail.Gates = FString::Join(Gates, TEXT(", "));
 		}
+		else if (bOnlySlotsMatchedByRules)
+		{
+			// Selected-slot scope: nothing a rule didn't explicitly pick is touched.
+			Info.bExcluded = true;
+		}
 
 		Detail.bRail = Info.bRail;
 		Detail.bIncluded = !Info.bExcluded;
@@ -1189,6 +1194,10 @@ void AGrungifyWeatheringZone::BuildContext(UMeshComponent* Component, TMap<UText
 		else if (Rule)
 		{
 			Detail.Reason = FString::Printf(TEXT("included; rule %s applies (matched by %s)"), *RuleName, *RuleWhy);
+		}
+		else if (bOnlySlotsMatchedByRules)
+		{
+			Detail.Reason = TEXT("excluded: no slot rule matched and Only Slots Matched By Rules is on");
 		}
 		else
 		{
@@ -2655,8 +2664,12 @@ void AGrungifyWeatheringZone::FinishReport(double StartSeconds)
 	int32 NumInstanced = 0;
 	int32 NumLandscape = 0;
 	int32 NumConflicts = 0;
+	int32 NumFailed = 0;
+	int32 NumCancelled = 0;
 	for (const FGrungifyComponentReport& Entry : LastReport.Components)
 	{
+		NumFailed += Entry.Result == TEXT("failed") ? 1 : 0;
+		NumCancelled += Entry.Result == TEXT("cancelled_before_write") ? 1 : 0;
 		NumVertex += Entry.Result == TEXT("vertex") ? 1 : 0;
 		NumTexture += Entry.Result == TEXT("texture") ? 1 : 0;
 		NumInstanced += Entry.Result == TEXT("instanced") ? 1 : 0;
@@ -2664,7 +2677,10 @@ void AGrungifyWeatheringZone::FinishReport(double StartSeconds)
 		NumConflicts += Entry.bCustomDataConflict ? 1 : 0;
 	}
 	LastReport.Weathered = NumVertex + NumTexture + NumInstanced + NumLandscape;
-	LastReport.Skipped = LastReport.Components.Num() - LastReport.Weathered;
+	// Every component lands in exactly one count, taken from its final result (after writes, not before).
+	LastReport.Failed = NumFailed;
+	LastReport.Cancelled = NumCancelled;
+	LastReport.Skipped = LastReport.Components.Num() - LastReport.Weathered - NumFailed - NumCancelled;
 	if (NumConflicts > 0)
 	{
 		const int32 Base = UGrungifySettings::Get()->CustomPrimitiveDataIndex;
@@ -2711,8 +2727,17 @@ void AGrungifyWeatheringZone::FinishReport(double StartSeconds)
 		{
 			Extras += FString::Printf(TEXT(", %d scattered"), LastReport.Scattered);
 		}
-		Status = FString::Printf(TEXT("%s: %d mesh(es) (%d vertex, %d texture%s), %d skipped, %d runoff source(s), seed %d, %.2fs%s%s. See Last Report."),
-			Verb, LastReport.Weathered, NumVertex, NumTexture, *Extras, LastReport.Skipped, LastReport.RunoffSources, Seed, LastReport.Seconds,
+		FString Failures;
+		if (LastReport.Failed > 0)
+		{
+			Failures += FString::Printf(TEXT(", %d FAILED"), LastReport.Failed);
+		}
+		if (LastReport.Cancelled > 0)
+		{
+			Failures += FString::Printf(TEXT(", %d cancelled before write"), LastReport.Cancelled);
+		}
+		Status = FString::Printf(TEXT("%s: %d mesh(es) (%d vertex, %d texture%s), %d skipped%s, %d runoff source(s), seed %d, %.2fs%s%s. See Last Report."),
+			Verb, LastReport.Weathered, NumVertex, NumTexture, *Extras, LastReport.Skipped, *Failures, LastReport.RunoffSources, Seed, LastReport.Seconds,
 			LastReport.bBackground ? TEXT(" (background)") : TEXT(""), *Phases);
 	}
 	UE_LOG(LogGrungify, Log, TEXT("%s: %s"), *GetActorNameOrLabel(), *Status);

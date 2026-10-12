@@ -8,7 +8,8 @@ public class GrungifyEditor : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine" });
+		// Grungify is public: GrungifyEditorLibrary.h exposes its types (channels, presets) to Blueprint and Python.
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "Grungify" });
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
@@ -27,8 +28,7 @@ public class GrungifyEditor : ModuleRules
 			"RenderCore",
 			"ContentBrowser",
 			"AssetTools",
-			"Landscape",
-			"Grungify"
+			"Landscape"
 		});
 	}
 }

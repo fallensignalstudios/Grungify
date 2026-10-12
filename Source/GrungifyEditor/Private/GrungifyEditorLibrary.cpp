@@ -22,3 +22,8 @@ AGrungifyWeatheringZone* UGrungifyEditorLibrary::WeatherActors(const TArray<AAct
 	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 	return FGrungifyQuickStart::WeatherActors(World, Actors, bPreview, OutMessage);
 }
+
+FGrungifyLocalWeatherResult UGrungifyEditorLibrary::WeatherComponentSlots(UMeshComponent* Component, const FGrungifyLocalWeatherOptions& Options)
+{
+	return FGrungifyQuickStart::WeatherComponentSlots(Component, Options);
+}

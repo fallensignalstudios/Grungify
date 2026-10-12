@@ -370,8 +370,8 @@ namespace
 			}
 
 			const FString File = WriteReport(Report, Label);
-			UE_LOG(LogGrungifyCommandlet, Display, TEXT("%s | %s | %s | weathered %d, skipped %d, %.2fs | %s | %s"),
-				*MapShortName, *Label, *Report.Operation, Report.Weathered, Report.Skipped, Report.Seconds,
+			UE_LOG(LogGrungifyCommandlet, Display, TEXT("%s | %s | %s | weathered %d, skipped %d, failed %d, cancelled %d, %.2fs | %s | %s"),
+				*MapShortName, *Label, *Report.Operation, Report.Weathered, Report.Skipped, Report.Failed, Report.Cancelled, Report.Seconds,
 				bIssues ? *Why : TEXT("ok"), File.IsEmpty() ? TEXT("report not written") : *File);
 			for (const FString& Warning : Report.Warnings)
 			{

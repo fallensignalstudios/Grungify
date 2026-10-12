@@ -135,6 +135,10 @@ namespace GrungifyZonesPanelPrivate
 			return TEXT("-");
 		}
 		FString Result = FString::Printf(TEXT("%s  %.2fs  %d weathered / %d skipped"), *Report.Operation, Report.Seconds, Report.Weathered, Report.Skipped);
+		if (Report.Failed > 0)
+		{
+			Result += FString::Printf(TEXT(" / %d FAILED"), Report.Failed);
+		}
 		if (Report.bCancelled)
 		{
 			Result += TEXT("  (cancelled)");

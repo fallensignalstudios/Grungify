@@ -543,12 +543,26 @@ namespace Grungify
 		const bool bHasActor = !Rule.Actor.IsNull();
 		const bool bHasPattern = !Rule.NamePattern.IsEmpty();
 		const bool bHasMaterial = !Rule.Material.IsNull();
-		if (!Rule.bEnabled || (!bHasActor && !bHasPattern && !bHasMaterial))
+		const bool bHasSlot = Rule.SlotIndex >= 0;
+		const bool bHasComponent = !Rule.ComponentName.IsNone();
+		if (!Rule.bEnabled || (!bHasActor && !bHasPattern && !bHasMaterial && !bHasSlot && !bHasComponent))
+		{
+			return false;
+		}
+		if ((bHasSlot && Rule.SlotIndex != MaterialIndex) || (bHasComponent && Component->GetFName() != Rule.ComponentName))
 		{
 			return false;
 		}
 
 		TArray<FString> Why;
+		if (bHasComponent)
+		{
+			Why.Add(FString::Printf(TEXT("component %s"), *Component->GetName()));
+		}
+		if (bHasSlot)
+		{
+			Why.Add(FString::Printf(TEXT("slot %d"), MaterialIndex));
+		}
 		const AActor* Owner = Component->GetOwner();
 		if (bHasActor)
 		{

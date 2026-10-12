@@ -50,11 +50,21 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 1. Install the plugin (below) and open your level.
 2. Select the props, walls or vehicles you want weathered.
 3. Right-click them and choose **Weather with Grungify** (or *Tools → Grungify → Weather Selected Actors*).
-   - If their materials don't use Grungify yet, you're offered to hook them up (backed up first, reversible).
+   - If their materials don't use Grungify yet, you're offered **private copies** (recommended). The selection's master materials are copied to `/Game/Grungify/Private` and hooked up there, and only the selected actors' slots switch to the copies. Shared masters and every other actor stay unchanged. The alternative is hooking up the shared masters themselves, which is backed up first and reversible.
    - A zone is placed around the selection, limited to exactly those actors, and previewed. One undo step reverts all of it.
 4. Tweak the zone in the Details panel (Seed, Strength, a library look), then press **Apply**.
 
 From Python: `unreal.GrungifyEditorLibrary.weather_actors(actors, True)` does the same without the dialogs.
+
+### Local trials on chosen slots
+
+For a controlled trial on one hero asset, `GrungifyEditorLibrary.weather_component_slots(component, options)` makes the workflow explicit:
+
+- **Selected-slot scope.** It weathers only `options.slots`, for example slot 0 of a coffer. The zone gets one slot rule per slot, matching the actor, the component and the slot index, and has *Only Slots Matched By Rules* on. Every other slot is left untouched, and the report says why.
+- **Private master clone** (`private_master`, on by default). Each chosen slot's master material, and its chain of material instances, is copied to `private_folder`. Grungify is hooked into the copy, and only those slots are assigned to it. The shared master isn't modified.
+- **Artist permission gate** (`permission_gate`, `gate_channel`, `gate_uv_channel`, `invert_gate`). Wear is allowed only where the painted texture is white.
+- **Outcomes, not intentions.** The result lists every asset created (`created`), the slots now on private copies, and the counts `queued`, `weathered`, `skipped` and `failed`, all taken from the zone's final report after writing. Run reports now count failed and cancelled-before-write components separately from skipped ones, in Last Report, the zone's Status, the zones panel and the commandlet log.
+- **Undo.** One undo step restores the slot assignments, the custom data, the masks and the zone. The private copies stay on disk: they're listed in `created`, so delete them if you discard the trial.
 
 ## Install
 
@@ -801,6 +811,9 @@ These cases should be checked in-editor on a test level, never on production roo
 
 38. **Quick start:** `Grungify.QuickStart.WeatherSelectedActors` passes. In a level, select three props, right-click → *Weather with Grungify*, accept the hookup. The props preview weathered and their neighbours don't. A single Ctrl+Z removes the zone.
 39. **Shaders offline:** `python3 Scripts/CheckShaders.py` (needs `glslang-tools`) prints `SHADERS OK`. CI runs it on every push.
+
+40. **Chip band (v0.10):** `Grungify.Generation.ChipBandIndependentOfIntensity` passes. On the coffer, Chip Width 0.4 with light damage still shows chips at the very edge. Build the reference scene and compare `Screenshot_CofferComparison` (standard, Dry Coated Ceramic, Fine Coated Stone). Relief at 0 looks identical to 0.9.1.
+41. **Local trial:** `Grungify.QuickStart.LocalSlotTrial` passes. By hand, on a hero mesh: `weather_component_slots` with slot 0 and a gate texture. Slot 0 alone weathers, the shared master's other users are unchanged, and one Ctrl+Z restores the level.
 
 ## Packaging for Fab (5.5–5.8)
 

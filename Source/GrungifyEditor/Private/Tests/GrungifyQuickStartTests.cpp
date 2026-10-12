@@ -5,6 +5,13 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Components/StaticMeshComponent.h"
+#include "Editor.h"
+#include "Editor/TransBuffer.h"
+#include "GrungifyEditorLibrary.h"
+#include "GrungifyMaterialHookup.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "UObject/Package.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GrungifySettings.h"
@@ -117,6 +124,107 @@ bool FGrungifyWeatherSelectedTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("No-preview keeps every nearby saved CPD array exact"), State.Component->GetDefaultCustomPrimitiveData().Data == State.Defaults);
 		TestTrue(TEXT("No-preview keeps every nearby live CPD array exact"), State.Component->GetCustomPrimitiveData().Data == State.Live);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGrungifyLocalSlotTrialTest, "Grungify.QuickStart.LocalSlotTrial",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FGrungifyLocalSlotTrialTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = UWorld::CreateWorld(EWorldType::Editor, false);
+	ON_SCOPE_EXIT { if (World) { World->DestroyWorld(false); } };
+	TGuardValue<int32> BaseGuard(GetMutableDefault<UGrungifySettings>()->CustomPrimitiveDataIndex, 0);
+
+	// A shared master and instance in /Temp (never saved), used by the hero and by a neighbour.
+	UMaterial* SharedMaster = NewObject<UMaterial>(CreatePackage(TEXT("/Temp/GrungifyAutomation/M_SharedMaster")), TEXT("M_SharedMaster"), RF_Public | RF_Standalone | RF_Transactional);
+	UMaterialInstanceConstant* SharedInstance = NewObject<UMaterialInstanceConstant>(CreatePackage(TEXT("/Temp/GrungifyAutomation/MI_Shared")), TEXT("MI_Shared"), RF_Public | RF_Standalone | RF_Transactional);
+	SharedInstance->SetParentEditorOnly(SharedMaster);
+	SharedMaster->PostEditChange();
+	SharedInstance->PostEditChange();
+
+	AActor* Hero = SpawnCube(World, FVector(0., 0., 50.), TEXT("HeroCoffer"));
+	AActor* Neighbour = SpawnCube(World, FVector(400., 0., 50.), TEXT("Neighbour"));
+	if (!TestNotNull(TEXT("Fixtures"), Hero) || !Neighbour)
+	{
+		return false;
+	}
+	UStaticMeshComponent* HeroMesh = Hero->FindComponentByClass<UStaticMeshComponent>();
+	UStaticMeshComponent* NeighbourMesh = Neighbour->FindComponentByClass<UStaticMeshComponent>();
+	HeroMesh->SetMaterial(0, SharedInstance);
+	NeighbourMesh->SetMaterial(0, SharedInstance);
+
+	FGrungifyLocalWeatherOptions Options;
+	Options.Slots = { 0 };
+	Options.PrivateFolder = TEXT("/Temp/GrungifyAutomation/Private");
+	const FGrungifyLocalWeatherResult Result = UGrungifyEditorLibrary::WeatherComponentSlots(HeroMesh, Options);
+	if (!TestTrue(TEXT("Local trial set up"), Result.bSucceeded && Result.Zone != nullptr))
+	{
+		AddError(FString::Join(Result.Notes, TEXT("\n")));
+		return false;
+	}
+
+	// Private: a cloned master and instance, hooked up; the shared ones and their other users untouched.
+	TestEqual(TEXT("Created the private master and instance"), Result.Created.Num(), 2);
+	TestTrue(TEXT("Slot 0 uses the private clone"), Result.PrivateSlots == TArray<int32>{ 0 });
+	// During preview the zone binds its own instance on top; walk up to the first asset in the chain.
+	const UMaterialInterface* Walk = HeroMesh->GetMaterial(0);
+	while (const UMaterialInstance* Instance = Cast<UMaterialInstance>(Walk))
+	{
+		if (Instance->IsAsset())
+		{
+			break;
+		}
+		Walk = Instance->Parent;
+	}
+	TestTrue(TEXT("The hero's slot resolves to a private instance asset"), Walk && Walk != SharedInstance && Walk->GetPathName().StartsWith(Options.PrivateFolder));
+	TestTrue(TEXT("The private master uses Grungify"), Walk && UGrungifyMaterialHookup::UsesGrungify(Walk));
+	TestFalse(TEXT("The shared master was not hooked up"), UGrungifyMaterialHookup::UsesGrungify(SharedMaster));
+	TestEqual(TEXT("The neighbour still uses the shared instance"), NeighbourMesh->GetMaterial(0), static_cast<UMaterialInterface*>(SharedInstance));
+	TestEqual(TEXT("The neighbour has no Grungify custom data"), NeighbourMesh->GetDefaultCustomPrimitiveData().Data.Num(), 0);
+
+	// Counts are the zone report's final outcomes.
+	TestEqual(TEXT("One component weathered"), Result.Weathered, 1);
+	TestEqual(TEXT("Nothing failed"), Result.Failed, 0);
+	TestEqual(TEXT("Explicit preview is synchronous"), Result.Queued, 0);
+	TestEqual(TEXT("Counts match the report"), Result.Weathered + Result.Skipped + Result.Failed, Result.Zone->GetLastReport().Components.Num());
+
+	// Selected-slot scope: a zone whose only rule picks slot 1 leaves slot 0 alone.
+	AGrungifyWeatheringZone* Scoped = Result.Zone;
+	Scoped->CancelPreview();
+	Scoped->SlotRules[0].SlotIndex = 1;
+	Scoped->Preview();
+	TestEqual(TEXT("Slot scope: nothing outside the chosen slots is weathered"), Scoped->GetLastReport().Weathered, 0);
+	const TArray<FGrungifyComponentReport>& Components = Scoped->GetLastReport().Components;
+	TestTrue(TEXT("Slot scope: the reason says why"), Components.Num() == 1 && Components[0].SlotDetails.Num() > 0
+		&& Components[0].SlotDetails[0].Reason.Contains(TEXT("Only Slots Matched By Rules")));
+	Scoped->CancelPreview();
+	Scoped->SlotRules[0].SlotIndex = 0;
+
+	// One Undo restores the level: slot assignment, custom data, and the zone.
+	if (!GEditor || !GEditor->Trans)
+	{
+		AddWarning(TEXT("No editor transaction buffer; Undo not verified."));
+		return true;
+	}
+	// The first trial's preview is cancelled; the hero now uses its first private clone. Run a second trial and undo it.
+	const auto OverridesBefore = HeroMesh->OverrideMaterials;
+	const auto DefaultsBefore = HeroMesh->GetDefaultCustomPrimitiveData().Data;
+	const auto LiveBefore = HeroMesh->GetCustomPrimitiveData().Data;
+	const FGrungifyLocalWeatherResult Again = UGrungifyEditorLibrary::WeatherComponentSlots(HeroMesh, Options);
+	TWeakObjectPtr<AGrungifyWeatheringZone> UndoneZone = Again.Zone;
+	if (!TestTrue(TEXT("Second trial set up"), Again.bSucceeded && Again.Weathered == 1))
+	{
+		return false;
+	}
+	TestTrue(TEXT("The second trial changed the hero"), HeroMesh->OverrideMaterials != OverridesBefore
+		|| HeroMesh->GetDefaultCustomPrimitiveData().Data != DefaultsBefore);
+	GEditor->UndoTransaction();
+	TestTrue(TEXT("Undo: the hero's raw material overrides are back exactly"), HeroMesh->OverrideMaterials == OverridesBefore);
+	TestTrue(TEXT("Undo: the hero's saved custom data is back"), HeroMesh->GetDefaultCustomPrimitiveData().Data == DefaultsBefore);
+	TestTrue(TEXT("Undo: the hero's live custom data is back"), HeroMesh->GetCustomPrimitiveData().Data == LiveBefore);
+	TestTrue(TEXT("Undo: the second zone is gone"), !UndoneZone.IsValid() || !IsValid(UndoneZone.Get()) || UndoneZone->IsPendingKillPending());
+	TestEqual(TEXT("Undo: the neighbour is untouched"), NeighbourMesh->GetMaterial(0), static_cast<UMaterialInterface*>(SharedInstance));
 	return true;
 }
 
