@@ -28,7 +28,10 @@ public class GrungifyEditor : ModuleRules
 			"RenderCore",
 			"ContentBrowser",
 			"AssetTools",
-			"Landscape"
+			"Landscape",
+			// Procedural collision fixtures for the runtime hit-path tests.
+			"MeshDescription",
+			"StaticMeshDescription"
 		});
 	}
 }

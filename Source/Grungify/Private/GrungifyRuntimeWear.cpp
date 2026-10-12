@@ -45,6 +45,8 @@ namespace GrungifyRuntimeWear
 		const int32 Wrapped = Index % Size;
 		return Wrapped < 0 ? Wrapped + Size : Wrapped;
 	}
+
+	const TCHAR* UseUV0ParameterName = TEXT("Grungify Use UV0");
 	/** The generated material's unweathered default is not a baked runtime mask. */
 	const TCHAR* NoMaskTexturePath = TEXT("/Grungify/Materials/T_GrungifyNoMask.T_GrungifyNoMask");
 }
@@ -131,9 +133,10 @@ bool UGrungifyRuntimeWearSubsystem::AddWearAtHit(const FHitResult& Hit, EGrungif
 	}
 
 	// FindCollisionUV needs Project Settings > Physics > "Support UV From Hit Results" (cooked into the collision
-	// data) and a complex trace that returned a face index; simple collision has no UVs.
+	// data) and a complex trace that returned a face index; simple collision has no UVs. The UV is the one the hit
+	// slot's material samples (its own channel choice), and is left unwrapped: each target applies its addressing.
 	FVector2D UV;
-	if (!UGameplayStatics::FindCollisionUV(Hit, Settings->MaskUVChannel, UV))
+	if (!ResolveMaskUV(Hit, KnownHitMaterial, UV))
 	{
 		if (!bWarnedMissingUV)
 		{
@@ -142,9 +145,6 @@ bool UGrungifyRuntimeWearSubsystem::AddWearAtHit(const FHitResult& Hit, EGrungif
 		}
 		return false;
 	}
-	UV.X = FMath::Frac(UV.X);
-	UV.Y = FMath::Frac(UV.Y);
-
 	PruneStaleStates();
 	FGrungifyRuntimeWearState* State = FindOrCreateState(Component);
 	if (!State)
@@ -325,13 +325,13 @@ int32 UGrungifyRuntimeWearSubsystem::FindOrCreateTarget(FGrungifyRuntimeWearStat
 	}
 
 	// The copy reads the GPU resource, so the full-resolution mip must be resident or the copy would be blurry.
-	bool bWrapX = true;
-	bool bWrapY = true;
+	TextureAddress AddressX = TA_Wrap;
+	TextureAddress AddressY = TA_Wrap;
 	TextureFilter Filter = TF_Bilinear;
 	if (UTexture2D* Source2D = Cast<UTexture2D>(Source))
 	{
-		bWrapX = Source2D->AddressX != TA_Clamp;
-		bWrapY = Source2D->AddressY != TA_Clamp;
+		AddressX = Source2D->AddressX;
+		AddressY = Source2D->AddressY;
 		Filter = Source2D->Filter;
 		Source2D->SetForceMipLevelsToBeResident(30.f);
 		Source2D->WaitForStreaming();
@@ -352,8 +352,8 @@ int32 UGrungifyRuntimeWearSubsystem::FindOrCreateTarget(FGrungifyRuntimeWearStat
 	// Masks are data: no sRGB decode, and the source's filtering and addressing so the look doesn't change.
 	Texture->SRGB = false;
 	Texture->Filter = Filter;
-	Texture->AddressX = bWrapX ? TA_Wrap : TA_Clamp;
-	Texture->AddressY = bWrapY ? TA_Wrap : TA_Clamp;
+	Texture->AddressX = AddressX;
+	Texture->AddressY = AddressY;
 	FTexture2DMipMap& Mip = Texture->GetPlatformData()->Mips[0];
 	void* Data = Mip.BulkData.Lock(LOCK_READ_WRITE);
 	FMemory::Memcpy(Data, Pixels.GetData(), Pixels.Num() * sizeof(FColor));
@@ -366,9 +366,69 @@ int32 UGrungifyRuntimeWearSubsystem::FindOrCreateTarget(FGrungifyRuntimeWearStat
 	Target.Pixels = MoveTemp(Pixels);
 	Target.Width = Width;
 	Target.Height = Height;
-	Target.bWrapX = bWrapX;
-	Target.bWrapY = bWrapY;
+	Target.AddressX = AddressX;
+	Target.AddressY = AddressY;
 	return State.Targets.Num() - 1;
+}
+
+bool UGrungifyRuntimeWearSubsystem::ResolveMaskUV(const FHitResult& Hit, const UMaterialInterface* Material, FVector2D& OutUV)
+{
+	// Same as the material: lerp(settings channel, UV0, Grungify Use UV0). The parameter is absent on content before
+	// v0.6, which always sampled the settings channel.
+	const int32 Channel = UGrungifySettings::Get()->MaskUVChannel;
+	float UseUV0 = 0.f;
+	if (Material)
+	{
+		Material->GetScalarParameterValue(FMaterialParameterInfo(GrungifyRuntimeWear::UseUV0ParameterName), UseUV0);
+	}
+	FVector2D Main = FVector2D::ZeroVector;
+	FVector2D First = FVector2D::ZeroVector;
+	if ((UseUV0 != 1.f || Channel == 0) && !UGameplayStatics::FindCollisionUV(Hit, Channel, Main))
+	{
+		return false;
+	}
+	if (UseUV0 != 0.f && Channel != 0 && !UGameplayStatics::FindCollisionUV(Hit, 0, First))
+	{
+		return false;
+	}
+	OutUV = Channel == 0 ? Main : FMath::Lerp(Main, First, double(UseUV0));
+	return true;
+}
+
+double UGrungifyRuntimeWearSubsystem::AddressUV(double UV, TextureAddress Address)
+{
+	switch (Address)
+	{
+	case TA_Clamp:
+		return FMath::Clamp(UV, 0.0, 1.0);
+	case TA_Mirror:
+	{
+		const double Period = UV - 2.0 * FMath::FloorToDouble(UV * 0.5);
+		return Period <= 1.0 ? Period : 2.0 - Period;
+	}
+	default:
+		return UV - FMath::FloorToDouble(UV);
+	}
+}
+
+int32 UGrungifyRuntimeWearSubsystem::AddressTexel(int32 Index, int32 Size, TextureAddress Address)
+{
+	if (Size <= 0)
+	{
+		return INDEX_NONE;
+	}
+	switch (Address)
+	{
+	case TA_Clamp:
+		return Index >= 0 && Index < Size ? Index : INDEX_NONE;
+	case TA_Mirror:
+	{
+		const int32 Period = GrungifyRuntimeWear::WrapIndex(Index, 2 * Size);
+		return Period < Size ? Period : 2 * Size - 1 - Period;
+	}
+	default:
+		return GrungifyRuntimeWear::WrapIndex(Index, Size);
+	}
 }
 
 uint8 UGrungifyRuntimeWearSubsystem::StrokeIncrement(float DX, float DY, float RadiusTexels, float Amount)
@@ -391,10 +451,10 @@ bool UGrungifyRuntimeWearSubsystem::PaintTarget(FGrungifyRuntimeWearTarget& Targ
 	}
 	RadiusTexels = FMath::Max(RadiusTexels, 0.5f);
 
-	// Texel X spans [X, X+1) in texel space, so its centre is X + 0.5. Wrapped spans are capped at one texture width
-	// so no texel is visited twice by the same stroke.
-	const float CentreX = float(UV.X) * Target.Width;
-	const float CentreY = float(UV.Y) * Target.Height;
+	// Texel X spans [X, X+1) in texel space, so its centre is X + 0.5. Spans are capped at one texture width so no
+	// texel is visited twice by the same stroke.
+	const float CentreX = float(AddressUV(UV.X, Target.AddressX)) * Target.Width;
+	const float CentreY = float(AddressUV(UV.Y, Target.AddressY)) * Target.Height;
 	const int32 X0 = FMath::FloorToInt(CentreX - RadiusTexels);
 	const int32 Y0 = FMath::FloorToInt(CentreY - RadiusTexels);
 	const int32 X1 = FMath::Min(FMath::CeilToInt(CentreX + RadiusTexels), X0 + Target.Width - 1);
@@ -403,15 +463,15 @@ bool UGrungifyRuntimeWearSubsystem::PaintTarget(FGrungifyRuntimeWearTarget& Targ
 	FIntRect Dirty(MAX_int32, MAX_int32, MIN_int32, MIN_int32);
 	for (int32 Y = Y0; Y <= Y1; ++Y)
 	{
-		const int32 TexelY = Target.bWrapY ? GrungifyRuntimeWear::WrapIndex(Y, Target.Height) : Y;
-		if (TexelY < 0 || TexelY >= Target.Height)
+		const int32 TexelY = AddressTexel(Y, Target.Height, Target.AddressY);
+		if (TexelY == INDEX_NONE)
 		{
 			continue;
 		}
 		for (int32 X = X0; X <= X1; ++X)
 		{
-			const int32 TexelX = Target.bWrapX ? GrungifyRuntimeWear::WrapIndex(X, Target.Width) : X;
-			if (TexelX < 0 || TexelX >= Target.Width)
+			const int32 TexelX = AddressTexel(X, Target.Width, Target.AddressX);
+			if (TexelX == INDEX_NONE)
 			{
 				continue;
 			}

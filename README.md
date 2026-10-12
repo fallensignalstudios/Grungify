@@ -552,6 +552,10 @@ message = unreal.GrungifyEditorLibrary.build_material_library(False)
 - **How it works:** on a component's first hit, its baked masks are read back from the GPU into a CPU copy, and its slots switch to dynamic material instances that sample a live transient texture. Each stroke adds a smooth falloff to the selected channel of the CPU copy, saturating at 1, then uploads only the changed rectangle. Nothing is blended on the GPU, so alpha and the unselected channels can't be disturbed. Strokes wrap across UV edges when the baked texture wraps. Reset switches back to the baked result and discards the paint.
 - **Memory:** each painted mask keeps a CPU copy (4 bytes per texel: 16 MB for a 2048² mask) until Reset.
 - **Readback:** `ReadRuntimeWearMask(Component, MaterialIndex, bExtended, Pixels, Width, Height)` draws the live texture into a render target and reads it back, so QA scripts see what the renderer samples. It flushes rendering; use it for tests, not every frame.
+- **Where a hit paints (0.10):**
+  - **UV:** the mask UV is the one the hit slot's material samples. That's the settings channel blended towards UV0 by `Grungify Use UV0`, exactly as the material blends it.
+  - **Addressing:** each axis follows the mask texture's address mode. Wrap continues across the opposite edge. Clamp paints the edge texels a hit beyond the edge actually shows, and never wraps. Mirror reflects.
+  - **Test:** `Grungify.RuntimeWear.ComplexHitUVChannelAndAddressing` checks this through real complex traces and GPU readback.
 - **Setup:** enable *Project Settings → Physics → Support UV From Hit Results*, and trace against complex collision so hits carry a face index. Meshes weathered with vertex-colour or instanced output can't be painted at runtime.
 - **Requires a rendering RHI:** under `-nullrhi` (dedicated servers) the baked masks can't be read back, so nothing is painted and the materials are left alone.
 
@@ -814,6 +818,8 @@ These cases should be checked in-editor on a test level, never on production roo
 
 40. **Chip band (v0.10):** `Grungify.Generation.ChipBandIndependentOfIntensity` passes. On the coffer, Chip Width 0.4 with light damage still shows chips at the very edge. Build the reference scene and compare `Screenshot_CofferComparison` (standard, Dry Coated Ceramic, Fine Coated Stone). Relief at 0 looks identical to 0.9.1.
 41. **Local trial:** `Grungify.QuickStart.LocalSlotTrial` passes. By hand, on a hero mesh: `weather_component_slots` with slot 0 and a gate texture. Slot 0 alone weathers, the shared master's other users are unchanged, and one Ctrl+Z restores the level.
+
+42. **Runtime hit path:** `Grungify.RuntimeWear.PerAxisAddressing` and `Grungify.RuntimeWear.ComplexHitUVChannelAndAddressing` pass on a rendering RHI. The second cooks a quad with UVs from hits and traces it, so a failure saying the trace or `AddWearAtHit` didn't paint points at collision cooking, not at the painting.
 
 ## Packaging for Fab (5.5–5.8)
 

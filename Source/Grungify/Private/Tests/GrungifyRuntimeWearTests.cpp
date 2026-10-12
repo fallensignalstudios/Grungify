@@ -41,6 +41,8 @@ struct FGrungifyRuntimeWearTestAccess
 		bool bMissingExtended = false;
 		return Index != INDEX_NONE && Subsystem.PaintSlot(Subsystem.States[Index], 0, UV, Layer, RadiusCm, Amount, bMissingExtended);
 	}
+	static double AddressUV(double UV, TextureAddress Address) { return UGrungifyRuntimeWearSubsystem::AddressUV(UV, Address); }
+	static int32 AddressTexel(int32 Index, int32 Size, TextureAddress Address) { return UGrungifyRuntimeWearSubsystem::AddressTexel(Index, Size, Address); }
 	static uint8 Increment(float DX, float DY, float RadiusTexels, float Amount)
 	{
 		return UGrungifyRuntimeWearSubsystem::StrokeIncrement(DX, DY, RadiusTexels, Amount);
@@ -471,6 +473,33 @@ bool FGrungifyRuntimeChannelAccumulationTest::RunTest(const FString& Parameters)
 		}
 		Subsystem->ResetRuntimeWear(Component);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGrungifyRuntimeAddressingTest, "Grungify.RuntimeWear.PerAxisAddressing",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FGrungifyRuntimeAddressingTest::RunTest(const FString& Parameters)
+{
+	using Access = FGrungifyRuntimeWearTestAccess;
+	// Where a hit UV lands in texture space, per address mode (what the material's sampler shows there).
+	TestEqual(TEXT("Wrap: 1.25 samples 0.25"), Access::AddressUV(1.25, TA_Wrap), .25);
+	TestEqual(TEXT("Wrap: -0.25 samples 0.75"), Access::AddressUV(-.25, TA_Wrap), .75);
+	TestEqual(TEXT("Clamp: 1.4 shows the last texel"), Access::AddressUV(1.4, TA_Clamp), 1.);
+	TestEqual(TEXT("Clamp: -0.3 shows the first texel"), Access::AddressUV(-.3, TA_Clamp), 0.);
+	TestEqual(TEXT("Clamp: inside is unchanged"), Access::AddressUV(.6, TA_Clamp), .6);
+	TestEqual(TEXT("Mirror: 1.25 reflects to 0.75"), Access::AddressUV(1.25, TA_Mirror), .75);
+	TestEqual(TEXT("Mirror: -0.25 reflects to 0.25"), Access::AddressUV(-.25, TA_Mirror), .25);
+	TestEqual(TEXT("Mirror: 2.25 is 0.25 again"), Access::AddressUV(2.25, TA_Mirror), .25);
+
+	// Which texel a stroke touches beyond an edge.
+	TestEqual(TEXT("Wrap: texel -1 is the last"), Access::AddressTexel(-1, 64, TA_Wrap), 63);
+	TestEqual(TEXT("Wrap: texel 64 is the first"), Access::AddressTexel(64, 64, TA_Wrap), 0);
+	TestEqual(TEXT("Clamp: no texel beyond the edge"), Access::AddressTexel(64, 64, TA_Clamp), int32(INDEX_NONE));
+	TestEqual(TEXT("Clamp: no texel before the edge"), Access::AddressTexel(-1, 64, TA_Clamp), int32(INDEX_NONE));
+	TestEqual(TEXT("Mirror: texel 64 reflects to 63"), Access::AddressTexel(64, 64, TA_Mirror), 63);
+	TestEqual(TEXT("Mirror: texel -1 reflects to 0"), Access::AddressTexel(-1, 64, TA_Mirror), 0);
+	TestEqual(TEXT("Mirror: texel 130 is 2 again"), Access::AddressTexel(130, 64, TA_Mirror), 2);
 	return true;
 }
 

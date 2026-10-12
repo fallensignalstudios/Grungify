@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Engine/HitResult.h"
+#include "Engine/TextureDefines.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "GrungifyTypes.h"
 #include "GrungifyRuntimeWear.generated.h"
@@ -40,9 +41,12 @@ struct FGrungifyRuntimeWearTarget
 	int32 Width = 0;
 	int32 Height = 0;
 
-	/** Copied from the source: wrapped strokes continue across the opposite edge, clamped ones stop at it. */
-	bool bWrapX = true;
-	bool bWrapY = true;
+	/**
+	 * The source's addressing per axis, as the material samples it: wrapped strokes continue across the opposite edge,
+	 * mirrored ones reflect back, clamped ones stop at it (and hits beyond it paint the edge texels they show).
+	 */
+	TEnumAsByte<TextureAddress> AddressX = TA_Wrap;
+	TEnumAsByte<TextureAddress> AddressY = TA_Wrap;
 };
 
 /** One material slot switched to a dynamic instance that reads the live mask textures. */
@@ -153,6 +157,12 @@ private:
 	/** What a stroke adds to a texel whose centre is (DX, DY) texels from the stroke centre. Smooth falloff to zero at the radius. */
 	static uint8 StrokeIncrement(float DX, float DY, float RadiusTexels, float Amount);
 	static bool ReadTextureOnGPU(UTexture* Texture, int32 Width, int32 Height, TArray<FColor>& OutPixels);
+	/** The mask UV the material computes at the hit: the settings channel blended towards UV0 by Grungify Use UV0. */
+	static bool ResolveMaskUV(const FHitResult& Hit, const UMaterialInterface* Material, FVector2D& OutUV);
+	/** Where a mask UV lands in texture space (0..1) under an axis's address mode. */
+	static double AddressUV(double UV, TextureAddress Address);
+	/** The texel an out-of-range index addresses (wrap, mirror), or INDEX_NONE where clamped addressing has none. */
+	static int32 AddressTexel(int32 Index, int32 Size, TextureAddress Address);
 	static void RestoreState(UStaticMeshComponent* Component, const FGrungifyRuntimeWearState& State);
 	void PruneStaleStates();
 
