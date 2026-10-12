@@ -1,0 +1,121 @@
+// Copyright Fallen Signal Studios. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Chaos/ChaosEngineInterface.h"
+#include "Engine/DeveloperSettings.h"
+#include "GrungifyTypes.h"
+#include "GrungifySettings.generated.h"
+
+class UMaterialInterface;
+
+/** Project-wide Grungify settings (Project Settings > Plugins > Grungify). */
+UCLASS(config = Game, defaultconfig, meta = (DisplayName = "Grungify"))
+class GRUNGIFY_API UGrungifySettings : public UDeveloperSettings
+{
+	GENERATED_BODY()
+
+public:
+	UGrungifySettings();
+
+	virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
+
+	static const UGrungifySettings* Get() { return GetDefault<UGrungifySettings>(); }
+
+	/** Actor or component tag that forces a surface to Stone. */
+	UPROPERTY(config, EditAnywhere, Category = "Tags")
+	FName StoneTag = TEXT("Grungify.Stone");
+
+	UPROPERTY(config, EditAnywhere, Category = "Tags")
+	FName MetalTag = TEXT("Grungify.Metal");
+
+	UPROPERTY(config, EditAnywhere, Category = "Tags")
+	FName TrimTag = TEXT("Grungify.Trim");
+
+	/** Marks a mesh as a rail, handle or other surface that hands wear down. */
+	UPROPERTY(config, EditAnywhere, Category = "Tags")
+	FName RailTag = TEXT("Grungify.Rail");
+
+	/** Marks an actor or component as a runoff source (vent, drain, spout). */
+	UPROPERTY(config, EditAnywhere, Category = "Tags")
+	FName VentTag = TEXT("Grungify.Vent");
+
+	/** Forces a mesh to count as a floor when tracing, regardless of size. */
+	UPROPERTY(config, EditAnywhere, Category = "Tags")
+	FName FloorTag = TEXT("Grungify.Floor");
+
+	/** Zones never touch actors or components with this tag. */
+	UPROPERTY(config, EditAnywhere, Category = "Tags")
+	FName IgnoreTag = TEXT("Grungify.Ignore");
+
+	/** Name tokens (from material, slot, mesh and actor names) that mean Stone. */
+	UPROPERTY(config, EditAnywhere, Category = "Classification")
+	TArray<FString> StoneKeywords;
+
+	UPROPERTY(config, EditAnywhere, Category = "Classification")
+	TArray<FString> MetalKeywords;
+
+	/** Trim is checked first, so "MetalTrim" counts as trim. */
+	UPROPERTY(config, EditAnywhere, Category = "Classification")
+	TArray<FString> TrimKeywords;
+
+	UPROPERTY(config, EditAnywhere, Category = "Classification")
+	TArray<FString> RailKeywords;
+
+	UPROPERTY(config, EditAnywhere, Category = "Classification")
+	TArray<FString> VentKeywords;
+
+	/** Actors tagged with this are fire sources (soot and scorch). */
+	UPROPERTY(config, EditAnywhere, Category = "Tags")
+	FName FireTag = TEXT("Grungify.Fire");
+
+	/** Small meshes tagged with this are fasteners (rust bloom on metal). */
+	UPROPERTY(config, EditAnywhere, Category = "Tags")
+	FName FastenerTag = TEXT("Grungify.Fastener");
+
+	UPROPERTY(config, EditAnywhere, Category = "Classification")
+	TArray<FString> FireKeywords;
+
+	UPROPERTY(config, EditAnywhere, Category = "Classification")
+	TArray<FString> FastenerKeywords;
+
+	/** Physical surface types that map straight to a Grungify surface. Checked before name keywords. */
+	UPROPERTY(config, EditAnywhere, Category = "Classification")
+	TMap<TEnumAsByte<EPhysicalSurface>, EGrungifySurfaceType> PhysicalSurfaceMap;
+
+	/** Used when nothing else identifies a surface. */
+	UPROPERTY(config, EditAnywhere, Category = "Classification")
+	EGrungifySurfaceType FallbackSurfaceType = EGrungifySurfaceType::Stone;
+
+	/** A traced floor only counts if its mesh is at least this wide on its shortest horizontal side (keeps tables and shelves from acting as floors). */
+	UPROPERTY(config, EditAnywhere, Category = "Floors", meta = (ClampMin = "0", Units = "cm"))
+	float MinFloorSizeCm = 150.f;
+
+	/**
+	 * First custom primitive data index Grungify uses. It takes five: mask mode, surface type, feature scale, seed offset, debug channel.
+	 * Meshes that already have non-zero values there are left inactive and reported, never overwritten.
+	 * Changing it rebuilds the plugin content; re-apply zones afterwards.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (ClampMin = "0", ClampMax = "31"))
+	int32 CustomPrimitiveDataIndex = 0;
+
+	/** UV channel the mask texture is baked into and sampled from. Needs non-overlapping UVs (usually the lightmap channel). Changing it rebuilds the plugin content. */
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (ClampMin = "0", ClampMax = "7"))
+	int32 MaskUVChannel = 1;
+
+	/**
+	 * First per-instance custom data index used on instanced (ISM/HISM) meshes; Grungify uses four.
+	 * Instanced meshes that already use those indices are left untouched. Changing it rebuilds the plugin content.
+	 */
+	UPROPERTY(config, EditAnywhere, Category = "Material", meta = (ClampMin = "0", ClampMax = "60"))
+	int32 InstanceCustomDataIndex = 0;
+
+	/** Material swapped onto meshes when previewing masks. */
+	UPROPERTY(config, EditAnywhere, Category = "Material")
+	TSoftObjectPtr<UMaterialInterface> MaskDebugMaterial;
+
+	/** On editor startup, create missing Grungify assets and rebuild ones generated by an older plugin version or different settings. */
+	UPROPERTY(config, EditAnywhere, Category = "Content")
+	bool bAutoBuildContent = true;
+};

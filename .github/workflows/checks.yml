@@ -1,0 +1,30 @@
+# Checks that run without Unreal Engine. Native builds and automation tests still need an engine
+# (Scripts/BuildPlugin.ps1 / BuildPlugin.sh).
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shaders:
+    name: Shaders compile (glslang HLSL)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install glslang
+        run: sudo apt-get update -q && sudo apt-get install -y -q glslang-tools
+      - name: Compile Grungify.ush and every generated custom node
+        run: python3 Scripts/CheckShaders.py
+
+  fab-readiness:
+    name: Fab readiness (informational)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Not ready until the prebuilt content, descriptor URLs and icon art exist (Docs/Fab.md), so this reports a
+      # warning annotation instead of failing the PR.
+      - run: python3 Scripts/CheckFabReadiness.py || echo "::warning title=Fab readiness::Not ready for Fab yet; see the log and Docs/Fab.md"
