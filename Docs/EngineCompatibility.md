@@ -103,8 +103,9 @@ wrapper; ? means verify on first compile.
 | `UTexture::Source.Init(…, TSF_BGRA8, const uint8*)`, `SRGB`, `CompressionSettings`, `MipGenSettings`, `LODGroup` | OK | OK | OK | OK | high | |
 | `UTexture2D::CreateTransient`, `GetPlatformData()->Mips[0].BulkData.Lock/Unlock`, `UpdateResource` (`GrungifyRuntimeWear.cpp`) | OK | OK | OK | OK | medium-high | Runtime path. Writing mip bulk data on a transient texture is supported. |
 | `UTextureRenderTarget2D` (`RenderTargetFormat`, `bForceLinearGamma`, `InitAutoFormat`, `UpdateResourceImmediate`) | OK | OK | OK | OK | medium-high | |
-| `UKismetRenderingLibrary::BeginDrawCanvasToRenderTarget/EndDrawCanvasToRenderTarget`, `FDrawToRenderTargetContext` | OK | OK | OK | OK | high | |
-| `UCanvas::K2_DrawTexture(…, EBlendMode)` with `BLEND_Opaque`, `BLEND_Additive`, `BLEND_AlphaHoldout` | OK | OK | OK | OK | high | `BLEND_AlphaHoldout` exists in every UE5 version. Check visually that holdout accumulation behaves the same on Metal and Vulkan. |
+| `FCanvas(FRenderTarget*, FHitProxyConsumer*, const FGameTime&, ERHIFeatureLevel::Type)`, `FCanvasTileItem` with `SE_BLEND_Opaque`, `Flush_GameThread` (`GrungifyRuntimeWear.cpp` `ReadTextureOnGPU`) | OK | OK | OK | OK | medium-high | Used only to copy a texture 1:1 into an RGBA8 render target for readback; no GPU blending touches mask channels. |
+| `FRenderTarget::ReadPixels(TArray<FColor>&, FReadSurfaceDataFlags)` | OK | OK | OK | OK | high | Flushes rendering. Needs a rendering RHI; under `-nullrhi` runtime wear refuses to start (the slot isn't painted). |
+| `UTexture2D::UpdateTextureRegions(…, TFunction<void(uint8*, const FUpdateTextureRegion2D*)>)` | OK | OK | OK | OK | high | The region array and source data are read on the render thread; both are heap copies freed by the cleanup callback. |
 | `UGameplayStatics::FindCollisionUV` | OK | OK | OK | OK | high | Needs *Support UV From Hit Results*, which is already documented. |
 | `UAssetImportData::Update(File)` | OK | OK | OK | OK | high | |
 

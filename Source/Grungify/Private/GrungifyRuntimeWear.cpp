@@ -2,8 +2,9 @@
 
 #include "GrungifyRuntimeWear.h"
 
+#include "CanvasItem.h"
+#include "CanvasTypes.h"
 #include "Components/StaticMeshComponent.h"
-#include "Engine/Canvas.h"
 #include "Engine/Engine.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
@@ -12,18 +13,38 @@
 #include "GameFramework/Actor.h"
 #include "GrungifySettings.h"
 #include "Kismet/GameplayStatics.h"
-#include "Kismet/KismetRenderingLibrary.h"
 #include "Materials/MaterialInstance.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Misc/App.h"
+#include "RHI.h"
 #include "TextureResource.h"
+#include "UnrealClient.h"
+#include "UObject/Package.h"
 
 namespace GrungifyRuntimeWear
 {
-	constexpr int32 BrushSize = 64;
 	constexpr float DefaultTraceDistanceCm = 100.f;
 	/** Zone default; used when an instance predates the texel-size parameter. */
 	constexpr float FallbackTexelSizeCm = 4.f;
 	constexpr int32 ChannelsPerMask = 4;
+
+	/** Mask channel order is R, G, B, A (layers 0-3 and 4-7); FColor's memory order is B, G, R, A. */
+	uint8& ChannelOf(FColor& Color, int32 Channel)
+	{
+		switch (Channel)
+		{
+		case 0: return Color.R;
+		case 1: return Color.G;
+		case 2: return Color.B;
+		default: return Color.A;
+		}
+	}
+
+	int32 WrapIndex(int32 Index, int32 Size)
+	{
+		const int32 Wrapped = Index % Size;
+		return Wrapped < 0 ? Wrapped + Size : Wrapped;
+	}
 	/** The generated material's unweathered default is not a baked runtime mask. */
 	const TCHAR* NoMaskTexturePath = TEXT("/Grungify/Materials/T_GrungifyNoMask.T_GrungifyNoMask");
 }
@@ -42,7 +63,6 @@ bool UGrungifyRuntimeWearSubsystem::DoesSupportWorldType(const EWorldType::Type 
 void UGrungifyRuntimeWearSubsystem::Deinitialize()
 {
 	ResetRuntimeWear(nullptr);
-	BrushTexture = nullptr;
 	Super::Deinitialize();
 }
 
@@ -74,14 +94,13 @@ bool UGrungifyRuntimeWearSubsystem::TraceAndAddWear(const FVector& Location, con
 
 bool UGrungifyRuntimeWearSubsystem::AddWearAtHit(const FHitResult& Hit, EGrungifyWearLayer Layer, float RadiusCm, float Amount)
 {
-	// Canvas additive writes RGB only. AlphaHoldout erases alpha and attenuates RGB;
-	// do not create targets or replace materials for unsupported alpha/invalid layers.
+	// Invalid layer values never create targets or replace materials.
 	if (!SupportsRuntimeLayer(Layer))
 	{
 		if (!bWarnedUnsupportedLayer)
 		{
 			bWarnedUnsupportedLayer = true;
-			UE_LOG(LogGrungify, Warning, TEXT("Runtime wear: unsupported layer %d is skipped. Handling and Moss need alpha-only accumulation; invalid layer values are also rejected."), int32(Layer));
+			UE_LOG(LogGrungify, Warning, TEXT("Runtime wear: unsupported layer %d is skipped; valid layers are 0-7."), int32(Layer));
 		}
 		return false;
 	}
@@ -133,10 +152,6 @@ bool UGrungifyRuntimeWearSubsystem::AddWearAtHit(const FHitResult& Hit, EGrungif
 		return false;
 	}
 
-	const int32 LayerIndex = int32(Layer);
-	const bool bExtended = LayerIndex >= GrungifyRuntimeWear::ChannelsPerMask;
-	const int32 Channel = LayerIndex % GrungifyRuntimeWear::ChannelsPerMask;
-
 	// State creation replaces bindings, so resolve the current face again and require
 	// its corresponding runtime slot. Never fall back to painting every active slot.
 	int32 SectionIndex = INDEX_NONE;
@@ -154,49 +169,46 @@ bool UGrungifyRuntimeWearSubsystem::AddWearAtHit(const FHitResult& Hit, EGrungif
 		return false;
 	}
 
-	TArray<int32, TInlineAllocator<4>> PaintedTargets;
 	bool bMissingExtended = false;
-	for (int32 SlotIndex = 0; SlotIndex < State->Slots.Num(); ++SlotIndex)
-	{
-		if (SlotIndex != HitSlot)
-		{
-			continue;
-		}
-		const FGrungifyRuntimeWearSlot& Slot = State->Slots[SlotIndex];
-		if (Component->GetMaterial(Slot.MaterialIndex) != Slot.Dynamic || !IsEligibleMaterial(Slot.Dynamic))
-		{
-			continue;
-		}
-		const int32 TargetIndex = bExtended ? Slot.ExtendedTarget : Slot.MaskTarget;
-		if (TargetIndex == INDEX_NONE)
-		{
-			bMissingExtended = true;
-			continue;
-		}
-		if (PaintedTargets.Contains(TargetIndex))
-		{
-			continue;
-		}
-		if (PaintBrush(State->Targets[TargetIndex].RenderTarget, UV, 2.f * RadiusCm / Slot.TexelSizeCm, Channel, Amount))
-		{
-			PaintedTargets.Add(TargetIndex);
-		}
-	}
-
-	if (bMissingExtended && PaintedTargets.Num() == 0 && !State->bWarnedNoExtended)
+	const bool bPainted = PaintSlot(*State, HitSlot, UV, Layer, RadiusCm, Amount, bMissingExtended);
+	if (bMissingExtended && !State->bWarnedNoExtended)
 	{
 		State->bWarnedNoExtended = true;
 		UE_LOG(LogGrungify, Warning, TEXT("Runtime wear: %s has no Grungify Extended Mask Texture; layer %s is skipped."),
 			*Component->GetPathName(), *UEnum::GetValueAsString(Layer));
 	}
-	return PaintedTargets.Num() > 0;
+	return bPainted;
+}
+
+bool UGrungifyRuntimeWearSubsystem::PaintSlot(FGrungifyRuntimeWearState& State, int32 SlotIndex, const FVector2D& UV, EGrungifyWearLayer Layer, float RadiusCm, float Amount, bool& bOutMissingExtended)
+{
+	bOutMissingExtended = false;
+	UStaticMeshComponent* Component = State.Component.Get();
+	if (!SupportsRuntimeLayer(Layer) || !IsValid(Component) || !State.Slots.IsValidIndex(SlotIndex))
+	{
+		return false;
+	}
+	const FGrungifyRuntimeWearSlot& Slot = State.Slots[SlotIndex];
+	if (Component->GetMaterial(Slot.MaterialIndex) != Slot.Dynamic || !IsEligibleMaterial(Slot.Dynamic))
+	{
+		return false;
+	}
+	const int32 LayerIndex = int32(Layer);
+	const int32 TargetIndex = LayerIndex >= GrungifyRuntimeWear::ChannelsPerMask ? Slot.ExtendedTarget : Slot.MaskTarget;
+	if (!State.Targets.IsValidIndex(TargetIndex))
+	{
+		bOutMissingExtended = TargetIndex == INDEX_NONE && LayerIndex >= GrungifyRuntimeWear::ChannelsPerMask;
+		return false;
+	}
+	return PaintTarget(State.Targets[TargetIndex], UV, RadiusCm / Slot.TexelSizeCm,
+		LayerIndex % GrungifyRuntimeWear::ChannelsPerMask, FMath::Clamp(Amount, 0.f, 1.f));
 }
 
 bool UGrungifyRuntimeWearSubsystem::SupportsRuntimeLayer(EGrungifyWearLayer Layer)
 {
+	// Every channel is written on the CPU and uploaded whole, so alpha layers (Handling, Moss) are as safe as RGB.
 	const int32 Index = int32(Layer);
-	return Index >= 0 && Index < 2 * GrungifyRuntimeWear::ChannelsPerMask
-		&& Index % GrungifyRuntimeWear::ChannelsPerMask < 3;
+	return Index >= 0 && Index < 2 * GrungifyRuntimeWear::ChannelsPerMask;
 }
 
 bool UGrungifyRuntimeWearSubsystem::IsEligibleMaterial(const UMaterialInterface* Material)
@@ -277,10 +289,10 @@ FGrungifyRuntimeWearState* UGrungifyRuntimeWearSubsystem::FindOrCreateState(USta
 		}
 
 		Slot.Dynamic = UMaterialInstanceDynamic::Create(Instance, Component);
-		Slot.Dynamic->SetTextureParameterValue(Grungify::MaskTextureParameterName(), State.Targets[Slot.MaskTarget].RenderTarget);
+		Slot.Dynamic->SetTextureParameterValue(Grungify::MaskTextureParameterName(), State.Targets[Slot.MaskTarget].Texture);
 		if (Slot.ExtendedTarget != INDEX_NONE)
 		{
-			Slot.Dynamic->SetTextureParameterValue(Grungify::ExtendedMaskTextureParameterName(), State.Targets[Slot.ExtendedTarget].RenderTarget);
+			Slot.Dynamic->SetTextureParameterValue(Grungify::ExtendedMaskTextureParameterName(), State.Targets[Slot.ExtendedTarget].Texture);
 		}
 		Component->SetMaterial(MaterialIndex, Slot.Dynamic);
 		State.Slots.Add(Slot);
@@ -313,122 +325,204 @@ int32 UGrungifyRuntimeWearSubsystem::FindOrCreateTarget(FGrungifyRuntimeWearStat
 	}
 
 	// The copy reads the GPU resource, so the full-resolution mip must be resident or the copy would be blurry.
-	TextureAddress AddressX = TA_Wrap;
-	TextureAddress AddressY = TA_Wrap;
+	bool bWrapX = true;
+	bool bWrapY = true;
+	TextureFilter Filter = TF_Bilinear;
 	if (UTexture2D* Source2D = Cast<UTexture2D>(Source))
 	{
-		AddressX = Source2D->AddressX;
-		AddressY = Source2D->AddressY;
+		bWrapX = Source2D->AddressX != TA_Clamp;
+		bWrapY = Source2D->AddressY != TA_Clamp;
+		Filter = Source2D->Filter;
 		Source2D->SetForceMipLevelsToBeResident(30.f);
 		Source2D->WaitForStreaming();
 	}
 
-	UTextureRenderTarget2D* RenderTarget = NewObject<UTextureRenderTarget2D>(this, NAME_None, RF_Transient);
-	RenderTarget->RenderTargetFormat = RTF_RGBA8;
-	RenderTarget->ClearColor = FLinearColor::Black;
-	RenderTarget->bAutoGenerateMips = false;
-	// Masks are data: linear storage and gamma 1 so the canvas neither encodes nor decodes them.
-	RenderTarget->bForceLinearGamma = true;
-	RenderTarget->SRGB = false;
-	RenderTarget->AddressX = AddressX;
-	RenderTarget->AddressY = AddressY;
-	RenderTarget->InitAutoFormat(Width, Height);
-	RenderTarget->UpdateResourceImmediate(true);
-
-	UCanvas* Canvas = nullptr;
-	FVector2D Size;
-	FDrawToRenderTargetContext Context;
-	UKismetRenderingLibrary::BeginDrawCanvasToRenderTarget(this, RenderTarget, Canvas, Size, Context);
-	if (Canvas)
+	TArray<FColor> Pixels;
+	if (!ReadTextureOnGPU(Source, Width, Height, Pixels))
 	{
-		Canvas->K2_DrawTexture(Source, FVector2D::ZeroVector, Size, FVector2D::ZeroVector, FVector2D::UnitVector, FLinearColor::White, BLEND_Opaque);
+		UE_LOG(LogGrungify, Warning, TEXT("Runtime wear: could not read %s back from the GPU; its slot is not painted."), *Source->GetPathName());
+		return INDEX_NONE;
 	}
-	UKismetRenderingLibrary::EndDrawCanvasToRenderTarget(this, Context);
+
+	UTexture2D* Texture = UTexture2D::CreateTransient(Width, Height, PF_B8G8R8A8, MakeUniqueObjectName(GetTransientPackage(), UTexture2D::StaticClass(), TEXT("GrungifyRuntimeMask")));
+	if (!Texture || !Texture->GetPlatformData() || Texture->GetPlatformData()->Mips.Num() == 0)
+	{
+		return INDEX_NONE;
+	}
+	// Masks are data: no sRGB decode, and the source's filtering and addressing so the look doesn't change.
+	Texture->SRGB = false;
+	Texture->Filter = Filter;
+	Texture->AddressX = bWrapX ? TA_Wrap : TA_Clamp;
+	Texture->AddressY = bWrapY ? TA_Wrap : TA_Clamp;
+	FTexture2DMipMap& Mip = Texture->GetPlatformData()->Mips[0];
+	void* Data = Mip.BulkData.Lock(LOCK_READ_WRITE);
+	FMemory::Memcpy(Data, Pixels.GetData(), Pixels.Num() * sizeof(FColor));
+	Mip.BulkData.Unlock();
+	Texture->UpdateResource();
 
 	FGrungifyRuntimeWearTarget& Target = State.Targets.AddDefaulted_GetRef();
 	Target.Source = Source;
-	Target.RenderTarget = RenderTarget;
+	Target.Texture = Texture;
+	Target.Pixels = MoveTemp(Pixels);
+	Target.Width = Width;
+	Target.Height = Height;
+	Target.bWrapX = bWrapX;
+	Target.bWrapY = bWrapY;
 	return State.Targets.Num() - 1;
 }
 
-UTexture2D* UGrungifyRuntimeWearSubsystem::GetBrushTexture()
+uint8 UGrungifyRuntimeWearSubsystem::StrokeIncrement(float DX, float DY, float RadiusTexels, float Amount)
 {
-	if (BrushTexture)
+	if (RadiusTexels <= 0.f || Amount <= 0.f)
 	{
-		return BrushTexture;
+		return 0;
 	}
-
-	const int32 Size = GrungifyRuntimeWear::BrushSize;
-	UTexture2D* Brush = UTexture2D::CreateTransient(Size, Size, PF_B8G8R8A8, FName(TEXT("GrungifyRuntimeWearBrush")));
-	if (!Brush || !Brush->GetPlatformData() || Brush->GetPlatformData()->Mips.Num() == 0)
-	{
-		return nullptr;
-	}
-	Brush->SRGB = false;
-	Brush->Filter = TF_Bilinear;
-	Brush->AddressX = TA_Clamp;
-	Brush->AddressY = TA_Clamp;
-
-	FTexture2DMipMap& Mip = Brush->GetPlatformData()->Mips[0];
-	FColor* Pixels = static_cast<FColor*>(Mip.BulkData.Lock(LOCK_READ_WRITE));
-	const float Centre = (Size - 1) * 0.5f;
-	for (int32 Y = 0; Y < Size; ++Y)
-	{
-		for (int32 X = 0; X < Size; ++X)
-		{
-			const float Distance = FVector2f(X - Centre, Y - Centre).Size() / (Size * 0.5f);
-			const float Falloff = FMath::SmoothStep(0.f, 1.f, 1.f - Distance);
-			const uint8 Value = uint8(FMath::RoundToInt(Falloff * 255.f));
-			Pixels[Y * Size + X] = FColor(Value, Value, Value, Value);
-		}
-	}
-	Mip.BulkData.Unlock();
-	Brush->UpdateResource();
-
-	BrushTexture = Brush;
-	return BrushTexture;
+	const float Distance = FMath::Sqrt(DX * DX + DY * DY) / RadiusTexels;
+	const float Falloff = FMath::SmoothStep(0.f, 1.f, 1.f - Distance);
+	return uint8(FMath::Clamp(FMath::RoundToInt(FMath::Clamp(Amount, 0.f, 1.f) * Falloff * 255.f), 0, 255));
 }
 
-bool UGrungifyRuntimeWearSubsystem::PaintBrush(UTextureRenderTarget2D* Target, const FVector2D& UV, float DiameterTexels, int32 Channel, float Amount)
+bool UGrungifyRuntimeWearSubsystem::PaintTarget(FGrungifyRuntimeWearTarget& Target, const FVector2D& UV, float RadiusTexels, int32 Channel, float Amount)
 {
-	if (Channel < 0 || Channel > 2)
+	if (!Target.Texture || Channel < 0 || Channel >= GrungifyRuntimeWear::ChannelsPerMask
+		|| Target.Width <= 0 || Target.Height <= 0 || Target.Pixels.Num() != Target.Width * Target.Height)
 	{
 		return false;
 	}
-	UTexture2D* Brush = GetBrushTexture();
-	if (!Target || !Brush)
-	{
-		return false;
-	}
+	RadiusTexels = FMath::Max(RadiusTexels, 0.5f);
 
-	UCanvas* Canvas = nullptr;
-	FVector2D Size;
-	FDrawToRenderTargetContext Context;
-	UKismetRenderingLibrary::BeginDrawCanvasToRenderTarget(this, Target, Canvas, Size, Context);
-	if (Canvas)
-	{
-		const FVector2D Diameter(FMath::Max(DiameterTexels, 1.f));
-		const FVector2D Position = UV * Size - Diameter * 0.5f;
+	// Texel X spans [X, X+1) in texel space, so its centre is X + 0.5. Wrapped spans are capped at one texture width
+	// so no texel is visited twice by the same stroke.
+	const float CentreX = float(UV.X) * Target.Width;
+	const float CentreY = float(UV.Y) * Target.Height;
+	const int32 X0 = FMath::FloorToInt(CentreX - RadiusTexels);
+	const int32 Y0 = FMath::FloorToInt(CentreY - RadiusTexels);
+	const int32 X1 = FMath::Min(FMath::CeilToInt(CentreX + RadiusTexels), X0 + Target.Width - 1);
+	const int32 Y1 = FMath::Min(FMath::CeilToInt(CentreY + RadiusTexels), Y0 + Target.Height - 1);
 
-		// Native Canvas additive uses CW_RGB and One/One: add only the selected RGB
-		// channel, preserving alpha. Alpha-layer requests are rejected before mutation.
-		FLinearColor Color(0.f, 0.f, 0.f, 0.f);
-		switch (Channel)
+	FIntRect Dirty(MAX_int32, MAX_int32, MIN_int32, MIN_int32);
+	for (int32 Y = Y0; Y <= Y1; ++Y)
+	{
+		const int32 TexelY = Target.bWrapY ? GrungifyRuntimeWear::WrapIndex(Y, Target.Height) : Y;
+		if (TexelY < 0 || TexelY >= Target.Height)
 		{
-		case 0:
-			Color.R = Amount;
-			break;
-		case 1:
-			Color.G = Amount;
-			break;
-		case 2:
-			Color.B = Amount;
-			break;
+			continue;
 		}
-		Canvas->K2_DrawTexture(Brush, Position, Diameter, FVector2D::ZeroVector, FVector2D::UnitVector, Color, BLEND_Additive);
+		for (int32 X = X0; X <= X1; ++X)
+		{
+			const int32 TexelX = Target.bWrapX ? GrungifyRuntimeWear::WrapIndex(X, Target.Width) : X;
+			if (TexelX < 0 || TexelX >= Target.Width)
+			{
+				continue;
+			}
+			const uint8 Increment = StrokeIncrement(X + 0.5f - CentreX, Y + 0.5f - CentreY, RadiusTexels, Amount);
+			if (Increment == 0)
+			{
+				continue;
+			}
+			// Saturating add on the selected channel only; the other three bytes of the texel are never written.
+			uint8& Value = GrungifyRuntimeWear::ChannelOf(Target.Pixels[TexelY * Target.Width + TexelX], Channel);
+			const uint8 Painted = uint8(FMath::Min(int32(Value) + int32(Increment), 255));
+			if (Painted != Value)
+			{
+				Value = Painted;
+				Dirty.Min.X = FMath::Min(Dirty.Min.X, TexelX);
+				Dirty.Min.Y = FMath::Min(Dirty.Min.Y, TexelY);
+				Dirty.Max.X = FMath::Max(Dirty.Max.X, TexelX + 1);
+				Dirty.Max.Y = FMath::Max(Dirty.Max.Y, TexelY + 1);
+			}
+		}
 	}
-	UKismetRenderingLibrary::EndDrawCanvasToRenderTarget(this, Context);
-	return Canvas != nullptr;
+	if (Dirty.Min.X > Dirty.Max.X)
+	{
+		// Every touched texel was already saturated; the texture is unchanged but the stroke landed.
+		return true;
+	}
+
+	// Upload whole texels of the dirty rectangle. The render thread owns the copy and frees it when done, so later
+	// strokes can keep changing Pixels.
+	const int32 DirtyWidth = Dirty.Width();
+	const int32 DirtyHeight = Dirty.Height();
+	FColor* Upload = static_cast<FColor*>(FMemory::Malloc(DirtyWidth * DirtyHeight * sizeof(FColor)));
+	for (int32 Row = 0; Row < DirtyHeight; ++Row)
+	{
+		FMemory::Memcpy(Upload + Row * DirtyWidth, &Target.Pixels[(Dirty.Min.Y + Row) * Target.Width + Dirty.Min.X], DirtyWidth * sizeof(FColor));
+	}
+	FUpdateTextureRegion2D* Region = new FUpdateTextureRegion2D(Dirty.Min.X, Dirty.Min.Y, 0, 0, DirtyWidth, DirtyHeight);
+	Target.Texture->UpdateTextureRegions(0, 1, Region, DirtyWidth * sizeof(FColor), sizeof(FColor), reinterpret_cast<uint8*>(Upload),
+		[](uint8* Data, const FUpdateTextureRegion2D* Regions)
+		{
+			FMemory::Free(Data);
+			delete Regions;
+		});
+	return true;
+}
+
+bool UGrungifyRuntimeWearSubsystem::ReadTextureOnGPU(UTexture* Texture, int32 Width, int32 Height, TArray<FColor>& OutPixels)
+{
+	OutPixels.Reset();
+	FTextureResource* TextureResource = Texture ? Texture->GetResource() : nullptr;
+	if (!TextureResource || Width <= 0 || Height <= 0 || !FApp::CanEverRender())
+	{
+		return false;
+	}
+
+	UTextureRenderTarget2D* RenderTarget = NewObject<UTextureRenderTarget2D>(GetTransientPackage(), NAME_None, RF_Transient);
+	RenderTarget->RenderTargetFormat = RTF_RGBA8;
+	RenderTarget->ClearColor = FLinearColor::Transparent;
+	RenderTarget->bAutoGenerateMips = false;
+	// Masks are data: linear storage and gamma 1 so the copy neither encodes nor decodes them.
+	RenderTarget->bForceLinearGamma = true;
+	RenderTarget->SRGB = false;
+	RenderTarget->InitAutoFormat(Width, Height);
+	RenderTarget->UpdateResourceImmediate(true);
+	FTextureRenderTargetResource* TargetResource = RenderTarget->GameThread_GetRenderTargetResource();
+	if (!TargetResource)
+	{
+		return false;
+	}
+
+	// An opaque 1:1 draw samples every texel at its centre and writes all four channels unchanged.
+	{
+		FCanvas Canvas(TargetResource, nullptr, FGameTime::GetTimeSinceAppStart(), GMaxRHIFeatureLevel);
+		FCanvasTileItem Tile(FVector2D::ZeroVector, TextureResource, FVector2D(Width, Height), FLinearColor::White);
+		Tile.BlendMode = SE_BLEND_Opaque;
+		Canvas.DrawItem(Tile);
+		Canvas.Flush_GameThread(true);
+	}
+	FReadSurfaceDataFlags Flags(RCM_UNorm, CubeFace_MAX);
+	Flags.SetLinearToGamma(false);
+	const bool bRead = TargetResource->ReadPixels(OutPixels, Flags);
+	return bRead && OutPixels.Num() == Width * Height;
+}
+
+bool UGrungifyRuntimeWearSubsystem::ReadRuntimeWearMask(UPrimitiveComponent* Component, int32 MaterialIndex, bool bExtended, TArray<FColor>& OutPixels, int32& OutWidth, int32& OutHeight)
+{
+	OutPixels.Reset();
+	OutWidth = OutHeight = 0;
+	const int32 StateIndex = FindStateIndex(Cast<UStaticMeshComponent>(Component));
+	if (StateIndex == INDEX_NONE)
+	{
+		return false;
+	}
+	const FGrungifyRuntimeWearState& State = States[StateIndex];
+	const FGrungifyRuntimeWearSlot* Slot = State.Slots.FindByPredicate([MaterialIndex](const FGrungifyRuntimeWearSlot& Candidate)
+	{
+		return Candidate.MaterialIndex == MaterialIndex;
+	});
+	const int32 TargetIndex = Slot ? (bExtended ? Slot->ExtendedTarget : Slot->MaskTarget) : INDEX_NONE;
+	if (!State.Targets.IsValidIndex(TargetIndex))
+	{
+		return false;
+	}
+	const FGrungifyRuntimeWearTarget& Target = State.Targets[TargetIndex];
+	if (!ReadTextureOnGPU(Target.Texture, Target.Width, Target.Height, OutPixels))
+	{
+		return false;
+	}
+	OutWidth = Target.Width;
+	OutHeight = Target.Height;
+	return true;
 }
 
 void UGrungifyRuntimeWearSubsystem::ResetRuntimeWear(UPrimitiveComponent* Component)

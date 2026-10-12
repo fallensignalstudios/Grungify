@@ -24,7 +24,14 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 > - **Skeletal meshes, landscape, height blending and Nanite displacement.**
 > - **Fab packaging:** a showcase map, build scripts and a readiness check, read-only installed content, engine-compatibility wrappers for 5.5–5.8, and copyright headers.
 >
-> **v0.7.0 has not been compiled yet.** It adds, from the pressure-hall trial feedback:
+> **v0.8.0 has not been compiled yet.** It adds, from the pressure-hall trial feedback:
+> - **Runtime wear on all eight layers**, Handling and Moss included. Strokes change only their channel, verified by GPU readback (see [Runtime wear](#runtime-wear-gameplay)).
+> - **Portable bakes**, with recorded compatibility (see [Bake to assets](#bake-to-assets-non-destructive)).
+> - **Material hookup that keeps your edits** on Remove.
+> - **Background previews from immutable snapshots**, restarted when a mesh changes mid-run.
+> - **Landscape wear clipped to the zone**, and real compile checks for the landscape and displacement functions.
+>
+> v0.7.0 (also uncompiled) added:
 > - **Art-direction controls**, independent of Feature Scale: chip scale, coverage, width and breakup; surface protection; grime breakup; and recess roughness variation (see [Art direction](#art-direction)).
 > - **A Dry Coated Ceramic library look.**
 > - **Per-slot physical coverage** in reports.
@@ -56,7 +63,7 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 
 ### Content versioning
 
-The generated material assets carry a marker of the form `[GrungifyContent v9 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
+The generated material assets carry a marker of the form `[GrungifyContent v11 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
 
 - **Tools → Grungify → Update Plugin Content** creates missing assets and rebuilds outdated ones.
 - **Rebuild Plugin Content** forces a rebuild of all the generated material assets.
@@ -70,6 +77,7 @@ The zone writes masks; your materials render them. Let Grungify wire itself in:
 - **Tools → Grungify → Hook Up Materials In Level**: finds every master material used by static meshes inside your zones (or the whole level, if it has no zones yet) that doesn't use Grungify, lists them, and hooks them all up after you confirm.
 - **Right-click materials or material instances in the Content Browser → Add Grungify / Remove Grungify**, or the same from *Tools → Grungify* for the current selection. An instance resolves to its parent material, so every instance of that parent gets weathering.
 - From Python or Editor Utility Blueprints: `UGrungifyMaterialHookup.add_grungify_to_material(material)`, `remove_grungify_from_material`, `uses_grungify` and `find_unhooked_materials_in_level`.
+- **Your edits after Add are kept.** Each installation records exactly which nodes it inserted and which outputs it routed (editor-only asset user data on the material). *Remove* reconnects each output to whatever currently feeds Grungify, so upstream changes you made after Add survive, and deletes only the recorded nodes, so copies you made of them stay. If your own nodes read Grungify's nodes, Remove refuses and says which; disconnect them first. Installations from before 0.7 still remove the old way.
 
 What it does for each kind of material:
 
@@ -285,7 +293,7 @@ Add entries to **Leaks** and drag their diamond widgets to the actual leak point
 ### Faster iteration: cache and background preview
 
 - **Use Generation Cache** (*Performance*, on by default) keeps each mesh's last result in memory. The cache key is a hash of everything that affects that mesh: settings, seed, zone transform, traced floors, sky exposure, water paths, traffic, stamps, lights and fires, and the mesh itself (transform, mesh asset and build, materials, slot decisions, instance transforms). Changing one setting only regenerates the meshes it actually affects. **Cache Budget** (default 512 MB) evicts least-recently-used entries. **Clear Generation Cache** empties it. The cache is editor-only and never saved.
-- **Background Generation** (on by default) runs live previews on a worker thread, so the editor stays responsive while you drag sliders or move stamps. The quick game-thread work happens first: restoring the previous preview, traces and the scan. Any new change cancels the running job and starts another. A ticker writes the result when the worker finishes. Explicit **Preview**, **Apply**, **Bake**, **Dry Run** and the commandlet always run synchronously, with the progress dialog.
+- **Background Generation** (on by default) runs live previews on a worker thread, so the editor stays responsive while you drag sliders or move stamps. The quick game-thread work happens first: restoring the previous preview, traces and the scan. Any new change cancels the running job and starts another. A ticker writes the result when the worker finishes. The worker reads only snapshots (CPU copies of the mesh LODs and transforms taken when the job starts), never live components. If a mesh is edited, moved, reimported or re-materialled while the job runs, the result is discarded and the job restarts; undo, redo and unloading cancel it. Instanced meshes whose slots use a gate texture are reported as unsupported in background runs. Explicit **Preview**, **Apply**, **Bake**, **Dry Run** and the commandlet always run synchronously, with the progress dialog.
 - The report shows cache hits per mesh (`bFromCache`) and per run (`CacheHits`), and whether the run was a background one.
 
 ### Seed variants (A/B comparison)
@@ -395,6 +403,7 @@ Landscape limitations:
 - The mask debug displays don't apply to landscapes.
 - Substrate landscape materials aren't supported yet.
 - *Bake To Assets* keeps the landscape mask inside the proxy rather than as a separate asset.
+- Landscape wear stops at the zone's rectangle: texels outside it are zeroed, so the border of the mask no longer smears wear beyond the zone.
 
 ### Height blending and Nanite displacement
 
@@ -424,6 +433,7 @@ Bake always asks for texture output. Meshes without the mask UV channel fall bac
 - **Re-baking** updates the same assets in place, so references stay valid. It overwrites the PNGs, so keep your edited copies.
 - **Clear** restores the meshes' original materials, but the baked assets stay. Delete them from the Content Browser if you no longer need them.
 - **Sharing:** baked assets can be used by other levels, referenced by hand-authored materials, and reviewed in source control as normal textures.
+- **Portable:** a baked instance works on any component that draws the **same mesh build**, even one Grungify never touched (no custom primitive data). The instance carries its own mask mode, feature scale, seed offset and surface type, used only when the component has none. It does not fit another mesh, or the same mesh after a rebuild that changed its UVs; re-bake for those. Each baked instance records what it was baked for, and `UGrungifyInspectionLibrary.CheckBakeCompatibility(material, component)` says whether it fits and why not.
 
 ### Material library
 
@@ -501,9 +511,12 @@ message = unreal.GrungifyEditorLibrary.build_material_library(False)
   - `AddWearAtLocation(Location, Direction, Layer, Radius, Amount)`
   - `ResetRuntimeWear(Component)`
 - **Component:** `UGrungifyRuntimeWearComponent` paints under its owner with `EmitWear`, for example from footstep notifies.
-- **How it works:** on a component's first hit, its baked mask textures are copied into render targets, and its slots switch to dynamic material instances that read them. Reset switches back to the baked result.
+- **Layers:** all eight. A stroke changes only its layer's channel: R, G, B or A of the mask (Edge Chips, Dust, Runoff, Handling) or of the extended mask (Moisture, Soot, Scorch, Moss). The other seven channels stay bit-exact.
+- **How it works:** on a component's first hit, its baked masks are read back from the GPU into a CPU copy, and its slots switch to dynamic material instances that sample a live transient texture. Each stroke adds a smooth falloff to the selected channel of the CPU copy, saturating at 1, then uploads only the changed rectangle. Nothing is blended on the GPU, so alpha and the unselected channels can't be disturbed. Strokes wrap across UV edges when the baked texture wraps. Reset switches back to the baked result and discards the paint.
+- **Memory:** each painted mask keeps a CPU copy (4 bytes per texel: 16 MB for a 2048² mask) until Reset.
+- **Readback:** `ReadRuntimeWearMask(Component, MaterialIndex, bExtended, Pixels, Width, Height)` draws the live texture into a render target and reads it back, so QA scripts see what the renderer samples. It flushes rendering; use it for tests, not every frame.
 - **Setup:** enable *Project Settings → Physics → Support UV From Hit Results*, and trace against complex collision so hits carry a face index. Meshes weathered with vertex-colour or instanced output can't be painted at runtime.
-- **Current channel limit:** runtime Handling and Moss painting returns `false` before changing materials or masks. UE canvas additive drawing writes RGB only; alpha holdout erases existing masks rather than accumulating alpha. These alpha channels need a dedicated channel-preserving render pass and a real GPU readback test before they can be enabled safely. Procedural Handling and Moss generation is unaffected.
+- **Requires a rendering RHI:** under `-nullrhi` (dedicated servers) the baked masks can't be read back, so nothing is painted and the materials are left alone.
 
 
 ### Inspection (read-only)
@@ -666,7 +679,7 @@ Texture generation skips edge-distance queries and weathering evaluation when a 
 
 These cases should be checked in-editor on a test level, never on production rooms:
 
-1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v9 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
+1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v11 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
 2. **Channel masks:** in MF_GrungifyWeathering, the Roughness mask is R only and the Metallic mask is G only.
 3. **Exact restore:** on a mesh whose default custom primitive data is `[]`, run Preview → Cancel Preview, and separately Apply → Clear. The data is `[]` again. Repeat on a mesh with painted vertex colours, a mesh with only some material slots overridden, and a mesh whose CPD indices 0–4 are already in use (it should be reported as a conflict and left untouched).
 4. **Undo:** run Apply → Ctrl+Z and Clear → Ctrl+Z. Delete a zone while previewing, then Ctrl+Z.
@@ -750,6 +763,14 @@ These cases should be checked in-editor on a test level, never on production roo
 32. **Inspection:**
     - `Grungify.Inspection.ReadOnlyComponentState` passes.
     - From Python, inspect an applied, a previewed and an excluded-slot component, then save, reload and inspect again. The live and default CPD, owned instance paths and texture paths should resolve.
+
+33. **Landscape (v0.8):** a zone smaller than its landscape shows no wear beyond the rectangle. The content report shows the landscape and displacement compile probes passing.
+34. **Hookup edits:** `Grungify.Content.MaterialHookupPreservesArtistEdits` passes. By hand: Add, insert a node upstream of Base Color, Remove. Your node still feeds Base Color.
+35. **Portable bake:** in the BuildPlugin HostProject, `Grungify.Bake.PortableAndCompatibility` passes. Assign a baked instance to a fresh copy of the mesh and it looks the same.
+36. **Background snapshots:** `Grungify.Background.SnapshotsAndCancellation` passes. Drag a mesh while a live preview is generating: the preview restarts, and no stale masks appear.
+37. **Runtime wear:**
+    - `Grungify.RuntimeWear.SelectedChannelAccumulationGPU` passes on a rendering RHI (D3D12, Vulkan, Metal). It paints all eight layers over nonzero masks and checks every channel by readback.
+    - In PIE, footsteps with Handling and Moss show up, and the other layers don't change.
 
 ## Packaging for Fab (5.5–5.8)
 

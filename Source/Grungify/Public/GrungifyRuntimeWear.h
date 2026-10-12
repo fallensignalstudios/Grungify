@@ -16,9 +16,12 @@ class UPrimitiveComponent;
 class UStaticMeshComponent;
 class UTexture;
 class UTexture2D;
-class UTextureRenderTarget2D;
 
-/** A baked mask texture and the render target that replaces it while runtime wear is painted. */
+/**
+ * A baked mask texture and the live copy that replaces it while runtime wear is painted. Strokes accumulate in an
+ * exact CPU copy, changing only the selected channel, and upload the changed rectangle to Texture. Nothing is ever
+ * blended on the GPU, so the other channels (alpha included) stay bit-exact.
+ */
 USTRUCT()
 struct FGrungifyRuntimeWearTarget
 {
@@ -27,11 +30,22 @@ struct FGrungifyRuntimeWearTarget
 	UPROPERTY(Transient)
 	TObjectPtr<UTexture> Source;
 
+	/** Transient B8G8R8A8 texture the dynamic instances sample. */
 	UPROPERTY(Transient)
-	TObjectPtr<UTextureRenderTarget2D> RenderTarget;
+	TObjectPtr<UTexture2D> Texture;
+
+	/** CPU copy of the mask (Width x Height, row-major), read back from the GPU once at creation. */
+	TArray<FColor> Pixels;
+
+	int32 Width = 0;
+	int32 Height = 0;
+
+	/** Copied from the source: wrapped strokes continue across the opposite edge, clamped ones stop at it. */
+	bool bWrapX = true;
+	bool bWrapY = true;
 };
 
-/** One material slot switched to a dynamic instance that reads the render targets. */
+/** One material slot switched to a dynamic instance that reads the live mask textures. */
 USTRUCT()
 struct FGrungifyRuntimeWearSlot
 {
@@ -85,10 +99,10 @@ struct FGrungifyRuntimeWearState
 
 /**
  * Paints wear into Texture-output meshes at runtime (impacts, footsteps, fire). On a component's first wear its
- * baked mask textures are copied into render targets and its slots switch to dynamic instances that read them;
- * ResetRuntimeWear switches back to the baked result. Only active material instances with
- * an explicit mask override are painted. Runtime Handling and Moss are unsupported until the renderer can
- * accumulate alpha without changing RGB; those calls return false without changing materials or masks.
+ * baked mask textures are read back from the GPU into exact CPU copies and its slots switch to dynamic instances
+ * that read live transient textures; ResetRuntimeWear switches back to the baked result. Only active material
+ * instances with an explicit mask override are painted. All eight layers are supported: a stroke changes only its
+ * layer's channel (R, G, B or A of the mask or extended mask) and the other seven stay exact.
  *
  * Hit UVs come from UGameplayStatics::FindCollisionUV, which needs Project Settings > Physics >
  * "Support UV From Hit Results" and a complex-collision trace that returns the face index.
@@ -101,7 +115,7 @@ class GRUNGIFY_API UGrungifyRuntimeWearSubsystem : public UWorldSubsystem
 public:
 	static UGrungifyRuntimeWearSubsystem* Get(const UObject* WorldContextObject);
 
-	/** Adds an RGB-layer patch to an active Texture-output slot with an explicit baked mask. Handling, Moss and invalid layers return false without mutation. */
+	/** Adds a patch of one layer to an active Texture-output slot with an explicit baked mask. Invalid layer values return false without mutation. */
 	UFUNCTION(BlueprintCallable, Category = "Grungify|Runtime Wear")
 	bool AddWearAtHit(const FHitResult& Hit, EGrungifyWearLayer Layer, float RadiusCm = 20.f, float Amount = 0.5f);
 
@@ -116,6 +130,14 @@ public:
 	/** AddWearAtLocation with an explicit trace length and an actor the trace ignores (usually the emitter). */
 	bool TraceAndAddWear(const FVector& Location, const FVector& Direction, float TraceDistanceCm, const AActor* IgnoredActor, EGrungifyWearLayer Layer, float RadiusCm, float Amount);
 
+	/**
+	 * Reads a painted slot's live mask (or extended mask) back from the GPU: the texture the material samples is drawn
+	 * into a render target and read, so the result is what the renderer sees, not the CPU copy. False when the
+	 * component has no runtime wear on that slot, or there is no rendering RHI. Flushes rendering; for tests and QA.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Grungify|Runtime Wear")
+	bool ReadRuntimeWearMask(UPrimitiveComponent* Component, int32 MaterialIndex, bool bExtended, TArray<FColor>& OutPixels, int32& OutWidth, int32& OutHeight);
+
 	virtual void Deinitialize() override;
 
 protected:
@@ -126,22 +148,22 @@ private:
 	static bool IsEligibleMaterial(const UMaterialInterface* Material);
 	FGrungifyRuntimeWearState* FindOrCreateState(UStaticMeshComponent* Component);
 	int32 FindOrCreateTarget(FGrungifyRuntimeWearState& State, UTexture* Source);
-	UTexture2D* GetBrushTexture();
-	bool PaintBrush(UTextureRenderTarget2D* Target, const FVector2D& UV, float DiameterTexels, int32 Channel, float Amount);
+	bool PaintSlot(FGrungifyRuntimeWearState& State, int32 SlotIndex, const FVector2D& UV, EGrungifyWearLayer Layer, float RadiusCm, float Amount, bool& bOutMissingExtended);
+	static bool PaintTarget(FGrungifyRuntimeWearTarget& Target, const FVector2D& UV, float RadiusTexels, int32 Channel, float Amount);
+	/** What a stroke adds to a texel whose centre is (DX, DY) texels from the stroke centre. Smooth falloff to zero at the radius. */
+	static uint8 StrokeIncrement(float DX, float DY, float RadiusTexels, float Amount);
+	static bool ReadTextureOnGPU(UTexture* Texture, int32 Width, int32 Height, TArray<FColor>& OutPixels);
 	static void RestoreState(UStaticMeshComponent* Component, const FGrungifyRuntimeWearState& State);
 	void PruneStaleStates();
 
 	/**
 	 * One entry per painted component. A UPROPERTY array (rather than a map keyed by a weak pointer, which reflection
-	 * does not support) so GC sees the render targets, dynamic instances and original materials the states hold.
+	 * does not support) so GC sees the live textures, dynamic instances and original materials the states hold.
 	 */
 	UPROPERTY(Transient)
 	TArray<FGrungifyRuntimeWearState> States;
 
 	int32 FindStateIndex(const UStaticMeshComponent* Component) const;
-
-	UPROPERTY(Transient)
-	TObjectPtr<UTexture2D> BrushTexture;
 
 	bool bWarnedMissingUV = false;
 	bool bWarnedMissingTexelSize = false;
@@ -165,7 +187,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (ClampMin = "0", Units = "cm"))
 	float TraceDistanceCm = 250.f;
 
-	/** Traces down and paints a supported RGB layer. Handling/Moss currently return false; choose an RGB layer explicitly. */
+	/** Traces down and paints one layer under the owner (Handling by default, e.g. footsteps). */
 	UFUNCTION(BlueprintCallable, Category = "Grungify|Runtime Wear")
 	bool EmitWear(EGrungifyWearLayer Layer = EGrungifyWearLayer::Handling, float RadiusCm = 20.f, float Amount = 0.5f);
 };
