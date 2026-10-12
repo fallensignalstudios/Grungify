@@ -24,7 +24,7 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 > - **Skeletal meshes, landscape, height blending and Nanite displacement.**
 > - **Fab packaging:** a showcase map, build scripts and a readiness check, read-only installed content, engine-compatibility wrappers for 5.5–5.8, and copyright headers.
 >
-> **v0.9.0 adds, not yet compiled natively:**
+> **v0.9.1 passed native UE 5.8.3 builds (Editor, Game and Shipping) and all 26 automation tests on D3D12.** 0.9 adds:
 > - **Weather Selected Actors:** select props, right-click, *Weather with Grungify*. It places a fitted zone, offers the material hookup, and previews (see [Quick start](#quick-start-one-minute)).
 > - **Shader code compiled offline in CI:** `Grungify.ush` and every generated custom node pass a real HLSL compiler (glslang), so shader typos fail on push, not in the editor.
 >
