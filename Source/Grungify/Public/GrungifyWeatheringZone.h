@@ -358,6 +358,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Performance")
 	bool bBackgroundGeneration = true;
 
+	/** How long the last cancelled background run took to stop, and the worst seen this session (milliseconds). */
+	UPROPERTY(VisibleInstanceOnly, Transient, BlueprintReadOnly, Category = "Grungify|Performance")
+	float LastCancelLatencyMs = 0.f;
+
+	UPROPERTY(VisibleInstanceOnly, Transient, BlueprintReadOnly, Category = "Grungify|Performance")
+	float MaxCancelLatencyMs = 0.f;
+
 	// ------------------------------------------------------------------- Bake
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Bake", meta = (ContentDir))
@@ -473,6 +480,7 @@ public:
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 	virtual void PostEditMove(bool bFinished) override;
+	virtual void PostEditUndo() override;
 	virtual void PostEditImport() override;
 	virtual void PostDuplicate(EDuplicateMode::Type DuplicateMode) override;
 
@@ -487,6 +495,13 @@ public:
 
 	/** Live preview (on a worker thread if Background Generation is on; a new request cancels the running one). Used by stamps and other actors that affect this zone. */
 	void RequestLivePreview();
+
+	/** Tests only: start a background preview now (live preview runs synchronously under automation). */
+	bool BeginBackgroundPreviewForTests();
+	/** Tests only: wait for the running background job and collect it as the ticker would. Returns LastBackgroundOutcome. */
+	FString FinishBackgroundPreviewForTests();
+	/** "written", "restarted" (inputs changed meanwhile), "cancelled" or "discarded" (zone can't run). */
+	FString LastBackgroundOutcome;
 
 	/** Restores then hands over the original record; failed restoration retains ownership. */
 	bool ReleaseAppliedRecord(const UMeshComponent* Component, FGrungifyComponentRecord& OutRecord);

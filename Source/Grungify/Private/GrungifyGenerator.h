@@ -21,7 +21,7 @@ class UTexture2D;
 class UMaterialInstanceConstant;
 class UInstancedStaticMeshComponent;
 class UWorld;
-struct FStaticMeshLODResources;
+#include "StaticMeshResources.h"
 
 /** Floor heights sampled on a grid over the zone. Each cell can hold several floors (storeys, stairs). */
 class FGrungifyFloorField
@@ -358,6 +358,24 @@ struct FGrungifyLandscapeResult
 	bool bCancelled = false;
 };
 
+/**
+ * Immutable inputs for generating one component, copied on the game thread before any worker runs: CPU copies of the
+ * mesh LODs (every LOD for static meshes, LOD0 for skeletal ones), the transform, and instance transforms. Edits,
+ * reimports, deletion or unloading after the copy can't affect a running generation; the zone detects them when it
+ * collects (by re-hashing the component) and discards stale results.
+ */
+struct FGrungifyMeshSnapshot
+{
+	enum class EKind : uint8 { None, Static, Skeletal, Instanced };
+	EKind Kind = EKind::None;
+	FString Path;
+	FTransform Transform;
+	bool bNanite = false;
+	FBox LocalBounds = FBox(ForceInit);
+	TArray<TUniquePtr<FStaticMeshLODResources>> LODs;
+	TArray<FTransform> Instances;
+};
+
 /** A cached per-component result and the inputs it was made from. */
 struct FGrungifyCacheEntry
 {
@@ -400,6 +418,10 @@ struct FGrungifyGenerationJob
 		/** Generation found nothing usable (reported as skipped). */
 		bool bFailed = false;
 		float Seconds = 0.f;
+		/** Generation inputs copied on the game thread (released once generated). */
+		TSharedPtr<FGrungifyMeshSnapshot> Snapshot;
+		/** The component's identity hash when snapshotted; a different value at collect time means it changed. */
+		uint32 ComponentHash = 0;
 		/** Apply with Take Over: the zone that owns this mesh now. */
 		TWeakObjectPtr<AGrungifyWeatheringZone> TakeOverFrom;
 	};
@@ -462,7 +484,13 @@ namespace Grungify
 	 * Checks the mask UV channel of a mesh LOD: presence, 0..1 range, overlapping islands, zero-area triangles,
 	 * coverage and texel-density spread. Overlap is measured on a coarse raster, independent of the bake.
 	 */
-	FGrungifyUVReport ValidateMaskUVs(const FStaticMeshLODResources& LOD, const FTransform& Transform, int32 Channel);
+	FGrungifyUVReport ValidateMaskUVs(const FStaticMeshLODResources& LOD, const FTransform& Transform, int32 Channel,
+		const FGrungifyGenerationParams* CancelParams = nullptr);
+
+	/** Copies everything generation reads from a component (game thread). False if its mesh data isn't readable. */
+	bool SnapshotMesh(UMeshComponent* Component, FGrungifyMeshSnapshot& Out);
+	/** Generates from a snapshot only: never touches the component or live render data, so it is safe on a worker. */
+	bool GenerateFromSnapshot(const FGrungifyMeshSnapshot& Snapshot, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult);
 
 	bool GenerateComponent(UStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult);
 

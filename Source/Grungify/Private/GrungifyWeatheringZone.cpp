@@ -714,6 +714,13 @@ void AGrungifyWeatheringZone::PostEditChangeProperty(FPropertyChangedEvent& Prop
 	RefreshPreviewIfLive();
 }
 
+void AGrungifyWeatheringZone::PostEditUndo()
+{
+	// Undo/redo changed the scene under a running background job; its result would describe a state that no longer exists.
+	CancelBackgroundJob();
+	Super::PostEditUndo();
+}
+
 void AGrungifyWeatheringZone::PostEditMove(bool bFinished)
 {
 	Super::PostEditMove(bFinished);
@@ -802,6 +809,10 @@ void AGrungifyWeatheringZone::Destroyed()
 void AGrungifyWeatheringZone::PostUnregisterAllComponents()
 {
 	Super::PostUnregisterAllComponents();
+#if WITH_EDITOR
+	// Unloading or streaming out: a running background job must never write into the level afterwards.
+	CancelBackgroundJob();
+#endif
 
 #if WITH_EDITOR
 	// Level unload or streaming out: put previewed meshes back so no un-owned preview is left behind.
@@ -1476,22 +1487,9 @@ void FGrungifyGenerationJob::GenerateItem(FItem& Item)
 		return;
 	}
 	const double Start = FPlatformTime::Seconds();
-	bool bOk = false;
-	if (UMeshComponent* Component = Item.Component.Get())
-	{
-		if (Item.bInstanced)
-		{
-			bOk = Grungify::GenerateInstanced(Cast<UInstancedStaticMeshComponent>(Component), Item.Context, Params, Item.Result);
-		}
-		else if (Item.bSkeletal)
-		{
-			bOk = Grungify::GenerateSkinned(Cast<USkeletalMeshComponent>(Component), Item.Context, Params, Item.Result);
-		}
-		else if (UStaticMeshComponent* Static = Cast<UStaticMeshComponent>(Component))
-		{
-			bOk = Grungify::GenerateComponent(Static, Item.Context, Params, Item.Result);
-		}
-	}
+	// Only the snapshot taken on the game thread is read here; the live component is never touched by a worker.
+	const bool bOk = Item.Snapshot.IsValid() && Grungify::GenerateFromSnapshot(*Item.Snapshot, Item.Context, Params, Item.Result);
+	Item.Snapshot.Reset();
 	Item.Seconds = float(FPlatformTime::Seconds() - Start);
 	Item.bGenerated = !Item.Result.bCancelled;
 	Item.bFailed = !bOk && !Item.Result.bCancelled;
@@ -1883,9 +1881,18 @@ bool AGrungifyWeatheringZone::PrepareJob(FGrungifyGenerationJob& Job, const TCHA
 				continue;
 			}
 
+			// Instanced masks are per instance, with no texel UVs to sample a painted gate at: say so rather than guess.
+			if (bInstanced && Item.Context.Slots.ContainsByPredicate([](const FGrungifySlotInfo& Slot) { return !Slot.bExcluded && Slot.GateSampler; }))
+			{
+				Skip(Item.Report, TEXT("unsupported: a slot rule's gate texture needs per-texel UVs, which instanced masks don't have (use facing or height gates, or exclude the slot)"));
+				Job.Items.Pop();
+				continue;
+			}
+
+			Item.ComponentHash = HashComponent(Component, Item.Context);
 			if (bUseGenerationCache)
 			{
-				Item.Key = HashCombine(Job.EnvironmentHash, HashComponent(Component, Item.Context));
+				Item.Key = HashCombine(Job.EnvironmentHash, Item.ComponentHash);
 				if (const TSharedPtr<FGrungifyCacheEntry>* Entry = GenerationCache.Find(Item.Path))
 				{
 					if ((*Entry)->Key == Item.Key && (*Entry)->Result.IsValid())
@@ -1896,6 +1903,18 @@ bool AGrungifyWeatheringZone::PrepareJob(FGrungifyGenerationJob& Job, const TCHA
 						Item.bFromCache = true;
 						(*Entry)->LastUsed = Now;
 					}
+				}
+			}
+
+			// Immutable inputs for generation (on a worker, or here). Cached items don't need them.
+			if (!Item.bGenerated)
+			{
+				Item.Snapshot = MakeShared<FGrungifyMeshSnapshot>();
+				if (!Grungify::SnapshotMesh(Component, *Item.Snapshot))
+				{
+					Skip(Item.Report, TEXT("mesh data isn't readable on the CPU"));
+					Job.Items.Pop();
+					continue;
 				}
 			}
 		}
@@ -2111,13 +2130,49 @@ void AGrungifyWeatheringZone::CancelBackgroundJob()
 	}
 	if (BackgroundJob.IsValid())
 	{
+		// Measure how long the worker takes to notice: bounded by the polling inside generation (per LOD, every 32
+		// texture rows, every 3072 UV-validation triangles, every 256 instances).
+		const double Requested = FPlatformTime::Seconds();
+		const bool bWasRunning = !BackgroundJob->bFinished;
 		BackgroundJob->bCancelRequested = true;
 		if (BackgroundJob->Future.IsValid())
 		{
 			BackgroundJob->Future.Wait();
 		}
+		if (bWasRunning)
+		{
+			LastCancelLatencyMs = float((FPlatformTime::Seconds() - Requested) * 1000.0);
+			MaxCancelLatencyMs = FMath::Max(MaxCancelLatencyMs, LastCancelLatencyMs);
+			UE_LOG(LogGrungify, Verbose, TEXT("%s: background generation cancelled in %.1f ms (worst %.1f ms)"),
+				*GetActorNameOrLabel(), LastCancelLatencyMs, MaxCancelLatencyMs);
+		}
 		BackgroundJob.Reset();
 	}
+}
+
+bool AGrungifyWeatheringZone::BeginBackgroundPreviewForTests()
+{
+	StartBackgroundPreview();
+	return BackgroundJob.IsValid();
+}
+
+FString AGrungifyWeatheringZone::FinishBackgroundPreviewForTests()
+{
+	if (!BackgroundJob.IsValid())
+	{
+		return LastBackgroundOutcome;
+	}
+	if (BackgroundJob->Future.IsValid())
+	{
+		BackgroundJob->Future.Wait();
+	}
+	if (BackgroundTicker.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(BackgroundTicker);
+		BackgroundTicker.Reset();
+	}
+	TickBackgroundJob(0.f);
+	return LastBackgroundOutcome;
 }
 
 bool AGrungifyWeatheringZone::TickBackgroundJob(float DeltaTime)
@@ -2139,7 +2194,22 @@ bool AGrungifyWeatheringZone::TickBackgroundJob(float DeltaTime)
 	}
 	if (Job->bCancelRequested.load() || !CanRunInEditorWorld())
 	{
+		LastBackgroundOutcome = Job->bCancelRequested.load() ? TEXT("cancelled") : TEXT("discarded");
 		return false;
+	}
+
+	// The worker only read snapshots. If a mesh was edited, reimported, moved or re-materialled meanwhile, its result
+	// describes the old version: write nothing and start again from current inputs.
+	for (const FGrungifyGenerationJob::FItem& Item : Job->Items)
+	{
+		UMeshComponent* Component = Item.Component.Get();
+		if (Component && Item.ComponentHash != 0 && HashComponent(Component, Item.Context) != Item.ComponentHash)
+		{
+			UE_LOG(LogGrungify, Log, TEXT("%s: %s changed during background generation; regenerating."), *GetActorNameOrLabel(), *Item.Report.Component);
+			LastBackgroundOutcome = TEXT("restarted");
+			StartBackgroundPreview();
+			return false;
+		}
 	}
 
 	TArray<FGrungifyComponentResult> Results;
@@ -2169,6 +2239,7 @@ bool AGrungifyWeatheringZone::TickBackgroundJob(float DeltaTime)
 			return false;
 		});
 		WritePreview(Results, Job->StartSeconds);
+		LastBackgroundOutcome = TEXT("written");
 	}
 	return false;
 }

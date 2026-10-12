@@ -952,20 +952,20 @@ namespace Grungify
 			}
 		}
 
-		void BakeVertexColors(const FStaticMeshRenderData& RenderData, const FTransform& Transform, const FGrungifyComponentContext& Context,
+		void BakeVertexColors(TConstArrayView<const FStaticMeshLODResources*> LODs, const FTransform& Transform, const FGrungifyComponentContext& Context,
 			const FGrungifyGenerationParams& Params, float SharpRef, FGrungifyComponentResult& Out, int32 (&SurfaceVotes)[3])
 		{
-			Out.LODColors.SetNum(RenderData.LODResources.Num());
+			Out.LODColors.SetNum(LODs.Num());
 			FMaskStats Stats;
 
-			for (int32 LODIndex = 0; LODIndex < RenderData.LODResources.Num(); ++LODIndex)
+			for (int32 LODIndex = 0; LODIndex < LODs.Num(); ++LODIndex)
 			{
 				if (Params.CancelRequested())
 				{
 					Out.bCancelled = true;
 					return;
 				}
-				const FStaticMeshLODResources& LOD = RenderData.LODResources[LODIndex];
+				const FStaticMeshLODResources& LOD = *LODs[LODIndex];
 				FTopology Topo;
 				if (!Topo.Build(LOD, Transform, SharpRef))
 				{
@@ -1016,7 +1016,7 @@ namespace Grungify
 				}
 			}
 
-			Out.Vertices = RenderData.LODResources[0].GetNumVertices();
+			Out.Vertices = LODs[0]->GetNumVertices();
 			Stats.WriteTo(Out);
 		}
 
@@ -1570,7 +1570,7 @@ namespace Grungify
 		}
 	}
 
-	FGrungifyUVReport ValidateMaskUVs(const FStaticMeshLODResources& LOD, const FTransform& Transform, int32 Channel)
+	FGrungifyUVReport ValidateMaskUVs(const FStaticMeshLODResources& LOD, const FTransform& Transform, int32 Channel, const FGrungifyGenerationParams* CancelParams)
 	{
 		FGrungifyUVReport Report;
 		Report.Channel = Channel;
@@ -1606,6 +1606,11 @@ namespace Grungify
 
 		for (int32 T = 0; T + 2 < Indices.Num(); T += 3)
 		{
+			// Long on dense meshes: stop promptly when a background run is cancelled (callers check and discard).
+			if (CancelParams && (T % 3072) == 0 && CancelParams->CancelRequested())
+			{
+				return Report;
+			}
 			const uint32 I[3] = { Indices[T], Indices[T + 1], Indices[T + 2] };
 			if (I[0] >= NumVerts || I[1] >= NumVerts || I[2] >= NumVerts || Positions.GetNumVertices() < NumVerts)
 			{
@@ -1722,10 +1727,9 @@ namespace Grungify
 		return Report;
 	}
 
-	bool GenerateInstanced(UInstancedStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult)
+	static bool GenerateInstancedSnapshot(const FGrungifyMeshSnapshot& Snapshot, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult)
 	{
-		UStaticMesh* Mesh = Component ? Component->GetStaticMesh() : nullptr;
-		if (!Mesh || !Params.Floor)
+		if (!Snapshot.LocalBounds.IsValid || !Params.Floor)
 		{
 			return false;
 		}
@@ -1735,14 +1739,13 @@ namespace Grungify
 			return false;
 		}
 
-		OutResult.Component = Component;
 		OutResult.bInstanced = true;
-		OutResult.bNanite = Mesh->HasValidNaniteData();
+		OutResult.bNanite = Snapshot.bNanite;
 		OutResult.DominantSurface = Slot->Surface;
 
 		// One mask set per instance, from a handful of points around its bounds: the top, the four sides at mid
 		// height and near the base. Generic edge and crease values stand in for real convexity.
-		const FBox Local = Mesh->GetBoundingBox();
+		const FBox Local = Snapshot.LocalBounds;
 		const FVector Center = Local.GetCenter();
 		const FVector Extent = Local.GetExtent();
 		struct FProbe { FVector Local; FVector Normal; };
@@ -1755,7 +1758,7 @@ namespace Grungify
 			{ FVector(Local.Max.X, Center.Y, Local.Min.Z + Extent.Z * 0.2), FVector::ForwardVector },
 			{ FVector(Local.Min.X, Center.Y, Local.Min.Z + Extent.Z * 0.2), -FVector::ForwardVector } };
 
-		const int32 Count = Component->GetInstanceCount();
+		const int32 Count = Snapshot.Instances.Num();
 		OutResult.InstanceMasks.SetNumZeroed(Count);
 		FMaskStats Stats;
 		for (int32 Index = 0; Index < Count; ++Index)
@@ -1765,11 +1768,7 @@ namespace Grungify
 				OutResult.bCancelled = true;
 				return false;
 			}
-			FTransform Instance;
-			if (!Component->GetInstanceTransform(Index, Instance, /*bWorldSpace*/ true))
-			{
-				continue;
-			}
+			const FTransform& Instance = Snapshot.Instances[Index];
 
 			FLinearColor Sum(0.f, 0.f, 0.f, 0.f);
 			FLinearColor Peak(0.f, 0.f, 0.f, 0.f);
@@ -1796,24 +1795,26 @@ namespace Grungify
 		return true;
 	}
 
-	bool GenerateComponent(UStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult)
+	/** Static meshes, from a snapshot only (no component or render data access, so it is safe on a worker). */
+	static bool GenerateStaticSnapshot(const FGrungifyMeshSnapshot& Snapshot, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult)
 	{
-		UStaticMesh* Mesh = Component ? Component->GetStaticMesh() : nullptr;
-		const FStaticMeshRenderData* RenderData = Mesh ? Mesh->GetRenderData() : nullptr;
-		if (!RenderData || RenderData->LODResources.Num() == 0 || !Params.Floor)
+		if (Snapshot.LODs.Num() == 0 || !Params.Floor)
 		{
 			return false;
 		}
+		TArray<const FStaticMeshLODResources*> LODs;
+		for (const TUniquePtr<FStaticMeshLODResources>& LOD : Snapshot.LODs)
+		{
+			LODs.Add(LOD.Get());
+		}
 
-		OutResult.Component = Component;
-		OutResult.bNanite = Mesh->HasValidNaniteData();
-
-		const FTransform& Transform = Component->GetComponentTransform();
+		OutResult.bNanite = Snapshot.bNanite;
+		const FTransform& Transform = Snapshot.Transform;
 		const float SharpRef = 1.f - FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(Params.EdgeAngleDeg, 5.f, 170.f) * 0.5f));
 		int32 SurfaceVotes[3] = { 0, 0, 0 };
 
 		// Decide the output from LOD0 (for Nanite meshes this is the fallback mesh, which shares the UV layout).
-		const FStaticMeshLODResources& LOD0 = RenderData->LODResources[0];
+		const FStaticMeshLODResources& LOD0 = *LODs[0];
 		FTopology Topo0;
 		if (!Topo0.Build(LOD0, Transform, SharpRef))
 		{
@@ -1831,7 +1832,12 @@ namespace Grungify
 			|| (Params.MaskOutput == EGrungifyMaskOutput::Auto && (OutResult.bNanite || bSparse || Params.bExtended));
 		if (bWantsTexture)
 		{
-			OutResult.MaskUV = ValidateMaskUVs(LOD0, Transform, Params.MaskUVChannel);
+			OutResult.MaskUV = ValidateMaskUVs(LOD0, Transform, Params.MaskUVChannel, &Params);
+			if (Params.CancelRequested())
+			{
+				OutResult.bCancelled = true;
+				return false;
+			}
 		}
 		const bool bUVsUsable = bHasMaskUV && (!OutResult.MaskUV.bChecked || OutResult.MaskUV.Verdict != TEXT("failed"));
 
@@ -1878,7 +1884,7 @@ namespace Grungify
 		else
 		{
 			OutResult.Output = EGrungifyMaskOutput::VertexColor;
-			BakeVertexColors(*RenderData, Transform, Context, Params, SharpRef, OutResult, SurfaceVotes);
+			BakeVertexColors(LODs, Transform, Context, Params, SharpRef, OutResult, SurfaceVotes);
 			if (OutResult.bCancelled)
 			{
 				return false;
@@ -1897,7 +1903,7 @@ namespace Grungify
 
 		if (Params.ScatterDensity > 0.f)
 		{
-			CollectScatterSamples(Topo0, LOD0.VertexBuffers.StaticMeshVertexBuffer, Context, Params, OutResult, Params.Seed ^ GetTypeHash(Component->GetPathName()));
+			CollectScatterSamples(Topo0, LOD0.VertexBuffers.StaticMeshVertexBuffer, Context, Params, OutResult, Params.Seed ^ GetTypeHash(Snapshot.Path));
 			if (OutResult.bCancelled)
 			{
 				return false;
@@ -2012,11 +2018,29 @@ namespace Grungify
 			{
 				return 0;
 			}
-			// No public derived-data key for skeletal render data; its LOD0 shape changes whenever the mesh is rebuilt.
+			// No public derived-data key for skeletal render data, so hash LOD0's content: positions, every UV channel and the
+			// indices. Edits that keep the same vertex count (moved vertices, re-unwrapped UVs) change it too.
 			const FSkeletalMeshLODRenderData& LOD0 = RenderData->LODRenderData[0];
-			uint32 Hash = HashCombine(GetTypeHash(LOD0.GetNumVertices()), GetTypeHash(LOD0.GetTotalFaces()));
-			Hash = HashCombine(Hash, GetTypeHash(Asset->GetBounds().BoxExtent));
-			return HashCombine(Hash, GetTypeHash(LOD0.RenderSections.Num()));
+			const FPositionVertexBuffer& Positions = LOD0.StaticVertexBuffers.PositionVertexBuffer;
+			const FStaticMeshVertexBuffer& Attributes = LOD0.StaticVertexBuffers.StaticMeshVertexBuffer;
+			uint32 Hash = HashCombine(GetTypeHash(LOD0.GetNumVertices()), GetTypeHash(LOD0.RenderSections.Num()));
+			if (Positions.GetVertexData() && Attributes.GetTexCoordData() && Attributes.GetNumVertices() == Positions.GetNumVertices())
+			{
+				const uint32 NumUVs = Attributes.GetNumTexCoords();
+				for (uint32 V = 0; V < Positions.GetNumVertices(); ++V)
+				{
+					const FVector3f P = Positions.VertexPosition(V);
+					Hash = FCrc::MemCrc32(&P, sizeof(P), Hash);
+					for (uint32 UV = 0; UV < NumUVs; ++UV)
+					{
+						const FVector2f T = Attributes.GetVertexUV(V, UV);
+						Hash = FCrc::MemCrc32(&T, sizeof(T), Hash);
+					}
+				}
+			}
+			TArray<uint32> Indices;
+			LOD0.MultiSizeIndexContainer.GetIndexBuffer(Indices);
+			return Indices.Num() > 0 ? FCrc::MemCrc32(Indices.GetData(), Indices.Num() * sizeof(uint32), Hash) : Hash;
 		}
 		return 0;
 	}
@@ -2086,26 +2110,17 @@ namespace Grungify
 		return true;
 	}
 
-	bool GenerateSkinned(USkeletalMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& InParams, FGrungifyComponentResult& OutResult)
+	static bool GenerateSkinnedSnapshot(const FGrungifyMeshSnapshot& Snapshot, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& InParams, FGrungifyComponentResult& OutResult)
 	{
-		const USkinnedAsset* Asset = Component ? Component->GetSkinnedAsset() : nullptr;
-		const FSkeletalMeshRenderData* RenderData = Asset ? Asset->GetResourceForRendering() : nullptr;
-		if (!RenderData || RenderData->LODRenderData.Num() == 0 || !InParams.Floor)
+		if (Snapshot.LODs.Num() == 0 || !InParams.Floor)
 		{
 			return false;
 		}
-
-		OutResult.Component = Component;
 		OutResult.bNanite = false;
-		FStaticMeshLODResources LOD(false); // Stack-owned CPU copy: no intrusive reference for its destructor to release.
-		if (!CopySkinnedLOD(RenderData->LODRenderData[0], *Asset, LOD))
-		{
-			OutResult.Notes += TEXT("LOD0 vertex data isn't readable on the CPU. ");
-			return false;
-		}
+		const FStaticMeshLODResources& LOD = *Snapshot.LODs[0];
 
-		// The reference pose at the component's current placement: wear follows where the mesh stands now.
-		const FTransform& Transform = Component->GetComponentTransform();
+		// The reference pose at the component's placement when snapshotted: wear follows where the mesh stood.
+		const FTransform& Transform = Snapshot.Transform;
 		const float SharpRef = 1.f - FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(InParams.EdgeAngleDeg, 5.f, 170.f) * 0.5f));
 		FTopology Topo;
 		if (!Topo.Build(LOD, Transform, SharpRef))
@@ -2120,11 +2135,11 @@ namespace Grungify
 		FGrungifyUVReport Report;
 		if (NumUVs > Params.MaskUVChannel)
 		{
-			Report = ValidateMaskUVs(LOD, Transform, Params.MaskUVChannel);
+			Report = ValidateMaskUVs(LOD, Transform, Params.MaskUVChannel, &Params);
 		}
 		if ((NumUVs <= Params.MaskUVChannel || Report.Verdict == TEXT("failed")) && Params.MaskUVChannel != 0 && NumUVs > 0)
 		{
-			const FGrungifyUVReport UV0 = ValidateMaskUVs(LOD, Transform, 0);
+			const FGrungifyUVReport UV0 = ValidateMaskUVs(LOD, Transform, 0, &Params);
 			if (UV0.Verdict != TEXT("failed"))
 			{
 				OutResult.Notes += FString::Printf(TEXT("UV%d %s; used UV0 for the mask texture. "), Params.MaskUVChannel,
@@ -2160,6 +2175,154 @@ namespace Grungify
 		}
 		OutResult.DominantSurface = EGrungifySurfaceType(Best + 1);
 		return true;
+	}
+
+	namespace
+	{
+		/** CPU copy of a static mesh LOD (positions, tangents, every UV channel, indices, sections). */
+		bool CopyStaticLOD(const FStaticMeshLODResources& Source, FStaticMeshLODResources& LOD)
+		{
+			const FPositionVertexBuffer& Positions = Source.VertexBuffers.PositionVertexBuffer;
+			const FStaticMeshVertexBuffer& Attributes = Source.VertexBuffers.StaticMeshVertexBuffer;
+			const uint32 NumVerts = Positions.GetNumVertices();
+			if (NumVerts == 0 || !Positions.GetVertexData() || !Attributes.GetTangentData() || !Attributes.GetTexCoordData()
+				|| Attributes.GetNumVertices() != NumVerts)
+			{
+				return false;
+			}
+			const uint32 NumUVs = Attributes.GetNumTexCoords();
+			LOD.VertexBuffers.PositionVertexBuffer.Init(NumVerts);
+			FStaticMeshVertexBuffer& Copy = LOD.VertexBuffers.StaticMeshVertexBuffer;
+			Copy.SetUseFullPrecisionUVs(true);
+			Copy.Init(NumVerts, NumUVs);
+			for (uint32 V = 0; V < NumVerts; ++V)
+			{
+				LOD.VertexBuffers.PositionVertexBuffer.VertexPosition(V) = Positions.VertexPosition(V);
+				Copy.SetVertexTangents(V, Attributes.VertexTangentX(V), Attributes.VertexTangentY(V), Attributes.VertexTangentZ(V));
+				for (uint32 UV = 0; UV < NumUVs; ++UV)
+				{
+					Copy.SetVertexUV(V, UV, Attributes.GetVertexUV(V, UV));
+				}
+			}
+			TArray<uint32> Indices;
+			Source.IndexBuffer.GetCopy(Indices);
+			LOD.IndexBuffer.SetIndices(Indices, EIndexBufferStride::Force32Bit);
+			LOD.Sections = Source.Sections;
+			return Indices.Num() >= 3;
+		}
+	}
+
+	bool SnapshotMesh(UMeshComponent* Component, FGrungifyMeshSnapshot& Out)
+	{
+		Out = FGrungifyMeshSnapshot();
+		if (!IsValid(Component))
+		{
+			return false;
+		}
+		Out.Path = Component->GetPathName();
+		Out.Transform = Component->GetComponentTransform();
+
+		if (UInstancedStaticMeshComponent* Instanced = Cast<UInstancedStaticMeshComponent>(Component))
+		{
+			const UStaticMesh* Mesh = Instanced->GetStaticMesh();
+			if (!Mesh)
+			{
+				return false;
+			}
+			Out.Kind = FGrungifyMeshSnapshot::EKind::Instanced;
+			Out.bNanite = Mesh->HasValidNaniteData();
+			Out.LocalBounds = Mesh->GetBoundingBox();
+			Out.Instances.Reserve(Instanced->GetInstanceCount());
+			for (int32 Index = 0; Index < Instanced->GetInstanceCount(); ++Index)
+			{
+				FTransform Instance;
+				Instanced->GetInstanceTransform(Index, Instance, /*bWorldSpace*/ true);
+				Out.Instances.Add(Instance);
+			}
+			return true;
+		}
+		if (UStaticMeshComponent* Static = Cast<UStaticMeshComponent>(Component))
+		{
+			const UStaticMesh* Mesh = Static->GetStaticMesh();
+			const FStaticMeshRenderData* RenderData = Mesh ? Mesh->GetRenderData() : nullptr;
+			if (!RenderData || RenderData->LODResources.Num() == 0)
+			{
+				return false;
+			}
+			Out.Kind = FGrungifyMeshSnapshot::EKind::Static;
+			Out.bNanite = Mesh->HasValidNaniteData();
+			for (int32 LODIndex = 0; LODIndex < RenderData->LODResources.Num(); ++LODIndex)
+			{
+				TUniquePtr<FStaticMeshLODResources> Copy = MakeUnique<FStaticMeshLODResources>(false);
+				if (!CopyStaticLOD(RenderData->LODResources[LODIndex], *Copy))
+				{
+					// A later LOD that isn't readable only costs its vertex colours; LOD0 is required.
+					if (LODIndex == 0)
+					{
+						return false;
+					}
+					break;
+				}
+				Out.LODs.Add(MoveTemp(Copy));
+			}
+			return true;
+		}
+		if (USkeletalMeshComponent* Skeletal = Cast<USkeletalMeshComponent>(Component))
+		{
+			const USkinnedAsset* Asset = Skeletal->GetSkinnedAsset();
+			const FSkeletalMeshRenderData* RenderData = Asset ? Asset->GetResourceForRendering() : nullptr;
+			if (!RenderData || RenderData->LODRenderData.Num() == 0)
+			{
+				return false;
+			}
+			Out.Kind = FGrungifyMeshSnapshot::EKind::Skeletal;
+			TUniquePtr<FStaticMeshLODResources> Copy = MakeUnique<FStaticMeshLODResources>(false);
+			if (!CopySkinnedLOD(RenderData->LODRenderData[0], *Asset, *Copy))
+			{
+				return false;
+			}
+			Out.LODs.Add(MoveTemp(Copy));
+			return true;
+		}
+		return false;
+	}
+
+	bool GenerateFromSnapshot(const FGrungifyMeshSnapshot& Snapshot, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult)
+	{
+		switch (Snapshot.Kind)
+		{
+		case FGrungifyMeshSnapshot::EKind::Static: return GenerateStaticSnapshot(Snapshot, Context, Params, OutResult);
+		case FGrungifyMeshSnapshot::EKind::Skeletal: return GenerateSkinnedSnapshot(Snapshot, Context, Params, OutResult);
+		case FGrungifyMeshSnapshot::EKind::Instanced: return GenerateInstancedSnapshot(Snapshot, Context, Params, OutResult);
+		default: return false;
+		}
+	}
+
+	// Game-thread conveniences for callers holding a component.
+	bool GenerateComponent(UStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult)
+	{
+		FGrungifyMeshSnapshot Snapshot;
+		OutResult.Component = Component;
+		return SnapshotMesh(Component, Snapshot) && Snapshot.Kind == FGrungifyMeshSnapshot::EKind::Static && GenerateFromSnapshot(Snapshot, Context, Params, OutResult);
+	}
+
+	bool GenerateInstanced(UInstancedStaticMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult)
+	{
+		FGrungifyMeshSnapshot Snapshot;
+		OutResult.Component = Component;
+		return SnapshotMesh(Component, Snapshot) && GenerateFromSnapshot(Snapshot, Context, Params, OutResult);
+	}
+
+	bool GenerateSkinned(USkeletalMeshComponent* Component, const FGrungifyComponentContext& Context, const FGrungifyGenerationParams& Params, FGrungifyComponentResult& OutResult)
+	{
+		FGrungifyMeshSnapshot Snapshot;
+		OutResult.Component = Component;
+		if (!SnapshotMesh(Component, Snapshot))
+		{
+			OutResult.Notes += TEXT("LOD0 vertex data isn't readable on the CPU. ");
+			return false;
+		}
+		return GenerateFromSnapshot(Snapshot, Context, Params, OutResult);
 	}
 
 #if WITH_DEV_AUTOMATION_TESTS
