@@ -580,6 +580,8 @@ private:
 	void ApplyInternal(const TCHAR* Operation);
 	/** Bake: standalone texture and material-instance assets instead of component-owned ones. */
 	bool WriteBakedAssets(const FGrungifyComponentResult& Result);
+	/** Why the last WriteBakedAssets refused to write (an existing asset it doesn't own), empty otherwise. */
+	FString LastBakeRefusal;
 	/** Lights, fires, fasteners, stamps, traffic paths and traced water for this run. */
 	void GatherScene(FGrungifyGenerationJob& Job, const FBox& ZoneBox);
 

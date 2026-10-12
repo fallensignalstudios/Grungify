@@ -468,6 +468,10 @@ Bake always asks for texture output. Meshes without the mask UV channel fall bac
 
 - **Touch-ups:** with **Export Baked PNGs** on, each texture is also written to `Saved/Grungify/Bakes/<Zone>/<Name>.png` and set as its import source. Paint over the PNG in any image editor, keeping it linear: the channels are masks, not colours. Then right-click the texture and choose **Reimport**.
 - **Re-baking** updates the same assets in place, so references stay valid. It overwrites the PNGs, so keep your edited copies.
+- **Never someone else's asset (0.10).** A bake reuses an existing `T_Grungify_…` or `MI_Grungify_…` only if Grungify baked it for this same component. Every baked texture and instance carries a bake record; a texture from an older bake is accepted when its own baked instance binds it.
+  - **What's refused:** an artist's texture or instance with the same name, another class, or another component's bake.
+  - **Before any write:** every name is checked before the first byte is written. The component is reported **failed** with the reason, and nothing at those paths changes.
+  - **To proceed:** rename or move the existing assets, or set another Bake Folder.
 - **Clear** restores the meshes' original materials, but the baked assets stay. Delete them from the Content Browser if you no longer need them.
 - **Sharing:** baked assets can be used by other levels, referenced by hand-authored materials, and reviewed in source control as normal textures.
 - **Portable:** a baked instance works on any component that draws the **same mesh build**, even one Grungify never touched (no custom primitive data). The instance carries its own mask mode, feature scale, seed offset and surface type, used only when the component has none. It does not fit another mesh, or the same mesh after a rebuild that changed its UVs; re-bake for those. Each baked instance records what it was baked for, and `UGrungifyInspectionLibrary.CheckBakeCompatibility(material, component)` says whether it fits and why not.
@@ -820,6 +824,8 @@ These cases should be checked in-editor on a test level, never on production roo
 41. **Local trial:** `Grungify.QuickStart.LocalSlotTrial` passes. By hand, on a hero mesh: `weather_component_slots` with slot 0 and a gate texture. Slot 0 alone weathers, the shared master's other users are unchanged, and one Ctrl+Z restores the level.
 
 42. **Runtime hit path:** `Grungify.RuntimeWear.PerAxisAddressing` and `Grungify.RuntimeWear.ComplexHitUVChannelAndAddressing` pass on a rendering RHI. The second cooks a quad with UVs from hits and traces it, so a failure saying the trace or `AddWearAtHit` didn't paint points at collision cooking, not at the painting.
+
+43. **Bake refusal:** in the HostProject, `Grungify.Bake.RefusesUnrelatedSameNameAssets` passes. An unrelated texture and instance keep their exact bytes and values, a free name isn't created when another is refused, and Grungify's own bake is still reused.
 
 ## Packaging for Fab (5.5–5.8)
 

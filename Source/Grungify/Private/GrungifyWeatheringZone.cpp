@@ -20,6 +20,7 @@
 #include "ImageUtils.h"
 #include "GrungifyCompat.h"
 #include "GrungifyBakeRecord.h"
+#include "Interfaces/Interface_AssetUserData.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "UObject/GarbageCollection.h"
 #include "WorldPartition/DataLayer/DataLayerAsset.h"
@@ -2468,7 +2469,7 @@ bool AGrungifyWeatheringZone::WriteResult(const FGrungifyComponentResult& Result
 	{
 		if (!WriteBakedAssets(Result))
 		{
-			return Fail(TEXT("baked texture or material assets could not be created"));
+			return Fail(LastBakeRefusal.IsEmpty() ? TEXT("baked texture or material assets could not be created") : *LastBakeRefusal);
 		}
 	}
 	else if (bTexture)
@@ -2537,6 +2538,120 @@ bool AGrungifyWeatheringZone::WriteBakedAssets(const FGrungifyComponentResult& R
 	const FString Base = SanitizeAssetName(FString::Printf(TEXT("%s_%s_%s"), *GetActorNameOrLabel(),
 		ComponentOwner ? *ComponentOwner->GetActorNameOrLabel() : TEXT("NoOwner"), *Component->GetName()));
 	const FString PngDirectory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Grungify"), TEXT("Bakes"), SanitizeAssetName(GetActorNameOrLabel()));
+	const FString TextureName = TEXT("T_Grungify_") + Base;
+	const FString ExtendedName = TextureName + TEXT("_Ext");
+	auto InstanceName = [&Base](int32 Slot) { return FString::Printf(TEXT("MI_Grungify_%s_%d"), *Base, Slot); };
+	LastBakeRefusal.Reset();
+
+	// Re-baking reuses only assets Grungify baked for this component. Anything else at those names (an artist's
+	// texture, another tool's instance, an asset of another class) is refused before a single byte is written.
+	{
+		const FString ComponentPath = Component->GetPathName();
+		auto RecordOf = [](UObject* Asset) -> const UGrungifyBakeRecord*
+		{
+			IInterface_AssetUserData* Owner = Cast<IInterface_AssetUserData>(Asset);
+			return Owner ? Cast<UGrungifyBakeRecord>(Owner->GetAssetUserDataOfClass(UGrungifyBakeRecord::StaticClass())) : nullptr;
+		};
+		auto Existing = [&Folder](const FString& Name) -> UObject*
+		{
+			const FString PackageName = Folder / Name;
+			return StaticLoadObject(UObject::StaticClass(), nullptr, *(PackageName + TEXT(".") + Name), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		};
+		auto PackageExists = [&Folder](const FString& Name)
+		{
+			const FString PackageName = Folder / Name;
+			return FPackageName::DoesPackageExist(PackageName) || FindPackage(nullptr, *PackageName) != nullptr;
+		};
+		// Bakes from before 0.10 put no record on textures: their own baked instance vouches for them.
+		auto VouchedByOurInstance = [&](const UObject* Texture)
+		{
+			for (int32 Slot = 0; Slot < Component->GetNumMaterials(); ++Slot)
+			{
+				UMaterialInstanceConstant* Instance = Cast<UMaterialInstanceConstant>(Existing(InstanceName(Slot)));
+				const UGrungifyBakeRecord* Record = Instance ? RecordOf(Instance) : nullptr;
+				if (!Record || Record->SourceComponent != ComponentPath)
+				{
+					continue;
+				}
+				UTexture* Bound = nullptr;
+				for (const FName Parameter : { Grungify::MaskTextureParameterName(), Grungify::ExtendedMaskTextureParameterName() })
+				{
+					if (Instance->GetTextureParameterValue(FMaterialParameterInfo(Parameter), Bound, /*bOveriddenOnly*/ true) && Bound == Texture)
+					{
+						return true;
+					}
+				}
+			}
+			return false;
+		};
+
+		TArray<TPair<FString, UClass*>> Targets;
+		Targets.Emplace(TextureName, UTexture2D::StaticClass());
+		if (Result.ExtendedPixels.Num() > 0)
+		{
+			Targets.Emplace(ExtendedName, UTexture2D::StaticClass());
+		}
+		for (int32 Slot = 0; Slot < Component->GetNumMaterials(); ++Slot)
+		{
+			if (Result.MaterialSurfaces.IsValidIndex(Slot) && Result.MaterialSurfaces[Slot] != EGrungifySurfaceType::Auto && Component->GetMaterial(Slot))
+			{
+				Targets.Emplace(InstanceName(Slot), UMaterialInstanceConstant::StaticClass());
+			}
+		}
+		TArray<FString> Refusals;
+		for (const TPair<FString, UClass*>& Target : Targets)
+		{
+			if (!PackageExists(Target.Key))
+			{
+				continue;
+			}
+			UObject* Asset = Existing(Target.Key);
+			const UGrungifyBakeRecord* Record = Asset ? RecordOf(Asset) : nullptr;
+			if (!Asset)
+			{
+				Refusals.Add(FString::Printf(TEXT("%s exists but holds no asset of that name"), *(Folder / Target.Key)));
+			}
+			else if (!Asset->IsA(Target.Value))
+			{
+				Refusals.Add(FString::Printf(TEXT("%s is a %s, not a %s"), *(Folder / Target.Key), *Asset->GetClass()->GetName(), *Target.Value->GetName()));
+			}
+			else if (Record ? Record->SourceComponent != ComponentPath
+				: !(Target.Value == UTexture2D::StaticClass() && VouchedByOurInstance(Asset)))
+			{
+				Refusals.Add(FString::Printf(TEXT("%s wasn't baked by Grungify for this component%s"), *(Folder / Target.Key),
+					Record ? *FString::Printf(TEXT(" (it was baked for %s)"), *Record->SourceComponent) : TEXT("")));
+			}
+		}
+		if (Refusals.Num() > 0)
+		{
+			LastBakeRefusal = FString::Printf(TEXT("bake refused, nothing written: %s. Rename or move those assets, or set another Bake Folder."),
+				*FString::Join(Refusals, TEXT("; ")));
+			LastReport.Warnings.Add(FString::Printf(TEXT("%s: %s"), *Component->GetPathName(), *LastBakeRefusal));
+			return false;
+		}
+	}
+
+	// What it was baked for, on every baked asset, so reuse (and re-baking) is checked rather than guessed.
+	auto StampRecord = [&](UObject* Asset, int32 Slot)
+	{
+		IInterface_AssetUserData* Owner = Cast<IInterface_AssetUserData>(Asset);
+		if (!Owner)
+		{
+			return;
+		}
+		Owner->RemoveUserDataOfClass(UGrungifyBakeRecord::StaticClass());
+		UGrungifyBakeRecord* Record = NewObject<UGrungifyBakeRecord>(Asset, NAME_None, RF_Transactional);
+		Record->SourceMesh = FSoftObjectPath(Grungify::MeshAssetOf(Component));
+		Record->SourceMeshBuild = int64(Grungify::MeshBuildHash(Component));
+		Record->UVChannel = Result.MaskUVChannelUsed != INDEX_NONE ? Result.MaskUVChannelUsed : UGrungifySettings::Get()->MaskUVChannel;
+		Record->TextureSize = Result.TextureSize;
+		Record->Slot = Slot;
+		Record->SourceComponent = Component->GetPathName();
+		Record->Zone = GetActorNameOrLabel();
+		Record->Seed = Seed;
+		Record->BakedAt = FDateTime::UtcNow().ToIso8601();
+		Owner->AddAssetUserData(Record);
+	};
 
 	// Re-baking updates the same assets, so materials and levels that reference them stay valid.
 	auto FindOrCreate = [this, &Folder](UClass* Class, const FString& Name) -> UObject*
@@ -2575,6 +2690,7 @@ bool AGrungifyWeatheringZone::WriteBakedAssets(const FGrungifyComponentResult& R
 		Texture->MipGenSettings = TMGS_FromTextureGroup;
 		Texture->AddressX = TA_Clamp;
 		Texture->AddressY = TA_Clamp;
+		StampRecord(Texture, INDEX_NONE);
 
 		if (bExportBakedPNGs)
 		{
@@ -2600,8 +2716,8 @@ bool AGrungifyWeatheringZone::WriteBakedAssets(const FGrungifyComponentResult& R
 		return Texture;
 	};
 
-	UTexture2D* Texture = BakeTexture(TEXT("T_Grungify_") + Base, Result.TexturePixels);
-	UTexture2D* ExtendedTexture = Result.ExtendedPixels.Num() > 0 ? BakeTexture(TEXT("T_Grungify_") + Base + TEXT("_Ext"), Result.ExtendedPixels) : nullptr;
+	UTexture2D* Texture = BakeTexture(TextureName, Result.TexturePixels);
+	UTexture2D* ExtendedTexture = Result.ExtendedPixels.Num() > 0 ? BakeTexture(ExtendedName, Result.ExtendedPixels) : nullptr;
 	if (!Texture || (Result.ExtendedPixels.Num() > 0 && !ExtendedTexture) || Result.MaterialSurfaces.Num() != Component->GetNumMaterials())
 	{
 		return false;
@@ -2614,8 +2730,7 @@ bool AGrungifyWeatheringZone::WriteBakedAssets(const FGrungifyComponentResult& R
 		{
 			continue;
 		}
-		UMaterialInstanceConstant* Instance = Cast<UMaterialInstanceConstant>(FindOrCreate(UMaterialInstanceConstant::StaticClass(),
-			FString::Printf(TEXT("MI_Grungify_%s_%d"), *Base, Slot)));
+		UMaterialInstanceConstant* Instance = Cast<UMaterialInstanceConstant>(FindOrCreate(UMaterialInstanceConstant::StaticClass(), InstanceName(Slot)));
 		if (!Instance || Instance == Parent)
 		{
 			return false;
@@ -2636,19 +2751,7 @@ bool AGrungifyWeatheringZone::WriteBakedAssets(const FGrungifyComponentResult& R
 		Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Baked Surface Type")), float(int32(Result.DominantSurface) - 1));
 		Instance->PostEditChange();
 
-		// What it was baked for, so reuse on another component can be checked rather than guessed.
-		Instance->RemoveUserDataOfClass(UGrungifyBakeRecord::StaticClass());
-		UGrungifyBakeRecord* Record = NewObject<UGrungifyBakeRecord>(Instance, NAME_None, RF_Transactional);
-		Record->SourceMesh = FSoftObjectPath(Grungify::MeshAssetOf(Component));
-		Record->SourceMeshBuild = int64(Grungify::MeshBuildHash(Component));
-		Record->UVChannel = Result.MaskUVChannelUsed != INDEX_NONE ? Result.MaskUVChannelUsed : UGrungifySettings::Get()->MaskUVChannel;
-		Record->TextureSize = Result.TextureSize;
-		Record->Slot = Slot;
-		Record->SourceComponent = Component->GetPathName();
-		Record->Zone = GetActorNameOrLabel();
-		Record->Seed = Seed;
-		Record->BakedAt = FDateTime::UtcNow().ToIso8601();
-		Instance->AddAssetUserData(Record);
+		StampRecord(Instance, Slot);
 		Instance->MarkPackageDirty();
 		Component->SetMaterial(Slot, Instance);
 	}
