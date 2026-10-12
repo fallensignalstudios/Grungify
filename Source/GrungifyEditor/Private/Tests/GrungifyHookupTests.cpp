@@ -7,6 +7,7 @@
 #include "Editor.h"
 #include "MaterialEditingLibrary.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialExpression.h"
 #include "Materials/MaterialExpressionMakeMaterialAttributes.h"
 #include "Materials/MaterialExpressionMaterialFunctionCall.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
@@ -121,6 +122,71 @@ bool FGrungifyHookupRoundTripTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Redo Remove restores original expression count"), Material->GetExpressions().Num(), OriginalCount);
 
 	// Undo records may still reference the fixture. Let their lifetime/GC release it normally rather than marking it garbage.
+	return !HasAnyErrors();
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGrungifyHookupArtistEditsTest, "Grungify.Content.MaterialHookupPreservesArtistEdits",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FGrungifyHookupArtistEditsTest::RunTest(const FString& Parameters)
+{
+	TStrongObjectPtr<UPackage> KeepPackageAlive(CreatePackage(TEXT("/Game/GrungifyAutomation/M_HookupArtistEdits")));
+	TStrongObjectPtr<UMaterial> KeepMaterialAlive(NewObject<UMaterial>(KeepPackageAlive.Get(), TEXT("M_HookupArtistEdits"), RF_Transient | RF_Transactional));
+	UMaterial* Material = KeepMaterialAlive.Get();
+	UMaterialEditorOnlyData* Data = Material->GetEditorOnlyData();
+	if (!TestNotNull(TEXT("Editor data"), Data) || !TestNotNull(TEXT("Editor undo service"), GEditor)) { return false; }
+
+	UMaterialExpressionVectorParameter* Color = Cast<UMaterialExpressionVectorParameter>(
+		UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionVectorParameter::StaticClass(), -500, 0));
+	Color->ParameterName = TEXT("Tint");
+	Data->BaseColor.Connect(0, Color);
+
+	const FGrungifyHookupResult Added = UGrungifyMaterialHookup::AddGrungifyToMaterial(Material, /*bBackup*/ false);
+	if (!TestEqual(TEXT("Added"), Added.Outcome, FString(TEXT("added")))) { return false; }
+	UMaterialExpressionMaterialFunctionCall* Call = Cast<UMaterialExpressionMaterialFunctionCall>(Data->BaseColor.Expression);
+	const UGrungifyHookupRecord* Record = Cast<UGrungifyHookupRecord>(Material->GetAssetUserDataOfClass(UGrungifyHookupRecord::StaticClass()));
+	if (!TestNotNull(TEXT("Function call"), Call) || !TestNotNull(TEXT("Ownership record"), Record)) { return false; }
+	TestTrue(TEXT("Record owns the call"), Record->Nodes.Contains(Call));
+	TestFalse(TEXT("Record never owns the artist's nodes"), Record->Nodes.Contains(Color));
+	TestTrue(TEXT("Record has an install id"), Record->InstallId.IsValid());
+
+	// Artist edit upstream: a new tint replaces the original feeding the function.
+	UMaterialExpressionVectorParameter* NewTint = Cast<UMaterialExpressionVectorParameter>(
+		UMaterialEditingLibrary::CreateMaterialExpression(Material, UMaterialExpressionVectorParameter::StaticClass(), -700, 0));
+	NewTint->ParameterName = TEXT("New Tint");
+	UMaterialEditingLibrary::ConnectMaterialExpressions(NewTint, TEXT(""), Call, TEXT("BaseColor"));
+
+	// Artist edit downstream: emissive now reads the weathered colour, so removal would silently cut it.
+	UMaterialEditingLibrary::ConnectMaterialProperty(Call, TEXT("BaseColor"), MP_EmissiveColor);
+	// Artist copy of the call (same description tag), not connected: never the installation's to delete.
+	UMaterialExpression* Copy = UMaterialEditingLibrary::DuplicateMaterialExpression(Material, nullptr, Call);
+	// A pasted copy keeps its input links, some to the installation's own constants; reading those would itself be a
+	// dependency. Here the artist has disconnected it.
+	if (Copy)
+	{
+		for (FExpressionInputIterator It{ Copy }; It; ++It)
+		{
+			It->Expression = nullptr;
+		}
+	}
+
+	const FGrungifyHookupResult Refused = UGrungifyMaterialHookup::RemoveGrungifyFromMaterial(Material);
+	TestEqual(TEXT("Remove refuses while an artist edit depends on Grungify"), Refused.Outcome, FString(TEXT("skipped")));
+	TestTrue(TEXT("Refusal names the dependency"), Refused.Notes.Contains(TEXT("depend")));
+	TestTrue(TEXT("Refusal changes nothing"), Data->BaseColor.Expression == Call && Data->EmissiveColor.Expression == Call);
+
+	Data->EmissiveColor.Expression = nullptr;
+	const FGrungifyHookupResult Removed = UGrungifyMaterialHookup::RemoveGrungifyFromMaterial(Material);
+	TestEqual(TEXT("Removed once nothing depends on it"), Removed.Outcome, FString(TEXT("removed")));
+	TestTrue(TEXT("The artist's upstream edit is kept"), Data->BaseColor.Expression == NewTint);
+	TestTrue(TEXT("The artist's copy is kept"), Copy && Material->GetExpressions().Contains(Copy));
+	TestFalse(TEXT("The installed call is gone"), Material->GetExpressions().Contains(Call));
+	TestNull(TEXT("The record is gone"), Material->GetAssetUserDataOfClass(UGrungifyHookupRecord::StaticClass()));
+
+	TestTrue(TEXT("Remove can be undone"), GEditor->UndoTransaction());
+	TestNotNull(TEXT("Undo brings the record back"), Material->GetAssetUserDataOfClass(UGrungifyHookupRecord::StaticClass()));
+	TestTrue(TEXT("Undo restores the routing"), Data->BaseColor.Expression == Call);
 	return !HasAnyErrors();
 }
 

@@ -22,6 +22,7 @@
 #include "MaterialShared.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialAttributeDefinitionMap.h"
+#include "Materials/MaterialExpression.h"
 #include "Materials/MaterialExpressionConstant.h"
 #include "Materials/MaterialExpressionConstant3Vector.h"
 #include "Materials/MaterialExpressionGetMaterialAttributes.h"
@@ -258,7 +259,12 @@ namespace
 	}
 
 	/** First-time copy of the untouched material; later Adds keep that original backup. */
-	FString BackUp(UMaterial* Material)
+	UGrungifyHookupRecord* FindRecord(UMaterialInterface* Material)
+	{
+		return Material ? Cast<UGrungifyHookupRecord>(Material->GetAssetUserDataOfClass(UGrungifyHookupRecord::StaticClass())) : nullptr;
+	}
+
+	FString BackUp(UMaterial* Material, FGuid& OutStateId)
 	{
 		FString Relative = Material->GetPackage()->GetName();
 		Relative.RemoveFromStart(TEXT("/Game"));
@@ -269,8 +275,15 @@ namespace
 		{
 			// Never overwrite a first backup, and do not mistake an unrelated/corrupt asset for one.
 			const FString ObjectPath = PackageName + TEXT(".") + Name;
-			return LoadObject<UMaterial>(nullptr, *ObjectPath, nullptr, LOAD_NoWarn | LOAD_Quiet)
-				? PackageName : FString();
+			UMaterial* Existing = LoadObject<UMaterial>(nullptr, *ObjectPath, nullptr, LOAD_NoWarn | LOAD_Quiet);
+			// Only trust a backup this tool made of this material. (Backups from before 0.7 carry no record and are kept.)
+			const UGrungifyHookupRecord* Marker = FindRecord(Existing);
+			if (!Existing || (Marker && Marker->BackupOf != Material->GetPathName()))
+			{
+				return FString();
+			}
+			OutStateId = Existing->StateId;
+			return PackageName;
 		}
 		// A previous failed save may have left an unsaved duplicate in memory. It is not a disk backup.
 		if (FindPackage(nullptr, *PackageName))
@@ -284,6 +297,16 @@ namespace
 			return FString();
 		}
 		TStrongObjectPtr<UObject> KeepCopyAlive(Copy);
+		if (UMaterial* CopyMaterial = Cast<UMaterial>(Copy))
+		{
+			// Mark the copy as this material's backup (and never as an installation of its own).
+			CopyMaterial->RemoveUserDataOfClass(UGrungifyHookupRecord::StaticClass());
+			UGrungifyHookupRecord* Marker = NewObject<UGrungifyHookupRecord>(CopyMaterial, NAME_None, RF_Transactional);
+			Marker->BackupOf = Material->GetPathName();
+			Marker->InstalledAt = FDateTime::UtcNow().ToIso8601();
+			CopyMaterial->AddAssetUserData(Marker);
+			OutStateId = CopyMaterial->StateId;
+		}
 		return UEditorLoadingAndSavingUtils::SavePackages({ Copy->GetPackage() }, /*bOnlyDirty*/ false)
 			? PackageName : FString();
 	}
@@ -526,6 +549,123 @@ namespace
 	}
 
 	/** Undoes whatever the tool inserted. Returns false if nothing tagged was found. */
+	/** The properties an installation may legitimately drive from its own nodes. */
+	bool IsRoutedProperty(EMaterialProperty Property)
+	{
+		return Property == MP_BaseColor || Property == MP_Roughness || Property == MP_Metallic || Property == MP_Normal
+			|| Property == MP_MaterialAttributes || Property == MP_FrontMaterial || Property == MP_Displacement;
+	}
+
+	/**
+	 * Artist edits that now depend on the installation's nodes: another node reading one of them, or a property other
+	 * than the routed ones connected to one. Removing would silently cut those edits, so Remove refuses instead.
+	 */
+	TArray<FString> DependentsOn(UMaterial* Material, const TSet<UMaterialExpression*>& Nodes)
+	{
+		TArray<FString> Out;
+		for (UMaterialExpression* Expression : Material->GetExpressions())
+		{
+			if (!Expression || Nodes.Contains(Expression))
+			{
+				continue;
+			}
+			for (FExpressionInputIterator It{ Expression }; It; ++It)
+			{
+				if (It->Expression && Nodes.Contains(It->Expression))
+				{
+					Out.Add(FString::Printf(TEXT("node %s reads %s"), *Expression->GetName(), *It->Expression->GetName()));
+				}
+			}
+		}
+		for (int32 Index = 0; Index < MP_MAX; ++Index)
+		{
+			const EMaterialProperty Property = EMaterialProperty(Index);
+			const FExpressionInput* Input = Material->GetExpressionInputForProperty(Property);
+			if (Input && Input->Expression && Nodes.Contains(Input->Expression) && !IsRoutedProperty(Property))
+			{
+				Out.Add(FString::Printf(TEXT("material output %s reads %s"), *FMaterialAttributeDefinitionMap::GetAttributeName(Property), *Input->Expression->GetName()));
+			}
+		}
+		return Out;
+	}
+
+	TSet<UMaterialExpression*> LiveNodes(UMaterial* Material, const UGrungifyHookupRecord& Record)
+	{
+		TSet<UMaterialExpression*> Out;
+		for (UMaterialExpression* Node : Record.Nodes)
+		{
+			if (IsValid(Node) && Material->GetExpressions().Contains(Node))
+			{
+				Out.Add(Node);
+			}
+		}
+		return Out;
+	}
+
+	/**
+	 * Removes exactly the recorded installation. Each routed property is restored from what currently feeds the
+	 * installation's input (so upstream edits made after Add are kept); copies of Grungify nodes are left alone.
+	 */
+	void RemoveRecorded(UMaterial* Material, UMaterialEditorOnlyData* Data, UGrungifyHookupRecord& Record, FGrungifyHookupResult& Result)
+	{
+		const TSet<UMaterialExpression*> Nodes = LiveNodes(Material, Record);
+		UMaterialExpressionMaterialFunctionCall* Call = nullptr;
+		UMaterialExpressionMaterialFunctionCall* Displacement = nullptr;
+		UMaterialExpressionSetMaterialAttributes* Set = nullptr;
+		for (UMaterialExpression* Node : Nodes)
+		{
+			if (UMaterialExpressionMaterialFunctionCall* FunctionCall = Cast<UMaterialExpressionMaterialFunctionCall>(Node))
+			{
+				const bool bDisplacement = FunctionCall->MaterialFunction && FunctionCall->MaterialFunction->GetPathName() == DisplacementFunctionPath;
+				(bDisplacement ? Displacement : Call) = FunctionCall;
+			}
+			Set = Set ? Set : Cast<UMaterialExpressionSetMaterialAttributes>(Node);
+		}
+		Result.Path = Record.Path;
+
+		if (Displacement && Data->Displacement.Expression == Displacement)
+		{
+			const FExpressionInput* Source = FindCallInput(Displacement, TEXT("Displacement"));
+			Source ? CopyConnection(Data->Displacement, *Source) : Disconnect(Data->Displacement);
+		}
+		if (Call && Record.Path.StartsWith(TEXT("substrate")))
+		{
+			if (Data->FrontMaterial.Expression == Call)
+			{
+				const FExpressionInput* Source = FindCallInput(Call, TEXT("Material"));
+				Source ? CopyConnection(Data->FrontMaterial, *Source) : Disconnect(Data->FrontMaterial);
+			}
+		}
+		else if (Record.Path.StartsWith(TEXT("attributes")))
+		{
+			if (Set && Data->MaterialAttributes.Expression == Set && Set->Inputs.Num() > 0)
+			{
+				CopyConnection(Data->MaterialAttributes, Set->Inputs[0]);
+			}
+		}
+		else if (Call)
+		{
+			if (Data->BaseColor.Expression == Call) { RestoreProperty(Material, Data->BaseColor, FindCallInput(Call, TEXT("BaseColor"))); }
+			if (Data->Roughness.Expression == Call) { RestoreProperty(Material, Data->Roughness, FindCallInput(Call, TEXT("Roughness"))); }
+			if (Data->Metallic.Expression == Call) { RestoreProperty(Material, Data->Metallic, FindCallInput(Call, TEXT("Metallic"))); }
+			if (Data->Normal.Expression == Call) { RestoreProperty(Material, Data->Normal, FindCallInput(Call, TEXT("Normal"))); }
+		}
+
+		// RestoreProperty may already have deleted a recorded constant; delete only what is still there.
+		for (UMaterialExpression* Node : Nodes)
+		{
+			if (IsValid(Node) && Material->GetExpressions().Contains(Node))
+			{
+				UMaterialEditingLibrary::DeleteMaterialExpression(Material, Node);
+			}
+		}
+		Material->RemoveUserDataOfClass(UGrungifyHookupRecord::StaticClass());
+		if (!Record.Backup.IsEmpty())
+		{
+			Result.Backup = Record.Backup;
+		}
+	}
+
 	bool RemoveInserted(UMaterial* Material, FGrungifyHookupResult& Result)
 	{
 		UMaterialEditorOnlyData* Data = Material->GetEditorOnlyData();
@@ -759,9 +899,10 @@ FGrungifyHookupResult UGrungifyMaterialHookup::AddGrungifyToMaterial(UMaterialIn
 		return Result;
 	}
 
+	FGuid BackupStateId;
 	if (bBackup)
 	{
-		Result.Backup = BackUp(Material);
+		Result.Backup = BackUp(Material, BackupStateId);
 		if (Result.Backup.IsEmpty())
 		{
 			Result.Outcome = TEXT("failed");
@@ -773,6 +914,12 @@ FGrungifyHookupResult UGrungifyMaterialHookup::AddGrungifyToMaterial(UMaterialIn
 	CloseEditors(Material);
 	FScopedTransaction Transaction(LOCTEXT("AddGrungifyTransaction", "Add Grungify to Material"));
 	Material->Modify();
+	// Everything that exists now is the artist's; whatever appears during insertion is this installation's.
+	TSet<UMaterialExpression*> Existing;
+	for (UMaterialExpression* Expression : Material->GetExpressions())
+	{
+		Existing.Add(Expression);
+	}
 	bool bInserted = false;
 	switch (Path)
 	{
@@ -797,6 +944,30 @@ FGrungifyHookupResult UGrungifyMaterialHookup::AddGrungifyToMaterial(UMaterialIn
 		Result.Notes += bInserted ? FString::Printf(TEXT("the hooked-up material didn't compile (%s); change reverted"), *Errors) : TEXT("; change reverted");
 		return Result;
 	}
+
+	// Ownership record: exactly which nodes this installation owns, which properties it routes, and its backup.
+	UGrungifyHookupRecord* Record = NewObject<UGrungifyHookupRecord>(Material, NAME_None, RF_Transactional);
+	Record->InstallId = FGuid::NewGuid();
+	Record->Path = Result.Path;
+	for (UMaterialExpression* Expression : Material->GetExpressions())
+	{
+		if (Expression && !Existing.Contains(Expression))
+		{
+			Record->Nodes.Add(Expression);
+		}
+	}
+	Record->RoutedProperties = Path == EHookupPath::Substrate ? TArray<FString>{ TEXT("FrontMaterial") }
+		: Path == EHookupPath::Attributes ? TArray<FString>{ TEXT("MaterialAttributes") }
+		: TArray<FString>{ TEXT("BaseColor"), TEXT("Roughness"), TEXT("Metallic"), TEXT("Normal") };
+	if (Data->Displacement.Expression && Record->Nodes.Contains(Data->Displacement.Expression))
+	{
+		Record->RoutedProperties.Add(TEXT("Displacement"));
+	}
+	Record->Backup = Result.Backup;
+	Record->BackupStateId = BackupStateId;
+	Record->InstalledAt = FDateTime::UtcNow().ToIso8601();
+	Material->RemoveUserDataOfClass(UGrungifyHookupRecord::StaticClass());
+	Material->AddAssetUserData(Record);
 
 	Material->MarkPackageDirty();
 	Result.Outcome = TEXT("added");
@@ -831,7 +1002,23 @@ FGrungifyHookupResult UGrungifyMaterialHookup::RemoveGrungifyFromMaterial(UMater
 	{
 		if (Expression) { Expression->Modify(); }
 	}
-	if (!RemoveInserted(Material, Result))
+	UGrungifyHookupRecord* Record = FindRecord(Material);
+	if (Record && Record->BackupOf.IsEmpty())
+	{
+		UMaterialEditorOnlyData* Data = Material->GetEditorOnlyData();
+		const TArray<FString> Dependents = Data ? DependentsOn(Material, LiveNodes(Material, *Record)) : TArray<FString>();
+		if (!Data || Dependents.Num() > 0)
+		{
+			Transaction.Cancel();
+			Result.Outcome = TEXT("skipped");
+			Result.Notes = Data
+				? FString::Printf(TEXT("artist edits depend on Grungify's nodes (%s); disconnect them first, then Remove again"), *FString::Join(Dependents, TEXT("; ")))
+				: TEXT("no editor data");
+			return Result;
+		}
+		RemoveRecorded(Material, Data, *Record, Result);
+	}
+	else if (!RemoveInserted(Material, Result))
 	{
 		Transaction.Cancel();
 		Result.Outcome = TEXT("skipped");

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/AssetUserData.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "GrungifyMaterialHookup.generated.h"
 
@@ -31,6 +32,50 @@ struct FGrungifyHookupResult
 
 	UPROPERTY(BlueprintReadOnly, Category = "Grungify")
 	FString Backup;
+};
+
+/**
+ * Editor-only ownership record of one hookup installation, stored on the material (and, marking it as a backup, on
+ * the backup copy). Remove uses it to touch exactly the nodes this installation inserted (not copies an artist pasted,
+ * not nodes found by their description) and to refuse when artist edits have come to depend on those nodes.
+ */
+UCLASS()
+class UGrungifyHookupRecord : public UAssetUserData
+{
+	GENERATED_BODY()
+
+public:
+	virtual bool IsEditorOnly() const override { return true; }
+
+	/** Unique per installation, so a re-add after Remove is a new installation. */
+	UPROPERTY()
+	FGuid InstallId;
+
+	/** "legacy", "attributes" or "substrate" (plus " landscape"). */
+	UPROPERTY()
+	FString Path;
+
+	/** Every node this installation inserted (function calls, constants, attribute nodes). */
+	UPROPERTY()
+	TArray<TObjectPtr<UMaterialExpression>> Nodes;
+
+	/** Material properties the installation routed through its nodes, e.g. BaseColor, MaterialAttributes. */
+	UPROPERTY()
+	TArray<FString> RoutedProperties;
+
+	/** Backup package made before the first change, and the backup material's state id when it was made. */
+	UPROPERTY()
+	FString Backup;
+
+	UPROPERTY()
+	FGuid BackupStateId;
+
+	/** Set only on backup copies: the material this is a backup of (so an unrelated asset at the path is never trusted). */
+	UPROPERTY()
+	FString BackupOf;
+
+	UPROPERTY()
+	FString InstalledAt;
 };
 
 /**
