@@ -202,7 +202,11 @@ bool FGrungifyBakeRefusesUnrelatedTest::RunTest(const FString& Parameters)
 	auto Bytes = [](UTexture2D* Texture)
 	{
 		TArray64<uint8> Data;
-		Texture->Source.GetMipData(Data, 0);
+		if (const uint8* Mip = Texture->Source.LockMipReadOnly(0))
+		{
+			Data.Append(Mip, Texture->Source.CalcMipSize(0));
+			Texture->Source.UnlockMip(0);
+		}
 		return Data;
 	};
 	auto Refused = [&](const TCHAR* What)
