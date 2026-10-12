@@ -44,6 +44,23 @@ namespace
 		return nullptr;
 	}
 
+	bool HasTransientOuter(const UObject* Object)
+	{
+		// A saved-looking component/package can still belong to a disposable actor,
+		// level or world. Inspection follows those owners without changing flags.
+		const UObject* Current = Object;
+		for (int32 Depth = 0; Current && Depth < 128; ++Depth)
+		{
+			if (Current == GetTransientPackage() || Current->HasAnyFlags(RF_Transient))
+			{
+				return true;
+			}
+			Current = Current->GetOuter();
+		}
+		// An unresolved ancestry is conservatively reported as nonpersistent.
+		return Current != nullptr;
+	}
+
 	FGrungifySlotInspection InspectSlot(UMeshComponent* Component, int32 Slot, const TArray<FName>& SlotNames)
 	{
 		FGrungifySlotInspection Out;
@@ -57,7 +74,7 @@ namespace
 		}
 		Out.Material = PathOf(Material);
 		Out.MaterialClass = Material->GetClass()->GetName();
-		if (const UMaterialInstance* Instance = Cast<UMaterialInstance>(Material))
+		if (UMaterialInstance* Instance = Cast<UMaterialInstance>(Material))
 		{
 			Out.Parent = PathOf(Instance->Parent);
 			Out.bOwnedInstance = Instance->GetOuter() == Component;
@@ -129,7 +146,7 @@ FGrungifyComponentInspection UGrungifyInspectionLibrary::InspectComponent(UMeshC
 	Out.Outer = PathOf(Component->GetOuter());
 	const UPackage* Package = Component->GetPackage();
 	Out.Package = Package ? Package->GetName() : FString();
-	Out.bTransient = Component->HasAnyFlags(RF_Transient) || !Package || Package == GetTransientPackage() || Package->HasAnyFlags(RF_Transient);
+	Out.bTransient = HasTransientOuter(Component) || !Package || Package == GetTransientPackage() || Package->HasAnyFlags(RF_Transient);
 	Out.MeshAsset = PathOf(MeshAssetOf(Component));
 
 	// Ownership.

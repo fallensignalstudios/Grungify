@@ -44,6 +44,7 @@
 #include "RHIGlobals.h"
 #include "RenderUtils.h"
 #include "UObject/Package.h"
+#include "UObject/StrongObjectPtr.h"
 
 #define LOCTEXT_NAMESPACE "GrungifyContentBuilder"
 
@@ -414,7 +415,7 @@ namespace
 			UMaterialExpressionDivide* Projected = AddToFunction<UMaterialExpressionDivide>(Function, -1700, 760);
 			Ctx.Connect(World, TEXT(""), WorldXY, TEXT(""));
 			Ctx.Connect(Rect, TEXT(""), Origin, TEXT(""));
-			Ctx.Connect(Rect, TEXT(""), Extent, TEXT(""));
+			Ctx.Connect(Rect, TEXT("RGBA"), Extent, TEXT(""));
 			Ctx.Connect(WorldXY, TEXT(""), Local, TEXT("A"));
 			Ctx.Connect(Origin, TEXT(""), Local, TEXT("B"));
 			Ctx.Connect(Local, TEXT(""), Projected, TEXT("A"));
@@ -701,6 +702,15 @@ namespace
 
 	void CompileAndCheck(UMaterial* Material, FGrungifyContentReport& Report)
 	{
+		if (!IsValid(Material))
+		{
+			Report.Errors.Add(TEXT("Cannot validate an invalid material"));
+			return;
+		}
+		// RecompileMaterial builds streaming data and can collect garbage.
+		// Keep transient landscape/displacement/Substrate probes alive until
+		// both the compile and the resource/error inspection have finished.
+		const TStrongObjectPtr<UMaterial> KeepAlive(Material);
 		UMaterialEditingLibrary::RecompileMaterial(Material);
 		if (FMaterialResource* Resource = GRUNGIFY_GET_MAX_RHI_MATERIAL_RESOURCE(Material))
 		{

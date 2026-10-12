@@ -8,6 +8,7 @@
 #include "GrungifyMaterialHookup.generated.h"
 
 class UMaterial;
+class UMaterialExpression;
 class UMaterialInterface;
 
 /** What happened to one material. */

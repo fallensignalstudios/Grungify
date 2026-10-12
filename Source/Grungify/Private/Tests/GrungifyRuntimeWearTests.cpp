@@ -7,6 +7,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
+#include "TextureResource.h"
 #include "Engine/World.h"
 #include "GrungifySettings.h"
 #include "Materials/Material.h"
@@ -360,12 +361,18 @@ bool FGrungifyRuntimeChannelAccumulationTest::RunTest(const FString& Parameters)
 
 	UStaticMeshComponent* Component = NewObject<UStaticMeshComponent>();
 	Component->SetStaticMesh(Mesh);
-	UMaterialInstanceDynamic* Owned = UMaterialInstanceDynamic::Create(UMaterial::GetDefaultMaterial(MD_Surface), Component);
-	Owned->SetScalarParameterValue(Grungify::ActiveParameterName(), 1.f);
-	Owned->SetScalarParameterValue(Grungify::MaskTexelSizeParameterName(), 1.f);
-	Owned->SetTextureParameterValue(Grungify::MaskTextureParameterName(), MaskTexture);
-	Owned->SetTextureParameterValue(Grungify::ExtendedMaskTextureParameterName(), ExtendedTexture);
+	// Runtime creates an MID from this baked binding; UE permits Material/MIC parents, not MID parents.
+	UMaterialInstanceConstant* Owned = NewObject<UMaterialInstanceConstant>(Component);
+	Owned->SetParentEditorOnly(UMaterial::GetDefaultMaterial(MD_Surface), false);
+	Owned->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(Grungify::ActiveParameterName()), 1.f);
+	Owned->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(Grungify::MaskTexelSizeParameterName()), 1.f);
+	Owned->SetTextureParameterValueEditorOnly(FMaterialParameterInfo(Grungify::MaskTextureParameterName()), MaskTexture);
+	Owned->SetTextureParameterValueEditorOnly(FMaterialParameterInfo(Grungify::ExtendedMaskTextureParameterName()), ExtendedTexture);
 	Component->SetMaterial(0, Owned);
+	if (!TestTrue(TEXT("Baked MIC fixture is eligible before runtime state creation"), FGrungifyRuntimeWearTestAccess::Eligible(Owned)))
+	{
+		return false;
+	}
 
 	UWorld* World = NewObject<UWorld>();
 	UGrungifyRuntimeWearSubsystem* Subsystem = NewObject<UGrungifyRuntimeWearSubsystem>(World);
@@ -400,6 +407,11 @@ bool FGrungifyRuntimeChannelAccumulationTest::RunTest(const FString& Parameters)
 			return false;
 		}
 		TestTrue(*FString::Printf(TEXT("%s: slot switched to a runtime instance"), *Name), Component->GetMaterial(0) != Owned);
+		if (!TestTrue(*FString::Printf(TEXT("%s: runtime instance inherits active baked mask admission"), *Name),
+			FGrungifyRuntimeWearTestAccess::Eligible(Component->GetMaterial(0))))
+		{
+			return false;
+		}
 
 		TArray<FColor> GpuMask, GpuExtended;
 		if (!TestTrue(*FString::Printf(TEXT("%s: GPU readback before painting"), *Name), ReadBoth(GpuMask, GpuExtended)))
