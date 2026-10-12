@@ -268,6 +268,16 @@ struct FGrungifyComponentResult
 	/** One colour per render vertex, per LOD (vertex output). */
 	TArray<TArray<FColor>> LODColors;
 
+	/** Per material slot: world area, and per channel (chips, dust, runoff, handling, moisture, soot, scorch, moss) the area above 0.1, the summed value there and the peak. */
+	struct FSlotCoverage
+	{
+		double Area = 0.0;
+		double Covered[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+		double Sum[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+		float Max[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+	};
+	TArray<FSlotCoverage> SlotCoverage;
+
 	/** UV channel the texture was baked in (skeletal meshes may fall back to UV0). */
 	int32 MaskUVChannelUsed = INDEX_NONE;
 

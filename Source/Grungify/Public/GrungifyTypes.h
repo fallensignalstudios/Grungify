@@ -262,6 +262,55 @@ struct GRUNGIFY_API FGrungifyPalette
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (EditCondition = "bOverrideContrast", ClampMin = "0.2", UIMax = "3"))
 	float Contrast = 1.f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (InlineEditConditionToggle))
+	bool bOverrideChipScaleCm = false;
+
+	/** Size of chip clusters in cm, independent of Feature Scale. 0 = half the zone's Feature Scale (the standard look). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (EditCondition = "bOverrideChipScaleCm", ClampMin = "0", UIMax = "50", Units = "cm"))
+	float ChipScaleCm = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (InlineEditConditionToggle))
+	bool bOverrideChipCoverage = false;
+
+	/** How much of a worn edge is chipped: 0.5 standard, lower keeps edges mostly intact with occasional chips, higher chips most of the edge. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (EditCondition = "bOverrideChipCoverage", ClampMin = "0", ClampMax = "1"))
+	float ChipCoverage = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (InlineEditConditionToggle))
+	bool bOverrideChipWidth = false;
+
+	/** How much of the edge-wear band can chip: 1 = all of it, lower = only the part nearest the edge (a narrow worn edge). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (EditCondition = "bOverrideChipWidth", ClampMin = "0.02", ClampMax = "1"))
+	float ChipWidth = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (InlineEditConditionToggle))
+	bool bOverrideChipBreakup = false;
+
+	/** Breaks the worn outline into gaps and mixes small chip clusters in with the medium ones. 0 = standard. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (EditCondition = "bOverrideChipBreakup", ClampMin = "0", ClampMax = "1"))
+	float ChipBreakup = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (InlineEditConditionToggle))
+	bool bOverrideSurfaceProtection = false;
+
+	/** Removes low-level dust, runoff and handling below this level, so surface centres stay intact and wear stays local. 0 = standard. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (EditCondition = "bOverrideSurfaceProtection", ClampMin = "0", ClampMax = "0.95"))
+	float SurfaceProtection = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (InlineEditConditionToggle))
+	bool bOverrideGrimeBreakup = false;
+
+	/** Turns continuous dust and handling grime into local patches. 0 = standard. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (EditCondition = "bOverrideGrimeBreakup", ClampMin = "0", ClampMax = "1"))
+	float GrimeBreakup = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (InlineEditConditionToggle))
+	bool bOverrideRoughnessVariation = false;
+
+	/** Varies roughness across grimy recesses instead of a uniform matte. 0 = standard. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify|Art Direction", meta = (EditCondition = "bOverrideRoughnessVariation", ClampMin = "0", ClampMax = "1"))
+	float RoughnessVariation = 0.f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Grungify", meta = (InlineEditConditionToggle))
 	bool bOverrideChipStrength = false;
 
@@ -612,6 +661,32 @@ struct GRUNGIFY_API FGrungifyComponentRecord
 };
 
 /** Why one material slot was or wasn't weathered, and how it was classified. */
+/** How much of a slot's physical surface one mask channel covers (baked masks, before the shader's noise and thresholds). */
+USTRUCT(BlueprintType)
+struct GRUNGIFY_API FGrungifyChannelCoverage
+{
+	GENERATED_BODY()
+
+	/** Edge Chips, Dust, Runoff, Handling, Moisture, Soot, Scorch or Moss. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	FString Channel;
+
+	/** Surface area where the mask is above the threshold (0.1). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	float CoveredM2 = 0.f;
+
+	/** CoveredM2 as a fraction of the slot's area. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	float CoveredFraction = 0.f;
+
+	/** Mean mask value over the covered area only (sparse permissions don't drag it down). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	float MeanWhereCovered = 0.f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	float MaxValue = 0.f;
+};
+
 USTRUCT(BlueprintType)
 struct GRUNGIFY_API FGrungifySlotReport
 {
@@ -657,6 +732,14 @@ struct GRUNGIFY_API FGrungifySlotReport
 	/** Active gates (facing, height, texture) in readable form. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
 	FString Gates;
+
+	/** Physical area of this slot (world space, at the component's scale). 0 when coverage wasn't measured. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	float AreaM2 = 0.f;
+
+	/** Per channel, how much of this slot's area the baked masks cover. Empty for instanced meshes and skipped slots. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
+	TArray<FGrungifyChannelCoverage> Coverage;
 
 	/** Problems specific to this slot (e.g. a gate UV channel the mesh doesn't have). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Grungify")
@@ -894,7 +977,7 @@ namespace Grungify
 	};
 
 	/** Bumped whenever the generated content changes; older assets are rebuilt in place. */
-	constexpr int32 ContentVersion = 8;
+	constexpr int32 ContentVersion = 9;
 	constexpr float MaskModeVertex = 501.f;
 	constexpr float MaskModeTexture = 502.f;
 	/** Instanced meshes: masks come from per-instance custom data. */

@@ -840,6 +840,118 @@ namespace Grungify
 			}
 		}
 
+		/**
+		 * Area-weighted coverage per slot and channel, read back from the finished masks (texture or vertex colours) at
+		 * seven points per triangle. Done after the bake, so it never changes the masks themselves.
+		 */
+		void MeasureSlotCoverage(const FStaticMeshLODResources& LOD, const FTopology& Topo, int32 UVChannel, FGrungifyComponentResult& Out)
+		{
+			constexpr float Threshold = 0.1f;
+			const int32 NumTris = Topo.Indices.Num() / 3;
+			if (NumTris == 0 || Topo.TriSlot.Num() < NumTris)
+			{
+				return;
+			}
+			const bool bTexture = Out.Output == EGrungifyMaskOutput::Texture && Out.TextureSize > 0 && Out.TexturePixels.Num() == Out.TextureSize * Out.TextureSize;
+			const bool bExtended = bTexture && Out.ExtendedPixels.Num() == Out.TexturePixels.Num();
+			const TArray<FColor>* Vertex = !bTexture && Out.LODColors.Num() > 0 && Out.LODColors[0].Num() == Topo.NumVerts ? &Out.LODColors[0] : nullptr;
+			if (!bTexture && !Vertex)
+			{
+				return;
+			}
+			const FStaticMeshVertexBuffer& Attributes = LOD.VertexBuffers.StaticMeshVertexBuffer;
+			if (bTexture && UVChannel >= int32(Attributes.GetNumTexCoords()))
+			{
+				return;
+			}
+
+			auto Unpack = [](const FColor& C, float* Values)
+			{
+				Values[0] = C.R / 255.f;
+				Values[1] = C.G / 255.f;
+				Values[2] = C.B / 255.f;
+				Values[3] = C.A / 255.f;
+			};
+			auto TexelAt = [&Out](const TArray<FColor>& Pixels, const FVector2D& UV) -> const FColor&
+			{
+				const int32 Size = Out.TextureSize;
+				const int32 X = FMath::Clamp(FMath::FloorToInt(UV.X * Size), 0, Size - 1);
+				const int32 Y = FMath::Clamp(FMath::FloorToInt(UV.Y * Size), 0, Size - 1);
+				return Pixels[Y * Size + X];
+			};
+
+			// Centroid, edge midpoints and points near each corner (barycentric weights).
+			static const FVector3f Samples[7] = {
+				{ 1.f / 3, 1.f / 3, 1.f / 3 }, { .5f, .5f, 0.f }, { 0.f, .5f, .5f }, { .5f, 0.f, .5f },
+				{ .8f, .1f, .1f }, { .1f, .8f, .1f }, { .1f, .1f, .8f } };
+
+			for (int32 T = 0; T < NumTris; ++T)
+			{
+				const int32 Slot = Topo.TriSlot[T];
+				if (Slot < 0)
+				{
+					continue;
+				}
+				if (Out.SlotCoverage.Num() <= Slot)
+				{
+					Out.SlotCoverage.SetNum(Slot + 1);
+				}
+				FGrungifyComponentResult::FSlotCoverage& Coverage = Out.SlotCoverage[Slot];
+				const uint32 I[3] = { Topo.Indices[T * 3], Topo.Indices[T * 3 + 1], Topo.Indices[T * 3 + 2] };
+				const double Area = 0.5 * FVector::CrossProduct(Topo.Pos[I[1]] - Topo.Pos[I[0]], Topo.Pos[I[2]] - Topo.Pos[I[0]]).Size() / 10000.0;
+				if (Area <= 0.0)
+				{
+					continue;
+				}
+				Coverage.Area += Area;
+				const double Weight = Area / UE_ARRAY_COUNT(Samples);
+
+				FVector2D UVs[3];
+				if (bTexture)
+				{
+					for (int32 K = 0; K < 3; ++K)
+					{
+						const FVector2f UV = Attributes.GetVertexUV(I[K], uint32(UVChannel));
+						UVs[K] = FVector2D(UV.X, UV.Y);
+					}
+				}
+				for (const FVector3f& B : Samples)
+				{
+					float Values[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+					if (bTexture)
+					{
+						const FVector2D UV = UVs[0] * B.X + UVs[1] * B.Y + UVs[2] * B.Z;
+						Unpack(TexelAt(Out.TexturePixels, UV), Values);
+						if (bExtended)
+						{
+							Unpack(TexelAt(Out.ExtendedPixels, UV), Values + 4);
+						}
+					}
+					else
+					{
+						float Corner[3][4];
+						for (int32 K = 0; K < 3; ++K)
+						{
+							Unpack((*Vertex)[I[K]], Corner[K]);
+						}
+						for (int32 C = 0; C < 4; ++C)
+						{
+							Values[C] = Corner[0][C] * B.X + Corner[1][C] * B.Y + Corner[2][C] * B.Z;
+						}
+					}
+					for (int32 C = 0; C < 8; ++C)
+					{
+						if (Values[C] > Threshold)
+						{
+							Coverage.Covered[C] += Weight;
+							Coverage.Sum[C] += Weight * Values[C];
+						}
+						Coverage.Max[C] = FMath::Max(Coverage.Max[C], Values[C]);
+					}
+				}
+			}
+		}
+
 		void BakeVertexColors(const FStaticMeshRenderData& RenderData, const FTransform& Transform, const FGrungifyComponentContext& Context,
 			const FGrungifyGenerationParams& Params, float SharpRef, FGrungifyComponentResult& Out, int32 (&SurfaceVotes)[3])
 		{
@@ -1781,6 +1893,8 @@ namespace Grungify
 			}
 		}
 
+		MeasureSlotCoverage(LOD0, Topo0, Params.MaskUVChannel, OutResult);
+
 		if (Params.ScatterDensity > 0.f)
 		{
 			CollectScatterSamples(Topo0, LOD0.VertexBuffers.StaticMeshVertexBuffer, Context, Params, OutResult, Params.Seed ^ GetTypeHash(Component->GetPathName()));
@@ -2034,6 +2148,7 @@ namespace Grungify
 			return false;
 		}
 		OutResult.Vertices = int32(LOD.GetNumVertices());
+		MeasureSlotCoverage(LOD, Topo, Params.MaskUVChannel, OutResult);
 
 		int32 Best = 0;
 		for (int32 Index = 1; Index < 3; ++Index)
@@ -2067,6 +2182,60 @@ namespace Grungify
 			}
 			LOD.IndexBuffer.SetIndices(Indices, EIndexBufferStride::Force32Bit);
 		}
+	}
+
+	IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGrungifySlotCoverageTest, "Grungify.Generation.SlotCoverage",
+		EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+	bool FGrungifySlotCoverageTest::RunTest(const FString& Parameters)
+	{
+		// A 1 m x 1 m quad (two triangles, slot 0) with UVs covering the whole 0..1 square.
+		FStaticMeshLODResources LOD(false);
+		InitTestLOD(LOD, { { 0, 0, 0 }, { 100, 0, 0 }, { 100, 100, 0 }, { 0, 100, 0 } },
+			{ { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } }, { 0, 1, 2, 0, 2, 3 });
+		FTopology Topo;
+		if (!TestTrue(TEXT("Topology builds"), Topo.Build(LOD, FTransform::Identity, 0.1f)))
+		{
+			return false;
+		}
+		Topo.TriSlot.Init(0, 2);
+
+		// Texture output: chips everywhere (1.0), dust nowhere, runoff below the 0.1 threshold, handling on the left half.
+		FGrungifyComponentResult Texture;
+		Texture.Output = EGrungifyMaskOutput::Texture;
+		Texture.TextureSize = 8;
+		Texture.TexturePixels.SetNum(64);
+		for (int32 Y = 0; Y < 8; ++Y)
+		{
+			for (int32 X = 0; X < 8; ++X)
+			{
+				Texture.TexturePixels[Y * 8 + X] = FColor(255, 0, 20, X < 4 ? 255 : 0);
+			}
+		}
+		MeasureSlotCoverage(LOD, Topo, 1, Texture);
+		if (!TestEqual(TEXT("One slot measured"), Texture.SlotCoverage.Num(), 1))
+		{
+			return false;
+		}
+		const FGrungifyComponentResult::FSlotCoverage& T = Texture.SlotCoverage[0];
+		TestTrue(TEXT("Slot area is 1 m2"), FMath::IsNearlyEqual(T.Area, 1.0, 1e-6));
+		TestTrue(TEXT("Chips cover the whole slot"), FMath::IsNearlyEqual(T.Covered[0], 1.0, 1e-6));
+		TestTrue(TEXT("Chip mean where covered is 1"), FMath::IsNearlyEqual(T.Sum[0] / T.Covered[0], 1.0, 1e-3));
+		TestEqual(TEXT("No dust"), T.Covered[1], 0.0);
+		TestEqual(TEXT("Runoff below threshold isn't counted"), T.Covered[2], 0.0);
+		TestTrue(TEXT("Runoff peak still reported"), FMath::IsNearlyEqual(T.Max[2], 20.f / 255.f, 1e-4f));
+		// Seven samples per triangle: the left-half estimate is coarse but must be roughly half.
+		TestTrue(TEXT("Handling covers about half"), T.Covered[3] > 0.3 && T.Covered[3] < 0.7);
+
+		// Vertex output: interpolated corner colours.
+		FGrungifyComponentResult Vertex;
+		Vertex.Output = EGrungifyMaskOutput::VertexColor;
+		Vertex.LODColors.SetNum(1);
+		Vertex.LODColors[0] = { FColor(0, 255, 0, 0), FColor(0, 255, 0, 0), FColor(0, 255, 0, 0), FColor(0, 255, 0, 0) };
+		MeasureSlotCoverage(LOD, Topo, 1, Vertex);
+		TestTrue(TEXT("Vertex dust covers the slot"), Vertex.SlotCoverage.Num() == 1 && FMath::IsNearlyEqual(Vertex.SlotCoverage[0].Covered[1], 1.0, 1e-6));
+		TestEqual(TEXT("Vertex output has no chips"), Vertex.SlotCoverage.Num() == 1 ? Vertex.SlotCoverage[0].Covered[0] : -1.0, 0.0);
+		return true;
 	}
 
 	IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGrungifyUVValidationTest, "Grungify.Generation.MaskUVValidation",

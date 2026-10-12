@@ -24,6 +24,12 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 > - **Skeletal meshes, landscape, height blending and Nanite displacement.**
 > - **Fab packaging:** a showcase map, build scripts and a readiness check, read-only installed content, engine-compatibility wrappers for 5.5–5.8, and copyright headers.
 >
+> **v0.7.0 has not been compiled yet.** It adds, from the pressure-hall trial feedback:
+> - **Art-direction controls**, independent of Feature Scale: chip scale, coverage, width and breakup; surface protection; grime breakup; and recess roughness variation (see [Art direction](#art-direction)).
+> - **A Dry Coated Ceramic library look.**
+> - **Per-slot physical coverage** in reports.
+> - **A read-only inspection API** for QA scripts (see [Inspection](#inspection-read-only)).
+>
 > See the [Verification checklist](#verification-checklist).
 
 ---
@@ -50,7 +56,7 @@ Everything is driven by a **Seed**, so the same seed and settings always produce
 
 ### Content versioning
 
-The generated material assets carry a marker of the form `[GrungifyContent v8 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
+The generated material assets carry a marker of the form `[GrungifyContent v9 cpd=0 uv=1 inst=0]` (content version, custom data index, mask UV channel, per-instance custom data index). On editor start, and whenever one of those indices changes in Project Settings, outdated assets are **rebuilt in place**. Every material that already calls `MF_GrungifyWeathering` picks up the fix without relinking. Clear and re-apply zones created before v0.2.1 so they receive the new owned material instances and activation values.
 
 - **Tools → Grungify → Update Plugin Content** creates missing assets and rebuilds outdated ones.
 - **Rebuild Plugin Content** forces a rebuild of all the generated material assets.
@@ -169,6 +175,36 @@ If wear still looks faint, switch **Preview Display** to *All Masks*:
 
 - If the masks are faint too, raise the zone's layer intensities or profiles.
 - If the masks are strong but the final material isn't, raise Contrast or check the material is hooked up. The zone report warns when it isn't.
+
+### Art direction
+
+Feature Scale sets the size of everything at once. On real assets that's not enough: you want a narrow worn edge with occasional chips and local grime, not a uniform outline or a broad flat patch. These controls are material parameters, and also *Palette → Art Direction* overrides on a zone or preset. They are independent of Feature Scale, and at their defaults they reproduce the standard look exactly.
+
+| Parameter | Default | What it does |
+|---|---|---|
+| `Grungify Chip Scale` (cm) | 0 | Size of chip clusters. 0 follows half the Feature Scale; set it, for example to 1.5 cm, for fine chips on a coarse Feature Scale. |
+| `Grungify Chip Coverage` | 0.5 | How much of a worn edge is chipped. Lower values keep edges mostly intact with occasional chips. |
+| `Grungify Chip Width` | 1 | How much of the edge-wear band can chip. Lower values (around 0.3–0.5) give a narrow worn edge rather than a broad outline. |
+| `Grungify Chip Breakup` | 0 | Breaks the outline with intact gaps, and mixes small chip clusters in with the medium ones. |
+| `Grungify Surface Protection` | 0 | Removes low-level dust, runoff and handling below this level. Surface centres stay intact and grime stays local, which removes "continuous base coverage". |
+| `Grungify Grime Breakup` | 0 | Turns continuous dust and handling grime into local patches. |
+| `Grungify Roughness Variation` | 0 | Varies roughness across grimy recesses, from packed and dull to smeared and slicker, instead of a uniform matte. |
+
+Raising Strength makes everything heavier, including broad flat areas, which is what produces coarse dark plates. To make wear read without that, use these controls instead:
+
+1. **Width, coverage and breakup** shape the edge.
+2. **Surface Protection** keeps faces clean.
+3. **Contrast** decides how boldly what's left reads.
+
+**Dry Coated Ceramic** (library look) is a starting point for coffers, panels and glazed or coated trim:
+
+- Feature Scale 6 cm, Chip Scale 1.5 cm
+- Chip Coverage 0.35, Width 0.4, Breakup 0.7
+- Surface Protection 0.25, Grime Breakup 0.6, Roughness Variation 0.2
+- restrained dust, handling and runoff
+- Contrast 1.1
+
+Tune it on the real asset. It isn't an approved look.
 
 ### Progress and cancelling
 
@@ -398,6 +434,7 @@ Bake always asks for texture output. Meshes without the mask UV channel fall bac
 | **Abandoned Industrial** | Heavy dust, long rust runoff, rust bloom on fasteners, light soot, cracked concrete |
 | **Old Temple** | Crisp chipped stone, ledge dust, polished hand-height edges, cracks, sky exposure, moss |
 | **Wet Sewer** | Traced water flow, moisture and a 40 cm water line, moss everywhere damp, dark streaks, salt bloom |
+| **Dry Coated Ceramic** | Fine broken chips on a narrow worn edge, intact faces, restrained local grime (see [Art direction](#art-direction)) |
 
 The library is project content, so plugin-content rebuilds never touch it. Existing assets are kept; **Reset Material Library** overwrites them with the defaults. Library presets don't include a seed, so each zone keeps its own.
 
@@ -469,6 +506,36 @@ message = unreal.GrungifyEditorLibrary.build_material_library(False)
 - **Current channel limit:** runtime Handling and Moss painting returns `false` before changing materials or masks. UE canvas additive drawing writes RGB only; alpha holdout erases existing masks rather than accumulating alpha. These alpha channels need a dedicated channel-preserving render pass and a real GPU readback test before they can be enabled safely. Procedural Handling and Moss generation is unaffected.
 
 
+### Inspection (read-only)
+
+`UGrungifyInspectionLibrary` (Blueprint category *Grungify | Inspection*, and Python as `unreal.GrungifyInspectionLibrary`) reports exactly what Grungify has done to a component. It never runs Preview or Apply, and it never saves or loads anything.
+
+- **`InspectComponent(Component)`** returns, for a static or skeletal mesh component:
+  - **Identity:** the component's path, class, owner, outer and package, and whether it's transient.
+  - **State:** none, previewed, applied, previewed+applied or baked, and which zone previews or applied it.
+  - **Custom primitive data:** the saved defaults and the live values, *separately*, plus the mask mode and debug channel at the configured base index.
+  - **Vertex colours:** override counts per LOD.
+  - **Instances:** instance count, float count and Grungify's four per-instance floats.
+  - **Per slot (admitted and excluded):**
+    - the material, its class and parent
+    - whether it's a zone-owned or baked instance
+    - Active and the surface override
+    - the bound mask and extended textures, with their sizes
+    - the UV channel the material actually samples
+  - **Unavailable**, a list of anything that couldn't be read, each with its reason.
+- **`InspectZone(Zone)`** inspects every component a zone previews or has applied to. Records for components that aren't loaded come back with `bValid` false, their saved path and the reason.
+- **`ResolveGrungifyObject(Path)`** finds an already-loaded object by its full path, including embedded subobjects such as a component's mask texture (`/Game/Map.Map:PersistentLevel.Actor.Component.GrungifyMask_0`). It never loads a package.
+
+```python
+import unreal
+for info in unreal.GrungifyInspectionLibrary.inspect_zone(zone):
+    print(info.component, info.state, info.mask_mode_name, list(info.live_custom_data))
+    for slot in info.slots:
+        print("  ", slot.slot, slot.material, slot.active, slot.mask_texture, slot.unavailable)
+```
+
+`Grungify.Inspection.ReadOnlyComponentState` checks it against untouched, applied, previewed and cleared components, and checks that inspecting changes nothing. Save/reload is not yet covered.
+
 ### Reports
 
 Every Dry Run, Preview and Apply fills **Last Report** on the zone. It's also readable from Blueprint or Python via `GetLastReport`, and written to `Saved/Grungify/Reports/<Zone>_<Operation>.json`.
@@ -493,6 +560,7 @@ Each mesh records:
 - the previous owner
 - **Mask UV**: the validation above
 - **Slot Details**: one entry per material slot, covering:
+  - **Area** (m²) and **Coverage** per channel: the area where the baked mask is above 0.1, that area as a fraction of the slot, the mean value over the covered area only, and the peak. These are the baked masks, before the material's noise and thresholds, so they measure where wear is *permitted* and how strongly. Global means hide sparse, deliberately local permissions; these don't.
   - **Included** and the **Reason**, e.g. *"excluded by rule 'Deck' (Exclude is on; matched by slot name 'Deck_Planks' matches '\*Deck\*')"*, *"included; no slot rule matched"*, or *"excluded: rule 'Rail' has a gate texture that couldn't be read, so no wear is allowed (fail-safe)"*
   - the **Rule** that matched and what matched it
   - the **Surface** and its **Surface Source**: zone override, rule, component or actor tag, physical material, the keyword and which name it was found in, or fallback
@@ -598,7 +666,7 @@ Texture generation skips edge-distance queries and weathering evaluation when a 
 
 These cases should be checked in-editor on a test level, never on production rooms:
 
-1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v8 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
+1. **Build:** the plugin compiles. On first start the Output Log shows content rebuilt to v9 with no errors, and `Saved/Grungify/ContentReport.txt` reports ready content without `ERROR` lines.
 2. **Channel masks:** in MF_GrungifyWeathering, the Roughness mask is R only and the Metallic mask is G only.
 3. **Exact restore:** on a mesh whose default custom primitive data is `[]`, run Preview → Cancel Preview, and separately Apply → Clear. The data is `[]` again. Repeat on a mesh with painted vertex colours, a mesh with only some material slots overridden, and a mesh whose CPD indices 0–4 are already in use (it should be reported as a conflict and left untouched).
 4. **Undo:** run Apply → Ctrl+Z and Clear → Ctrl+Z. Delete a zone while previewing, then Ctrl+Z.
@@ -672,6 +740,16 @@ These cases should be checked in-editor on a test level, never on production roo
     - On a Nanite-tessellated material routed through `MF_GrungifyDisplacement`, `Grungify Displacement Depth` cuts the chips in.
 28. **Installed copy:** install the packaged plugin into an engine. The content build validates instead of rebuilding, and changing the CPD index explains how to get a writable copy.
 29. **Engine range:** build with `Scripts/BuildPlugin.ps1` for 5.5, 5.6, 5.7 and 5.8. Each must have no warnings, then run the automation tests in each.
+30. **Art direction (v0.7):**
+    - At default values, captures match v0.6.1 exactly.
+    - On the pressure-hall coffer, compare Chip Width 0.4 / Coverage 0.35 / Breakup 0.7 and Surface Protection 0.25 against the v0.6.1 "balanced" diagnostic. You should see a narrow edge with occasional chips, intact centres and no flat cap patch.
+31. **Coverage report:**
+    - Slot Details report Area and per-channel Coverage.
+    - On the coffer with its painted gate, Dust and Chips coverage should land near the gate's ~5.8% permitted area, not the global mean.
+    - `Grungify.Generation.SlotCoverage` passes.
+32. **Inspection:**
+    - `Grungify.Inspection.ReadOnlyComponentState` passes.
+    - From Python, inspect an applied, a previewed and an excluded-slot component, then save, reload and inspect again. The live and default CPD, owned instance paths and texture paths should resolve.
 
 ## Packaging for Fab (5.5–5.8)
 

@@ -460,6 +460,12 @@ public:
 	virtual void PostUnregisterAllComponents() override;
 	virtual void BeginDestroy() override;
 
+	/** Read-only views of the zone's records (for inspection tools; never modify through these). */
+	const TArray<FGrungifyComponentRecord>& GetPreviewRecords() const { return PreviewRecords; }
+	const TArray<FGrungifyComponentRecord>& GetAppliedRecords() const { return AppliedRecords; }
+	const TArray<FGrungifyLandscapeRecord>& GetPreviewLandscapeRecords() const { return PreviewLandscapeRecords; }
+	const TArray<FGrungifyLandscapeRecord>& GetAppliedLandscapeRecords() const { return AppliedLandscapeRecords; }
+
 	/** The record this zone holds for a component it has applied to, or null. */
 	const FGrungifyComponentRecord* FindAppliedRecord(const UMeshComponent* Component) const;
 	bool IsPreviewing(const UMeshComponent* Component) const;

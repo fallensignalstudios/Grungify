@@ -548,6 +548,13 @@ namespace Grungify
 		Vector(Palette.bOverrideTrimChipColor, TEXT("Grungify Trim Chip Color"), Palette.TrimChipColor);
 		Scalar(Palette.bOverrideStrength, TEXT("Grungify Strength"), Palette.Strength);
 		Scalar(Palette.bOverrideContrast, TEXT("Grungify Contrast"), Palette.Contrast);
+		Scalar(Palette.bOverrideChipScaleCm, TEXT("Grungify Chip Scale"), Palette.ChipScaleCm);
+		Scalar(Palette.bOverrideChipCoverage, TEXT("Grungify Chip Coverage"), Palette.ChipCoverage);
+		Scalar(Palette.bOverrideChipWidth, TEXT("Grungify Chip Width"), Palette.ChipWidth);
+		Scalar(Palette.bOverrideChipBreakup, TEXT("Grungify Chip Breakup"), Palette.ChipBreakup);
+		Scalar(Palette.bOverrideSurfaceProtection, TEXT("Grungify Surface Protection"), Palette.SurfaceProtection);
+		Scalar(Palette.bOverrideGrimeBreakup, TEXT("Grungify Grime Breakup"), Palette.GrimeBreakup);
+		Scalar(Palette.bOverrideRoughnessVariation, TEXT("Grungify Roughness Variation"), Palette.RoughnessVariation);
 		Scalar(Palette.bOverrideChipStrength, TEXT("Grungify Chip Strength"), Palette.ChipStrength);
 		Scalar(Palette.bOverrideDustStrength, TEXT("Grungify Dust Strength"), Palette.DustStrength);
 		Scalar(Palette.bOverrideRunoffStrength, TEXT("Grungify Runoff Strength"), Palette.RunoffStrength);

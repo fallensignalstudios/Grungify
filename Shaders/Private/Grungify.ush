@@ -109,9 +109,59 @@ float3 GrungifyNoisePos(float3 WorldPos, float FeatureScaleCm, float SeedOffset)
 	return WorldPos / Scale + SeedOffset;
 }
 
-// Masks are probabilities; noise at the feature scale decides where wear actually shows.
-FGrungifyLayers GrungifyLayers(float4 Masks, float3 P, float WorldNormalZ)
+// Art direction controls, independent of Feature Scale. GrungifyDefaultArt() reproduces the standard look exactly.
+struct FGrungifyArt
 {
+	float FeatureScaleCm;     // the mesh's feature scale, so chip scale can be given in cm
+	float ChipScaleCm;        // size of chip clusters; 0 = follow Feature Scale (half of it)
+	float ChipCoverage;       // 0..1, how much of a worn edge is chipped (0.5 = standard)
+	float ChipWidth;          // 0..1, 1 = the whole edge-wear band, lower = only the part nearest the edge
+	float ChipBreakup;        // 0..1, gaps along the edge and small clusters among the medium ones
+	float SurfaceProtection;  // 0..1, low-level dust/runoff/handling below this is removed (keeps centres intact)
+	float GrimeBreakup;       // 0..1, continuous grime becomes local patches
+	float RoughnessVariation; // 0..1, roughness varies across grimy recesses
+};
+
+FGrungifyArt GrungifyMakeArt(float FeatureScaleCm, float ChipScaleCm, float ChipCoverage, float ChipWidth, float ChipBreakup,
+	float SurfaceProtection, float GrimeBreakup, float RoughnessVariation)
+{
+	FGrungifyArt Art;
+	Art.FeatureScaleCm = FeatureScaleCm > 0.5 ? FeatureScaleCm : 25.0;
+	Art.ChipScaleCm = max(ChipScaleCm, 0.0);
+	Art.ChipCoverage = saturate(ChipCoverage);
+	Art.ChipWidth = saturate(ChipWidth);
+	Art.ChipBreakup = saturate(ChipBreakup);
+	Art.SurfaceProtection = clamp(SurfaceProtection, 0.0, 0.95);
+	Art.GrimeBreakup = saturate(GrimeBreakup);
+	Art.RoughnessVariation = saturate(RoughnessVariation);
+	return Art;
+}
+
+FGrungifyArt GrungifyDefaultArt()
+{
+	return GrungifyMakeArt(25.0, 0.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0);
+}
+
+// Narrow edge band and protected surface centres, applied to the masks before the layers read them.
+float4 GrungifyShapeMasks(float4 Masks, FGrungifyArt Art)
+{
+	if (Art.ChipWidth < 1.0)
+	{
+		const float W = max(Art.ChipWidth, 0.02);
+		Masks.r = saturate((Masks.r - (1.0 - W)) / W);
+	}
+	if (Art.SurfaceProtection > 0.0)
+	{
+		const float P = Art.SurfaceProtection;
+		Masks.gba = saturate((Masks.gba - P) / (1.0 - P));
+	}
+	return Masks;
+}
+
+// Masks are probabilities; noise at the feature scale decides where wear actually shows.
+FGrungifyLayers GrungifyLayers(float4 InMasks, float3 P, float WorldNormalZ, FGrungifyArt Art)
+{
+	const float4 Masks = GrungifyShapeMasks(InMasks, Art);
 	const uint Seed = 1013u;
 	FGrungifyLayers L;
 
@@ -120,14 +170,40 @@ FGrungifyLayers GrungifyLayers(float4 Masks, float3 P, float WorldNormalZ)
 	const float Streak = GrungifyFbm(float3(P.x * 3.0, P.y * 3.0, P.z * 0.25), Seed + 7u);
 	L.Runoff = Masks.b > 0.0 ? smoothstep(0.05, 0.6, Masks.b * (0.6 + 0.8 * Streak)) : 0.0;
 
-	const float ChipNoise = GrungifyFbm(P * 2.0, Seed + 13u);
+	float ChipNoise = GrungifyFbm(P * 2.0, Seed + 13u);
+	// Chip clusters at their own scale when one is set, otherwise at half the feature scale.
+	const float3 ChipP = Art.ChipScaleCm > 0.0 ? P * (Art.FeatureScaleCm / Art.ChipScaleCm) : P * 2.0;
+	if (Art.ChipScaleCm > 0.0)
+	{
+		ChipNoise = GrungifyFbm(ChipP, Seed + 13u);
+	}
+	float ChipMask = Masks.r;
+	if (Art.ChipBreakup > 0.0)
+	{
+		// Small clusters among the medium ones (a finer octave can open chips where the medium noise wouldn't)...
+		const float Fine = GrungifyFbm(ChipP * 3.7, Seed + 41u);
+		ChipNoise = lerp(ChipNoise, min(ChipNoise, Fine * 1.1), Art.ChipBreakup);
+		// ...and intact gaps along the edge, so it isn't a uniform outline.
+		const float Gap = smoothstep(0.32, 0.6, GrungifyFbm(ChipP * 0.6, Seed + 43u));
+		ChipMask *= lerp(1.0, Gap, Art.ChipBreakup);
+	}
 	// Chips start showing from a mask of about 0.25 (where the noise is low) and cover most of a fully worn edge.
-	const float ChipThreshold = 0.1 + ChipNoise * 0.7;
-	L.Chip = Masks.r > 0.01 ? smoothstep(ChipThreshold - 0.05, ChipThreshold + 0.05, Masks.r * 1.2) : 0.0;
+	// Coverage 0.5 is the standard threshold; higher chips more of the edge, lower keeps it mostly intact.
+	const float ChipThreshold = 0.1 + ChipNoise * 0.7 + (0.5 - Art.ChipCoverage) * 0.8;
+	L.Chip = ChipMask > 0.01 ? smoothstep(ChipThreshold - 0.05, ChipThreshold + 0.05, ChipMask * 1.2) : 0.0;
 
 	const float DustNoise = GrungifyFbm(P * 0.8, Seed + 29u);
 	L.Dust = saturate(Masks.g * lerp(0.8, 1.3, DustNoise));
 	L.Dust = saturate(L.Dust + Masks.g * saturate(WorldNormalZ) * 0.35);
+
+	if (Art.GrimeBreakup > 0.0)
+	{
+		// Local grime: patches instead of an even film.
+		const float Patch = smoothstep(0.35, 0.65, GrungifyFbm(P * 0.45, Seed + 47u));
+		L.Dust *= lerp(1.0, Patch, Art.GrimeBreakup);
+		L.Handling *= lerp(1.0, Patch, Art.GrimeBreakup * 0.7);
+		L.Runoff *= lerp(1.0, 0.5 + 0.5 * Patch, Art.GrimeBreakup * 0.5);
+	}
 
 	return L;
 }
@@ -139,7 +215,7 @@ FGrungifyResult GrungifyEvaluate(
 	float SurfaceFromZone, float SurfaceOverride,
 	float FeatureScaleCm, float SeedOffset,
 	float3 DustColor, float3 RunoffColor, float3 ChipColor,
-	float Strength, float4 ChannelStrength)
+	float Strength, float4 ChannelStrength, FGrungifyArt Art)
 {
 	FGrungifyResult R;
 	R.BaseColor = BaseColor;
@@ -155,7 +231,8 @@ FGrungifyResult GrungifyEvaluate(
 	const float4 Masks = saturate(GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks) * Strength * ChannelStrength);
 	const float Surface = SurfaceOverride >= 0.0 ? SurfaceOverride : SurfaceFromZone;
 	const int SurfaceId = (int)round(Surface);
-	const FGrungifyLayers L = GrungifyLayers(Masks, GrungifyNoisePos(WorldPos, FeatureScaleCm, SeedOffset), WorldNormal.z);
+	const float3 NoiseP = GrungifyNoisePos(WorldPos, FeatureScaleCm, SeedOffset);
+	const FGrungifyLayers L = GrungifyLayers(Masks, NoiseP, WorldNormal.z, Art);
 
 	// Handling: polish on metal, oily darkening on stone and trim.
 	if (SurfaceId == 1)
@@ -211,12 +288,19 @@ FGrungifyResult GrungifyEvaluate(
 	R.Roughness = lerp(R.Roughness, 0.92, L.Dust);
 	R.Metallic = lerp(R.Metallic, 0.0, L.Dust);
 
+	// Grimy recesses aren't uniformly matte: some packed and dull, some smeared and slicker.
+	if (Art.RoughnessVariation > 0.0)
+	{
+		const float Grime = saturate(L.Dust + L.Runoff * 0.5 + L.Handling * 0.5);
+		R.Roughness = saturate(R.Roughness + (GrungifyFbm(NoiseP * 1.3, 1013u + 53u) - 0.5) * Art.RoughnessVariation * Grime);
+	}
+
 	return R;
 }
 
-float GrungifyReliefHeight(float4 Masks, float3 P, float WorldNormalZ)
+float GrungifyReliefHeight(float4 Masks, float3 P, float WorldNormalZ, FGrungifyArt Art)
 {
-	const FGrungifyLayers L = GrungifyLayers(Masks, P, WorldNormalZ);
+	const FGrungifyLayers L = GrungifyLayers(Masks, P, WorldNormalZ, Art);
 	return 0.35 * L.Dust - L.Chip;
 }
 
@@ -227,7 +311,7 @@ float3 GrungifyReliefNormal(
 	float3 NormalTS, float Relief,
 	float MaskMode, float4 VertexMasks, float4 TextureMasks,
 	float3 WorldPos, float3 WorldNormal, float3 TangentWS, float3 BitangentWS,
-	float FeatureScaleCm, float SeedOffset, float Strength, float4 ChannelStrength)
+	float FeatureScaleCm, float SeedOffset, float Strength, float4 ChannelStrength, FGrungifyArt Art)
 {
 	if (!GrungifyHasValidMaskMode(MaskMode) || Relief <= 0.0)
 	{
@@ -242,9 +326,9 @@ float3 GrungifyReliefNormal(
 
 	const float3 P = GrungifyNoisePos(WorldPos, FeatureScaleCm, SeedOffset);
 	const float Step = 0.03;
-	const float H0 = GrungifyReliefHeight(Masks, P, WorldNormal.z);
-	const float HT = GrungifyReliefHeight(Masks, P + normalize(TangentWS) * Step, WorldNormal.z);
-	const float HB = GrungifyReliefHeight(Masks, P + normalize(BitangentWS) * Step, WorldNormal.z);
+	const float H0 = GrungifyReliefHeight(Masks, P, WorldNormal.z, Art);
+	const float HT = GrungifyReliefHeight(Masks, P + normalize(TangentWS) * Step, WorldNormal.z, Art);
+	const float HB = GrungifyReliefHeight(Masks, P + normalize(BitangentWS) * Step, WorldNormal.z, Art);
 	const float2 Slope = float2(HT - H0, HB - H0) / Step;
 
 	return normalize(float3(NormalTS.xy - Slope * Relief * 0.05, NormalTS.z));
@@ -311,7 +395,7 @@ FGrungifyResult GrungifyEvaluateFull(
 	float FeatureScaleCm, float SeedOffset,
 	float3 DustColor, float3 RunoffColor, float3 ChipColor,
 	float Strength, float4 ChannelStrength,
-	float3 MossColor, float3 SootColor, float3 SaltColor, float4 ExtendedStrength, float CrackStrength)
+	float3 MossColor, float3 SootColor, float3 SaltColor, float4 ExtendedStrength, float CrackStrength, FGrungifyArt Art)
 {
 	if (!GrungifyHasValidMaskMode(MaskMode))
 	{
@@ -325,7 +409,7 @@ FGrungifyResult GrungifyEvaluateFull(
 	// The primary layers go through the original path (mode 501 simply means "use these masks").
 	const float4 Raw = GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks, InstanceMasks);
 	FGrungifyResult R = GrungifyEvaluate(BaseColor, Roughness, Metallic, 501.0, Raw, Raw, WorldPos, WorldNormal,
-		SurfaceFromZone, SurfaceOverride, FeatureScaleCm, SeedOffset, DustColor, RunoffColor, ChipColor, Strength, ChannelStrength);
+		SurfaceFromZone, SurfaceOverride, FeatureScaleCm, SeedOffset, DustColor, RunoffColor, ChipColor, Strength, ChannelStrength, Art);
 
 	const float Surface = SurfaceOverride >= 0.0 ? SurfaceOverride : SurfaceFromZone;
 	const int SurfaceId = (int)round(Surface);
@@ -388,7 +472,7 @@ float3 GrungifyReliefNormalFull(
 	float3 NormalTS, float Relief,
 	float MaskMode, float4 VertexMasks, float4 TextureMasks, float4 InstanceMasks,
 	float3 WorldPos, float3 WorldNormal, float3 TangentWS, float3 BitangentWS,
-	float FeatureScaleCm, float SeedOffset, float Strength, float4 ChannelStrength)
+	float FeatureScaleCm, float SeedOffset, float Strength, float4 ChannelStrength, FGrungifyArt Art)
 {
 	if (!GrungifyHasValidMaskMode(MaskMode))
 	{
@@ -396,7 +480,7 @@ float3 GrungifyReliefNormalFull(
 	}
 	const float4 Raw = GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks, InstanceMasks);
 	return GrungifyReliefNormal(NormalTS, Relief, 501.0, Raw, Raw, WorldPos, WorldNormal, TangentWS, BitangentWS,
-		FeatureScaleCm, SeedOffset, Strength, ChannelStrength);
+		FeatureScaleCm, SeedOffset, Strength, ChannelStrength, Art);
 }
 
 // Channels: 0 all primary, 1-4 chips/dust/runoff/handling, 5-8 moisture/soot/scorch/moss, 9 all extended.
@@ -448,7 +532,7 @@ FGrungifyGrime GrungifyEvaluateGrime(
 	float FeatureScaleCm, float SeedOffset,
 	float3 DustColor, float3 RunoffColor, float3 ChipColor, float3 StoneChipColor,
 	float Strength, float4 ChannelStrength,
-	float3 MossColor, float3 SootColor, float3 SaltColor, float4 ExtendedStrength, float CrackStrength)
+	float3 MossColor, float3 SootColor, float3 SaltColor, float4 ExtendedStrength, float CrackStrength, FGrungifyArt Art)
 {
 	FGrungifyGrime G;
 	G.Albedo = float3(0.0, 0.0, 0.0);
@@ -469,7 +553,7 @@ FGrungifyGrime GrungifyEvaluateGrime(
 	const float Surface = SurfaceOverride >= 0.0 ? SurfaceOverride : SurfaceFromZone;
 	const int SurfaceId = (int)round(Surface);
 	const float3 P = GrungifyNoisePos(WorldPos, FeatureScaleCm, SeedOffset);
-	const FGrungifyLayers L = GrungifyLayers(Masks, P, WorldNormal.z);
+	const FGrungifyLayers L = GrungifyLayers(Masks, P, WorldNormal.z, Art);
 
 	// Same order as GrungifyEvaluate: handling, runoff, chips, dust.
 	if (SurfaceId == 1)
@@ -567,7 +651,7 @@ float GrungifyDisplacementOffset(
 	float3 WorldPos, float3 WorldNormal,
 	float SurfaceFromZone, float SurfaceOverride,
 	float FeatureScaleCm, float SeedOffset,
-	float Strength, float4 ChannelStrength, float CrackStrength, float Depth)
+	float Strength, float4 ChannelStrength, float CrackStrength, float Depth, FGrungifyArt Art)
 {
 	if (!GrungifyHasValidMaskMode(MaskMode) || Depth == 0.0)
 	{
@@ -576,7 +660,7 @@ float GrungifyDisplacementOffset(
 	const float4 Raw = GrungifySelectMasks(MaskMode, VertexMasks, TextureMasks, InstanceMasks);
 	const float4 Masks = saturate(Raw * Strength * ChannelStrength);
 	const float3 P = GrungifyNoisePos(WorldPos, FeatureScaleCm, SeedOffset);
-	const FGrungifyLayers L = GrungifyLayers(Masks, P, WorldNormal.z);
+	const FGrungifyLayers L = GrungifyLayers(Masks, P, WorldNormal.z, Art);
 	float Offset = 0.35 * L.Dust - L.Chip;
 
 	const float Surface = SurfaceOverride >= 0.0 ? SurfaceOverride : SurfaceFromZone;

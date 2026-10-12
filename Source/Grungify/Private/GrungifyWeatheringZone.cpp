@@ -1395,6 +1395,30 @@ namespace
 		return H.Hash;
 	}
 
+	/** Physical coverage per slot and channel: global means hide sparse, deliberately local permissions. */
+	void FillCoverage(const FGrungifyComponentResult& Result, FGrungifyComponentReport& Report)
+	{
+		static const TCHAR* ChannelNames[8] = { TEXT("Edge Chips"), TEXT("Dust"), TEXT("Runoff"), TEXT("Handling"),
+			TEXT("Moisture"), TEXT("Soot"), TEXT("Scorch"), TEXT("Moss") };
+		const int32 Channels = Result.ExtendedPixels.Num() > 0 ? 8 : 4;
+		for (int32 Slot = 0; Slot < Result.SlotCoverage.Num() && Slot < Report.SlotDetails.Num(); ++Slot)
+		{
+			const FGrungifyComponentResult::FSlotCoverage& Measured = Result.SlotCoverage[Slot];
+			FGrungifySlotReport& Detail = Report.SlotDetails[Slot];
+			Detail.AreaM2 = float(Measured.Area);
+			Detail.Coverage.Reset();
+			for (int32 Channel = 0; Channel < Channels && Measured.Area > 0.0; ++Channel)
+			{
+				FGrungifyChannelCoverage& Row = Detail.Coverage.AddDefaulted_GetRef();
+				Row.Channel = ChannelNames[Channel];
+				Row.CoveredM2 = float(Measured.Covered[Channel]);
+				Row.CoveredFraction = float(Measured.Covered[Channel] / Measured.Area);
+				Row.MeanWhereCovered = Measured.Covered[Channel] > 0.0 ? float(Measured.Sum[Channel] / Measured.Covered[Channel]) : 0.f;
+				Row.MaxValue = Measured.Max[Channel];
+			}
+		}
+	}
+
 	int64 ResultBytes(const FGrungifyComponentResult& Result)
 	{
 		int64 Bytes = int64(Result.TexturePixels.Num() + Result.ExtendedPixels.Num()) * sizeof(FColor);
@@ -1924,6 +1948,7 @@ void AGrungifyWeatheringZone::CollectJob(FGrungifyGenerationJob& Job, TArray<FGr
 		Report.MaskUV = Result.MaskUV;
 		Report.Seconds = Item.Seconds;
 		Report.bFromCache = Item.bFromCache;
+		FillCoverage(Result, Report);
 		LastReport.CacheHits += Item.bFromCache ? 1 : 0;
 
 		if (AGrungifyWeatheringZone* AppliedOwner = Item.TakeOverFrom.Get())
@@ -1976,6 +2001,7 @@ bool AGrungifyWeatheringZone::GenerateResults(const TCHAR* Operation, TArray<FGr
 			Report.MaskUV = Item.Result.MaskUV;
 			Report.Seconds = Item.Seconds;
 			Report.bFromCache = Item.bFromCache;
+			FillCoverage(Item.Result, Report);
 			LastReport.Components.Add(MoveTemp(Report));
 		}
 		return false;

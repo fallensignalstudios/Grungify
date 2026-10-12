@@ -272,7 +272,9 @@ namespace
 		TEXT("ExtR"), TEXT("ExtG"), TEXT("ExtB"), TEXT("ExtA"),
 		TEXT("MossColor"), TEXT("SootColor"), TEXT("SaltColor"),
 		TEXT("MoistureStrength"), TEXT("SootStrength"), TEXT("ScorchStrength"), TEXT("MossStrength"), TEXT("CrackStrength"),
-		TEXT("Height"), TEXT("HeightBlend"), TEXT("Contrast") };
+		TEXT("Height"), TEXT("HeightBlend"), TEXT("Contrast"),
+		TEXT("ChipScale"), TEXT("ChipCoverage"), TEXT("ChipWidth"), TEXT("ChipBreakup"),
+		TEXT("SurfaceProtection"), TEXT("GrimeBreakup"), TEXT("RoughnessVariation") };
 
 	const TCHAR* CommonCode =
 		// Height blending reshapes the stored masks before anything reads them (exactly unchanged at blend 0).
@@ -282,12 +284,14 @@ namespace
 		TEXT("const float4 CS = float4(ChipStrength, DustStrength, RunoffStrength, HandlingStrength);\n")
 		TEXT("const float4 IM = GrungifyContrast(GrungifyHeightMasks(float4(InstR, InstG, InstB, InstA), Height, HeightBlend), Contrast);\n")
 		TEXT("const float4 EM = GrungifyContrast(GrungifyHeightExtended(float4(ExtR, ExtG, ExtB, ExtA), Height, HeightBlend), Contrast);\n")
-		TEXT("const float4 ES = float4(MoistureStrength, SootStrength, ScorchStrength, MossStrength);\n");
+		TEXT("const float4 ES = float4(MoistureStrength, SootStrength, ScorchStrength, MossStrength);\n")
+		// Art direction (chip size/coverage/width/breakup, protected centres, local grime, recess roughness).
+		TEXT("const FGrungifyArt Art = GrungifyMakeArt(FeatureScale, ChipScale, ChipCoverage, ChipWidth, ChipBreakup, SurfaceProtection, GrimeBreakup, RoughnessVariation);\n");
 
 	const TCHAR* EvaluateCode =
 		TEXT("FGrungifyResult R = GrungifyEvaluateFull(BaseColor, Roughness, Metallic, MaskMode, VM, TM, IM, EM, WorldPos, WorldNormal, ")
 		TEXT("SurfaceType, SurfaceOverride, FeatureScale, SeedOffset, DustColor.rgb, RunoffColor.rgb, ChipColor.rgb, Strength, CS, ")
-		TEXT("MossColor.rgb, SootColor.rgb, SaltColor.rgb, ES, CrackStrength);\n");
+		TEXT("MossColor.rgb, SootColor.rgb, SaltColor.rgb, ES, CrackStrength, Art);\n");
 
 	UMaterialExpressionCustom* AddWeatheringCustom(UMaterialFunction* Function, FBuildContext& Ctx, const FWeatheringSources& Sources,
 		const TCHAR* Description, ECustomMaterialOutputType OutputType, const FString& Body, int32 X, int32 Y,
@@ -497,6 +501,14 @@ namespace
 		AddScalar(Function, TEXT("Grungify Mask Texel Size"), 4.f, 4700);
 		S.Add(TEXT("HeightBlend"), AddScalar(Function, TEXT("Grungify Height Blend"), 0.f, 4900));
 		S.Add(TEXT("Contrast"), AddScalar(Function, TEXT("Grungify Contrast"), 1.f, 5100));
+		// Art direction; the defaults reproduce the standard look exactly.
+		S.Add(TEXT("ChipScale"), AddScalar(Function, TEXT("Grungify Chip Scale"), 0.f, 5200));
+		S.Add(TEXT("ChipCoverage"), AddScalar(Function, TEXT("Grungify Chip Coverage"), 0.5f, 5300));
+		S.Add(TEXT("ChipWidth"), AddScalar(Function, TEXT("Grungify Chip Width"), 1.f, 5400));
+		S.Add(TEXT("ChipBreakup"), AddScalar(Function, TEXT("Grungify Chip Breakup"), 0.f, 5500));
+		S.Add(TEXT("SurfaceProtection"), AddScalar(Function, TEXT("Grungify Surface Protection"), 0.f, 5600));
+		S.Add(TEXT("GrimeBreakup"), AddScalar(Function, TEXT("Grungify Grime Breakup"), 0.f, 5700));
+		S.Add(TEXT("RoughnessVariation"), AddScalar(Function, TEXT("Grungify Roughness Variation"), 0.f, 5800));
 	}
 
 	UMaterialExpressionFunctionInput* AddHeightInput(UMaterialFunction* Function, int32 Sort)
@@ -529,7 +541,7 @@ namespace
 			FString(EvaluateCode) + TEXT("return float2(R.Roughness, R.Metallic);"), -600, 500);
 		UMaterialExpressionCustom* NormalNode = AddWeatheringCustom(Function, Ctx, S, TEXT("Grungify Relief Normal"), CMOT_Float3,
 			TEXT("return GrungifyReliefNormalFull(NormalTS, Relief, MaskMode, VM, TM, IM, WorldPos, WorldNormal, ")
-			TEXT("Parameters.TangentToWorld[0], Parameters.TangentToWorld[1], FeatureScale, SeedOffset, Strength, CS);"), -600, 1000);
+			TEXT("Parameters.TangentToWorld[0], Parameters.TangentToWorld[1], FeatureScale, SeedOffset, Strength, CS, Art);"), -600, 1000);
 
 		UMaterialExpressionComponentMask* RoughnessMask = AddToFunction<UMaterialExpressionComponentMask>(Function, -200, 450);
 		SetMask(RoughnessMask, true, false, false, false);
@@ -854,7 +866,7 @@ namespace
 		UMaterialExpressionCustom* Grime = AddWeatheringCustom(Function, Ctx, S, TEXT("Grungify Substrate Grime"), CMOT_Float1,
 			TEXT("FGrungifyGrime G = GrungifyEvaluateGrime(MaskMode, VM, TM, IM, EM, WorldPos, WorldNormal, SurfaceType, SurfaceOverride, ")
 			TEXT("FeatureScale, SeedOffset, DustColor.rgb, RunoffColor.rgb, ChipColor.rgb, StoneChipColor.rgb, Strength, CS, ")
-			TEXT("MossColor.rgb, SootColor.rgb, SaltColor.rgb, ES, CrackStrength);\n")
+			TEXT("MossColor.rgb, SootColor.rgb, SaltColor.rgb, ES, CrackStrength, Art);\n")
 			TEXT("Albedo = G.Albedo;\nF0 = G.F0;\nGrimeRoughness = G.Roughness;\nreturn G.Coverage;"),
 			-600, 0, SubstrateInputNames());
 		// Output 0 is the coverage; 1..3 are the slab parameters.
@@ -874,7 +886,7 @@ namespace
 
 		UMaterialExpressionCustom* NormalNode = AddWeatheringCustom(Function, Ctx, S, TEXT("Grungify Relief Normal"), CMOT_Float3,
 			TEXT("return GrungifyReliefNormalFull(NormalTS, Relief, MaskMode, VM, TM, IM, WorldPos, WorldNormal, ")
-			TEXT("Parameters.TangentToWorld[0], Parameters.TangentToWorld[1], FeatureScale, SeedOffset, Strength, CS);"), -600, 1000,
+			TEXT("Parameters.TangentToWorld[0], Parameters.TangentToWorld[1], FeatureScale, SeedOffset, Strength, CS, Art);"), -600, 1000,
 			SubstrateInputNames());
 
 		UMaterialExpressionSubstrateSlabBSDF* Slab = AddToFunction<UMaterialExpressionSubstrateSlabBSDF>(Function, -200, 200);
@@ -1019,7 +1031,7 @@ namespace
 		Names.Add(TEXT("DisplacementDepth"));
 		UMaterialExpressionCustom* Node = AddWeatheringCustom(Function, Ctx, S, TEXT("Grungify Displacement"), CMOT_Float1,
 			TEXT("return Displacement + GrungifyDisplacementOffset(MaskMode, VM, TM, IM, WorldPos, WorldNormal, SurfaceType, SurfaceOverride, ")
-			TEXT("FeatureScale, SeedOffset, Strength, CS, CrackStrength, DisplacementDepth);"), -600, 0, Names);
+			TEXT("FeatureScale, SeedOffset, Strength, CS, CrackStrength, DisplacementDepth, Art);"), -600, 0, Names);
 
 		UMaterialExpressionFunctionOutput* Output = AddToFunction<UMaterialExpressionFunctionOutput>(Function, 200, 0);
 		Output->OutputName = TEXT("Displacement");

@@ -126,6 +126,47 @@ namespace
 			},
 			FLinearColor(0.36f, 0.22f, 0.16f), FLinearColor(0.20f, 0.20f, 0.19f), 0.6f, FLinearColor(0.40f, 0.38f, 0.34f) });
 
+		Result.Add({ TEXT("DryCoatedCeramic"),
+			TEXT("Dry glazed or coated surfaces (coffers, panels, ceramic trim): fine broken chips on a narrow worn edge, intact faces, restrained local grime. ")
+			TEXT("A starting point, not an approved look: tune Chip Scale, Coverage, Width and Breakup on the real asset."),
+			[](UGrungifyPreset& P)
+			{
+				P.Intensity = 1.f;
+				P.FeatureScaleCm = 6.f;
+				P.DustIntensity = 0.45f;
+				P.LedgeDust = 0.35f;
+				P.CreviceDust = 0.4f;
+				P.FloorDust = 0.2f;
+				P.RunoffIntensity = 0.25f;
+				P.AmbientStreaks = 0.05f;
+				P.HandlingIntensity = 0.45f;
+				P.ChipIntensity = 1.f;
+				P.EdgeWearWidthCm = 4.f;
+				P.Palette.bOverrideChipStrength = true;
+				P.Palette.ChipStrength = 0.75f;
+				P.Palette.bOverrideDustStrength = true;
+				P.Palette.DustStrength = 0.45f;
+				P.Palette.bOverrideHandlingStrength = true;
+				P.Palette.HandlingStrength = 0.45f;
+				P.Palette.bOverrideContrast = true;
+				P.Palette.Contrast = 1.1f;
+				P.Palette.bOverrideChipScaleCm = true;
+				P.Palette.ChipScaleCm = 1.5f;
+				P.Palette.bOverrideChipCoverage = true;
+				P.Palette.ChipCoverage = 0.35f;
+				P.Palette.bOverrideChipWidth = true;
+				P.Palette.ChipWidth = 0.4f;
+				P.Palette.bOverrideChipBreakup = true;
+				P.Palette.ChipBreakup = 0.7f;
+				P.Palette.bOverrideSurfaceProtection = true;
+				P.Palette.SurfaceProtection = 0.25f;
+				P.Palette.bOverrideGrimeBreakup = true;
+				P.Palette.GrimeBreakup = 0.6f;
+				P.Palette.bOverrideRoughnessVariation = true;
+				P.Palette.RoughnessVariation = 0.2f;
+			},
+			FLinearColor(0.72f, 0.70f, 0.66f), FLinearColor(0.30f, 0.30f, 0.31f), 0.9f, FLinearColor(0.78f, 0.75f, 0.68f) });
+
 		return Result;
 	}
 
