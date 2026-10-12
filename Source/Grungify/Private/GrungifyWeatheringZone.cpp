@@ -19,6 +19,7 @@
 #include "GrungifyWearStamp.h"
 #include "ImageUtils.h"
 #include "GrungifyCompat.h"
+#include "GrungifyBakeRecord.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "UObject/GarbageCollection.h"
 #include "WorldPartition/DataLayer/DataLayerAsset.h"
@@ -2544,6 +2545,29 @@ bool AGrungifyWeatheringZone::WriteBakedAssets(const FGrungifyComponentResult& R
 			Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Use UV0")), 1.f);
 			Instance->PostEditChange();
 		}
+
+		// Portable: on a component without Grungify's custom data the instance supplies its own mode, scale, seed and
+		// surface (the material uses them only when the component has no mask mode).
+		Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Baked Mode")), Grungify::MaskModeTexture);
+		Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Baked Feature Scale")), FeatureScaleCm);
+		Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Baked Seed Offset")),
+			float((uint32(Seed) * 2654435761u) % 100000u) * 0.01f);
+		Instance->SetScalarParameterValueEditorOnly(FMaterialParameterInfo(TEXT("Grungify Baked Surface Type")), float(int32(Result.DominantSurface) - 1));
+		Instance->PostEditChange();
+
+		// What it was baked for, so reuse on another component can be checked rather than guessed.
+		Instance->RemoveUserDataOfClass(UGrungifyBakeRecord::StaticClass());
+		UGrungifyBakeRecord* Record = NewObject<UGrungifyBakeRecord>(Instance, NAME_None, RF_Transactional);
+		Record->SourceMesh = FSoftObjectPath(Grungify::MeshAssetOf(Component));
+		Record->SourceMeshBuild = int64(Grungify::MeshBuildHash(Component));
+		Record->UVChannel = Result.MaskUVChannelUsed != INDEX_NONE ? Result.MaskUVChannelUsed : UGrungifySettings::Get()->MaskUVChannel;
+		Record->TextureSize = Result.TextureSize;
+		Record->Slot = Slot;
+		Record->SourceComponent = Component->GetPathName();
+		Record->Zone = GetActorNameOrLabel();
+		Record->Seed = Seed;
+		Record->BakedAt = FDateTime::UtcNow().ToIso8601();
+		Instance->AddAssetUserData(Record);
 		Instance->MarkPackageDirty();
 		Component->SetMaterial(Slot, Instance);
 	}

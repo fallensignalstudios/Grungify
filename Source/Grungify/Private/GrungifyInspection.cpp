@@ -10,7 +10,11 @@
 #include "Engine/Texture.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "GrungifyBakeRecord.h"
 #include "GrungifySettings.h"
+#if WITH_EDITOR
+#include "GrungifyGenerator.h"
+#endif
 #include "GrungifyTypes.h"
 #include "GrungifyWeatheringZone.h"
 #include "Materials/MaterialInstance.h"
@@ -57,7 +61,14 @@ namespace
 		{
 			Out.Parent = PathOf(Instance->Parent);
 			Out.bOwnedInstance = Instance->GetOuter() == Component;
-			Out.bBakedInstance = !Out.bOwnedInstance && Instance->GetName().StartsWith(TEXT("MI_Grungify_")) && Instance->IsAsset();
+			Out.bBakedInstance = !Out.bOwnedInstance && Instance->IsAsset()
+				&& (Instance->GetAssetUserDataOfClass(UGrungifyBakeRecord::StaticClass()) || Instance->GetName().StartsWith(TEXT("MI_Grungify_")));
+			if (Out.bBakedInstance)
+			{
+				FString Reason;
+				UGrungifyInspectionLibrary::CheckBakeCompatibility(Material, Component, Reason);
+				Out.BakeCompatibility = Reason;
+			}
 		}
 
 		float Value = 0.f;
@@ -240,4 +251,43 @@ UObject* UGrungifyInspectionLibrary::ResolveGrungifyObject(const FString& Object
 	}
 	// ResolveObject only finds objects already in memory, so inspection never triggers a load.
 	return FSoftObjectPath(ObjectPath).ResolveObject();
+}
+
+bool UGrungifyInspectionLibrary::CheckBakeCompatibility(UMaterialInterface* BakedMaterial, UMeshComponent* Component, FString& OutReason)
+{
+#if WITH_EDITOR
+	if (!BakedMaterial || !IsValid(Component))
+	{
+		OutReason = TEXT("unknown: no material or component");
+		return false;
+	}
+	const UGrungifyBakeRecord* Record = Cast<UGrungifyBakeRecord>(BakedMaterial->GetAssetUserDataOfClass(UGrungifyBakeRecord::StaticClass()));
+	if (!Record)
+	{
+		OutReason = TEXT("unknown: baked before 0.7, so it has no bake record (re-bake to make it checkable)");
+		return false;
+	}
+	const UObject* Mesh = Grungify::MeshAssetOf(Component);
+	if (!Mesh || FSoftObjectPath(Mesh) != Record->SourceMesh)
+	{
+		OutReason = FString::Printf(TEXT("incompatible: baked for %s, the component draws %s; the masks would land in another mesh's UV layout"),
+			*Record->SourceMesh.ToString(), Mesh ? *Mesh->GetPathName() : TEXT("nothing"));
+		return false;
+	}
+	if (Record->SourceMeshBuild != 0 && int64(Grungify::MeshBuildHash(Component)) != Record->SourceMeshBuild)
+	{
+		OutReason = TEXT("incompatible: the mesh was rebuilt since the bake, so its UVs may have changed; re-bake");
+		return false;
+	}
+	if (Grungify::NumUVChannelsOf(Component) <= Record->UVChannel)
+	{
+		OutReason = FString::Printf(TEXT("incompatible: the masks are in UV%d, which the mesh doesn't have"), Record->UVChannel);
+		return false;
+	}
+	OutReason = TEXT("compatible");
+	return true;
+#else
+	OutReason = TEXT("unknown: compatibility is checked in the editor only");
+	return false;
+#endif
 }

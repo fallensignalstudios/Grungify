@@ -275,9 +275,13 @@ namespace
 		TEXT("Height"), TEXT("HeightBlend"), TEXT("Contrast"),
 		TEXT("ChipScale"), TEXT("ChipCoverage"), TEXT("ChipWidth"), TEXT("ChipBreakup"),
 		TEXT("SurfaceProtection"), TEXT("GrimeBreakup"), TEXT("RoughnessVariation"),
-		TEXT("MaskUV"), TEXT("ClampToRect") };
+		TEXT("MaskUV"), TEXT("ClampToRect"),
+		TEXT("BakedMaskMode"), TEXT("BakedFeatureScale"), TEXT("BakedSeedOffset"), TEXT("BakedSurfaceType") };
 
 	const TCHAR* CommonCode =
+		// Portable bakes: a baked instance on a component without Grungify's custom data supplies its own mode, scale,
+		// seed and surface. Still gated by Grungify Active, and never used when the component has a mask mode.
+		TEXT("if (MaskMode == 0.0 && BakedMaskMode != 0.0) { MaskMode = BakedMaskMode; FeatureScale = BakedFeatureScale; SeedOffset = BakedSeedOffset; SurfaceType = BakedSurfaceType; }\n")
 		// Landscape masks are projected over the zone's rectangle: outside it, clamped border texels must not extend wear.
 		TEXT("const float Inside = GrungifyInsideRect(MaskUV, ClampToRect);\n")
 		// Height blending reshapes the stored masks before anything reads them (exactly unchanged at blend 0).
@@ -455,6 +459,15 @@ namespace
 		Ctx.Connect(Mode, TEXT(""), OwnedMode, TEXT("A"));
 		Ctx.Connect(Active, TEXT(""), OwnedMode, TEXT("B"));
 		S.Add(TEXT("MaskMode"), OwnedMode);
+		// Fallbacks only a baked instance sets (all 0 otherwise), gated by Active like the mode itself.
+		UMaterialExpressionScalarParameter* BakedMode = AddScalar(Function, TEXT("Grungify Baked Mode"), 0.f, 1250);
+		UMaterialExpressionMultiply* OwnedBakedMode = AddToFunction<UMaterialExpressionMultiply>(Function, -1050, 1250);
+		Ctx.Connect(BakedMode, TEXT(""), OwnedBakedMode, TEXT("A"));
+		Ctx.Connect(Active, TEXT(""), OwnedBakedMode, TEXT("B"));
+		S.Add(TEXT("BakedMaskMode"), OwnedBakedMode);
+		S.Add(TEXT("BakedFeatureScale"), AddScalar(Function, TEXT("Grungify Baked Feature Scale"), 0.f, 1260));
+		S.Add(TEXT("BakedSeedOffset"), AddScalar(Function, TEXT("Grungify Baked Seed Offset"), 0.f, 1270));
+		S.Add(TEXT("BakedSurfaceType"), AddScalar(Function, TEXT("Grungify Baked Surface Type"), 0.f, 1280));
 		S.Add(TEXT("SurfaceType"), ModeParameter(TEXT("Grungify Surface Type"), Grungify::CPD_SurfaceType, 0.f, 1300));
 		S.Add(TEXT("FeatureScale"), ModeParameter(TEXT("Grungify Feature Scale"), Grungify::CPD_FeatureScale, 25.f, 1400));
 		S.Add(TEXT("SeedOffset"), ModeParameter(TEXT("Grungify Seed Offset"), Grungify::CPD_SeedOffset, 0.f, 1500));
@@ -745,6 +758,15 @@ namespace
 						Report.Errors.Add(FString::Printf(TEXT("%s: %s has an unconnected custom input %s"), Asset, *Custom->Description, *Input.InputName.ToString()));
 					}
 					if (Input.InputName == TEXT("MaskMode")) { bHasOwnedMode = Gate && Input.Input.Expression == Gate; }
+					// The portable-bake fallback mode must be gated by the same Active parameter.
+					if (Input.InputName == TEXT("BakedMaskMode"))
+					{
+						const UMaterialExpressionMultiply* BakedGate = Cast<UMaterialExpressionMultiply>(Input.Input.Expression);
+						if (!BakedGate || BakedGate->B.Expression != Active)
+						{
+							Report.Errors.Add(FString::Printf(TEXT("%s: %s reads the baked mode without the Active gate"), Asset, *Custom->Description));
+						}
+					}
 				}
 				if (!bHasOwnedMode || !Custom->IncludeFilePaths.Contains(IncludePath))
 				{

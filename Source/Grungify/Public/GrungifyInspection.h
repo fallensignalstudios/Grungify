@@ -7,6 +7,7 @@
 #include "GrungifyInspection.generated.h"
 
 class AGrungifyWeatheringZone;
+class UMaterialInterface;
 class UMeshComponent;
 
 /** One material slot of an inspected component. */
@@ -35,6 +36,10 @@ struct GRUNGIFY_API FGrungifySlotInspection
 	/** The material is a standalone baked instance (Bake To Assets). */
 	UPROPERTY(BlueprintReadOnly, Category = "Grungify")
 	bool bBakedInstance = false;
+
+	/** Baked instances only: "compatible", or why its masks don't fit this component (see CheckBakeCompatibility). */
+	UPROPERTY(BlueprintReadOnly, Category = "Grungify")
+	FString BakeCompatibility;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Grungify")
 	FString Parent;
@@ -189,4 +194,12 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Grungify|Inspection")
 	static UObject* ResolveGrungifyObject(const FString& ObjectPath);
+
+	/**
+	 * Whether a baked material instance (Bake To Assets) fits a component. A bake is portable to any component that
+	 * draws the same mesh build (same UV layout), with or without Grungify's custom data. It is not portable to another
+	 * mesh, or to the same mesh after a rebuild that changed its UVs: re-bake for those. Editor only.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Grungify|Inspection")
+	static bool CheckBakeCompatibility(UMaterialInterface* BakedMaterial, UMeshComponent* Component, FString& OutReason);
 };
